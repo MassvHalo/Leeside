@@ -1,0 +1,9 @@
+/var/log/leeside/events.ndjson {
+    daily
+    rotate 14
+    copytruncate
+    compress
+    delaycompress
+    missingok
+    notifempty
+}

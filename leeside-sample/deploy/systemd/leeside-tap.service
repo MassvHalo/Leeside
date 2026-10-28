@@ -1,0 +1,18 @@
+[Unit]
+Description=Leeside event tap (stand-in for leesided)
+After=php8.5-fpm.service network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/leeside/leeside-sample
+ExecStart=/usr/bin/php artisan leeside:tap --raw
+StandardOutput=append:/var/log/leeside/events.ndjson
+StandardError=journal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -59,7 +59,7 @@ bin/traffic.sh
 | Route name | Verb and URI | Behaviour |
 | --- | --- | --- |
 | `home` | GET / | the welcome view |
-| `portal.login` | POST /portal/login | validates `phone` digits:10 and `otp` digits:6; OTP `123456` logs in, anything else 401s |
+| `portal.login` | POST /portal/login | validates `phone` digits:10 and `otp` digits:6; malformed input 422s, OTP `123456` logs in, any other OTP 401s |
 | `venues.show` | GET /venues/{venue} | route-model binding; 404 for unknown ids |
 | `api.venues.index` | GET /api/venues | JSON list of venues |
 | `api.venues.visit` | POST /api/venues/{venue}/visit | validates `guests` integer |
@@ -89,3 +89,17 @@ They gate the production rollout.
    kill $TAP
    grep -E -o '066[0-9]+|00000[0-9]|12345|999999|leeside-traffic|Alpine Lodge|Harbor Inn|Desert Rose|City Central|Lakeside Retreat|Old Town Hostel|/venues/[0-9]+' /tmp/events.ndjson | sort | uniq -c
    ```
+
+## Deploy
+
+Production is `https://webapp.leeside.halowifi.com`, a separate checkout at
+`/var/www/leeside` served by nginx + PHP-FPM; this working copy is never
+served. Spec: `../docs/brief.md`, "Deploy" section.
+
+```bash
+sudo bash leeside-sample/deploy/install.sh   # once: packages, checkout, nginx, cert, tap service; ends in deploy.sh
+sudo bash leeside-sample/deploy/deploy.sh    # every release: pull, composer, migrate, optimize
+```
+
+Both scripts are idempotent and run by me with sudo, never by the agent.
+`install.sh` is the only thing that touches `/etc`.
