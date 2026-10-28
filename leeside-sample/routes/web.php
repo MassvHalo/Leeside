@@ -8,7 +8,7 @@ use Illuminate\Auth\Events\Failed;
 use Illuminate\Support\Str;
 use App\Models\User;
 
-Route::get('/', fn () => view('welcome'))->name('home');
+Route::get('/', fn () => view('welcome', ['venues' => Venue::all()]))->name('home');
 
 Route::post('/portal/login', function (Request $request) {
     $data = $request->validate(['phone' => 'required|digits:10', 'otp' => 'required|digits:6']);
