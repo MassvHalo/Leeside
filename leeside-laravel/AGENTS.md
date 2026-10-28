@@ -4,7 +4,7 @@ Composer package: Leeside's capture layer for Laravel. One global middleware
 (CaptureTurn) emits a PII-free turn event per request to leesided over a Unix
 datagram socket in terminate(); one route-group middleware (GateTurn) asks
 leesided over a Unix stream socket whether a deterministic rule matches, and
-acts only when the verdict says enforce. Read docs/brief.md first.
+acts only when the verdict says enforce. Read ../docs/brief.md first.
 
 ## Non-negotiables
 - Nothing identifying leaves the app unhashed, nothing valued leaves it

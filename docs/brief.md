@@ -3,11 +3,31 @@
 As of 2026-10-29. This file is the contract: the event schema and the check
 protocol here are what leesided (the Rust engine) is built against.
 
+## Repo layout
+
+One repo, `Leeside/`, with a directory per component and this file as the
+shared contract:
+
+```
+Leeside/
+  AGENTS.md            shared rules; each directory below has its own
+  docs/brief.md        this file
+  docs/architecture.md the solution architecture
+  leeside-laravel/     Composer package leeside/laravel
+  leeside-sample/      Laravel app using the package; deploy/ lives here
+  leesided/            the Rust engine
+```
+
+Muse Code sessions start inside the directory being worked on
+(`cd leeside-sample && muse`), so that directory's AGENTS.md loads on top of
+the root one and the sandbox confines writes to it. Paths in this file are
+relative to the repo root.
+
 ## What to build
 
-Two repos, both PHP, both buildable before leesided exists.
+Two directories, both PHP, both buildable before leesided exists.
 
-| Repo | What it is | Why it comes first |
+| Directory | What it is | Why it comes first |
 | --- | --- | --- |
 | `leeside-laravel` | Composer package `leeside/laravel`: the capture layer. One global middleware that emits a PII-free turn event per request, one route-group middleware that asks leesided for a rule match, a shape reducer, hashing, transports, and a `leeside:tap` dev command that stands in for leesided. | It defines the event schema leesided ingests and the check protocol leesided serves. Freezing both here means the Rust side has a contract to build against. |
 | `leeside-sample` | A stock Laravel app with the package installed through a path repository and a handful of portal-shaped routes (login with OTP validation, venues with model binding, a JSON API, a 403, a 404, a 500) plus a traffic script. | Produces real session-shaped events on a laptop tonight, and is the harness for the overhead measurement and the PII diff before anything touches a production app. |
@@ -277,12 +297,84 @@ They gate the production rollout:
    every phone number, OTP, venue id and user agent string the script sent.
    Expect zero hits.
 
+## Deploy: webapp.leeside.halowifi.com
+
+The sample app runs at `https://webapp.leeside.halowifi.com` behind nginx and
+PHP 8.3 FPM on the box the DNS record already points to, with a Let's Encrypt
+certificate that renews itself. Ubuntu 24.04 assumed; adjust package names
+otherwise. Keep the Cloudflare record DNS-only (grey cloud): nginx then sees
+real client IPs, which `peer_key` depends on, and the HTTP-01 challenge is
+plain.
+
+### On the box
+
+The box is the same EC2 instance Muse Code works on. The working copy in
+`~/meta-hackathon/Leeside` is never served: nginx serves a separate
+production checkout at `/var/www/leeside`, cloned from the working copy and
+owned by `www-data`. That keeps the app's user away from the `ubuntu` home
+directory, its SSH keys and any AWS credentials, which matters on a host that
+will be attacked on purpose. Only committed work reaches production, since
+the production checkout pulls from the working copy's commits.
+
+| Item | Value |
+| --- | --- |
+| Working copy | `/home/ubuntu/meta-hackathon/Leeside`, where Muse Code runs; never served |
+| Production checkout | `/var/www/leeside`, `git clone /home/ubuntu/meta-hackathon/Leeside /var/www/leeside`, owned by `www-data`; `leeside-laravel` and `leeside-sample` sit side by side inside it so the path repository keeps working |
+| Web root | `/var/www/leeside/leeside-sample/public`, the only directory nginx serves |
+| AWS | ports 80 and 443 open in the instance's security group; ufw alone is not enough |
+| PHP-FPM | `unix:/run/php/php8.3-fpm.sock`, runs as `www-data` |
+| Sockets | `/run/leeside/events.sock`, `/run/leeside/check.sock` in a `0770 www-data:www-data` directory created by systemd-tmpfiles on every boot |
+| Event log | `/var/log/leeside/events.ndjson`, written by the tap service until leesided takes the sockets |
+| Certificate | certbot with the nginx plugin, HTTP-01, renewed by `certbot.timer` |
+
+### Files under deploy/ in leeside-sample
+
+Nothing is hand-typed on the server. Both scripts are run with sudo from
+the working copy (`sudo bash leeside-sample/deploy/install.sh`), never by
+the agent, whose sandbox cannot write `/etc` or `/var/www` anyway.
+
+| File | Contents |
+| --- | --- |
+| `deploy/install.sh` | Idempotent root script, `set -euo pipefail`: apt nginx, php8.3-fpm and the sqlite3, mbstring, xml, curl, zip, intl, bcmath extensions, certbot, python3-certbot-nginx, git, unzip, ufw; Composer if missing; the production checkout cloned from the working copy if `/var/www/leeside` is absent, with `safe.directory` set for root; tmpfiles entry `d /run/leeside 0770 www-data www-data -` applied with `systemd-tmpfiles --create`; `/var/log/leeside` owned by www-data; `ufw allow OpenSSH`, `ufw allow 'Nginx Full'`, enable; nginx site linked into sites-enabled, default site removed, `nginx -t`, reload; certbot run (below) plus a renewal deploy hook that reloads nginx; logrotate file installed; tap service enabled and started; finally calls deploy.sh |
+| `deploy/deploy.sh` | Root script, never touches `/etc`: `git -C /var/www/leeside pull` from the working copy, `chown -R www-data:www-data /var/www/leeside`, then as www-data (`sudo -u www-data`) in `leeside-sample`: `composer install --no-dev --optimize-autoloader`, copy `.env.production.example` to `.env` only if `.env` is absent (then `php artisan key:generate`), `php artisan migrate --force` (`--seed` on first run), `php artisan optimize:clear` then `php artisan optimize`; storage and bootstrap/cache writable |
+| `deploy/nginx/webapp.leeside.halowifi.com.conf` | Port 80 block only; certbot adds 443 and the redirect. `root .../public`, `index index.php`, `try_files $uri $uri/ /index.php?$query_string`, PHP via the FPM socket with `fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name` and `include fastcgi_params`, `fastcgi_hide_header X-Powered-By`, `client_max_body_size 10m`, headers `X-Frame-Options SAMEORIGIN`, `X-Content-Type-Options nosniff`, `Referrer-Policy strict-origin-when-cross-origin`, `location ~ /\.(?!well-known) { deny all; }`, own access and error logs |
+| `deploy/systemd/leeside-tap.service` | `php artisan leeside:tap --raw` as www-data from the sample dir, stdout appended to `/var/log/leeside/events.ndjson`, `Restart=always`, `After=php8.3-fpm.service`; disabled the day leesided listens on the same paths |
+| `deploy/logrotate/leeside` | daily, 14 rotations, copytruncate |
+| `deploy/.env.production.example` | `APP_ENV=production`, `APP_DEBUG=false`, `APP_URL=https://webapp.leeside.halowifi.com`, `LOG_LEVEL=warning`, `SESSION_SECURE_COOKIE=true`, SQLite at the sample's `database/database.sqlite`, `LEESIDE_EVENTS_SOCKET=/run/leeside/events.sock`, `LEESIDE_CHECK_SOCKET=/run/leeside/check.sock`, `LEESIDE_HASH_KEY=` (generate 32 random bytes), `LEESIDE_SAMPLE_RATE=1.0` |
+
+### Certificate
+
+One command, idempotent, run by install.sh after the port 80 site is live:
+
+```bash
+certbot --nginx -d webapp.leeside.halowifi.com --redirect --agree-tos --no-eff-email -m mrinal@halowifi.com -n
+certbot renew --dry-run
+```
+
+If it fails it is one of three things: the A record not resolving from
+outside yet (`dig +short webapp.leeside.halowifi.com @1.1.1.1`), port 80
+closed at a cloud security group rather than ufw, or the record still
+proxied through Cloudflare.
+
+### Deploy done-tests
+
+- `https://webapp.leeside.halowifi.com` loads with a valid chain; `http://`
+  answers 301.
+- `nginx -t` passes and the 443 block certbot wrote still carries the headers
+  and the dotfile deny.
+- `POST /portal/login` with a bad OTP returns 422 JSON.
+- `/var/log/leeside/events.ndjson` grows with every request and a grep for
+  the values sent is empty.
+- `systemctl status leeside-tap` is active; a reboot brings back
+  `/run/leeside` and the tap.
+
 ## Done when
 
 - `composer test` is green in the package.
 - The tap shows events from all three acts of the traffic script.
 - The PII grep is empty.
 - The added latency is under 1 ms.
+- `https://webapp.leeside.halowifi.com` answers over a valid certificate and
+  its events land in `/var/log/leeside/events.ndjson`.
 - The event JSON and the check protocol in this file are unchanged, or the
   change is written here first, so the Rust session starts from the same file.
-
