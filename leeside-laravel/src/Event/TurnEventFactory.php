@@ -1,0 +1,229 @@
+<?php
+
+namespace Leeside\Laravel\Event;
+
+use BackedEnum;
+use Illuminate\Contracts\Auth\Factory as AuthFactory;
+use Illuminate\Contracts\Routing\UrlRoutable;
+use Illuminate\Http\Request;
+use Leeside\Laravel\Hash\Hasher;
+use Leeside\Laravel\Reduce\ShapeReducer;
+use Leeside\Laravel\Stats;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
+use UnitEnum;
+
+class TurnEventFactory
+{
+    private readonly float $sampleRate;
+    /** @var string[] */
+    private readonly array $guards;
+    private readonly int $maxResponseBytes;
+
+    /**
+     * @param  array{sample_rate?: float, guards?: string[], max_response_bytes?: int}  $options
+     */
+    public function __construct(
+        private readonly Hasher $hasher,
+        private readonly ShapeReducer $reducer,
+        private readonly AuthFactory $auth,
+        private readonly Stats $stats,
+        array $options = [],
+    ) {
+        $this->sampleRate = $options['sample_rate'] ?? 1.0;
+        $this->guards = $options['guards'] ?? ['web'];
+        $this->maxResponseBytes = $options['max_response_bytes'] ?? 65536;
+    }
+
+    /** The sync-check probe. Never sampled. */
+    public function probe(Request $request, TurnContext $context): array
+    {
+        $userAgent = (string) $request->userAgent();
+        $peerKey = $this->hasher->peerKey($request->ip() ?? 'unknown', $userAgent);
+
+        $sessionId = $this->sessionId($request);
+
+        return [
+            'v' => 1,
+            'ts' => $context->ts ?? microtime(true),
+            'verb' => $request->getMethod(),
+            'route' => $context->route ?? RouteName::fromRoute($request->route()),
+            'session_key' => $sessionId === null ? $peerKey : $this->hasher->sessionKey($sessionId),
+            'peer_key' => $peerKey,
+            'principal' => $this->principal(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>|null Null when the session is sampled out.
+     */
+    public function build(Request $request, Response $response, TurnContext $context): ?array
+    {
+        $probe = $this->probe($request, $context);
+
+        if (! Hasher::sampled($probe['session_key'], $this->sampleRate)) {
+            return null;
+        }
+
+        return [
+            'v' => $probe['v'],
+            'ts' => $probe['ts'],
+            'session_key' => $probe['session_key'],
+            'peer_key' => $probe['peer_key'],
+            'principal' => $probe['principal'],
+            'verb' => $probe['verb'],
+            'route' => $probe['route'],
+            'status' => $response->getStatusCode(),
+            'latency_ms' => round($context->latencyMs(), 1),
+            'bytes_in' => (int) $request->headers->get('Content-Length', 0),
+            'bytes_out' => $this->bytesOut($response),
+            'req_shape' => $this->reducer->reduce($request->all()),
+            'resp_shape' => $this->responseShape($response),
+            'bound' => $this->bound($request),
+            'validation_failed' => $context->validationFailed,
+            'exception' => $context->exception,
+            'auth_event' => $context->authEvent,
+            'gate' => $context->gate,
+            'ua_hash' => $this->hasher->uaHash((string) $request->userAgent()),
+            'dropped_since_last' => $this->stats->pending(),
+        ];
+    }
+
+    private function sessionId(Request $request): ?string
+    {
+        try {
+            if (! $request->hasSession()) {
+                return null;
+            }
+
+            // No isStarted() check: StartSession saves (and unstarts) the
+            // session on the way out, so it is always unstarted in terminate().
+            $id = $request->getSession()->getId();
+
+            return $id !== '' ? $id : null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function principal(): string
+    {
+        foreach ($this->guards as $guard) {
+            try {
+                $resolved = $this->auth->guard($guard);
+            } catch (Throwable) {
+                continue;
+            }
+
+            if (! is_object($resolved) || ! method_exists($resolved, 'hasUser')) {
+                continue;
+            }
+
+            try {
+                if (! $resolved->hasUser()) {
+                    continue;
+                }
+
+                $user = $resolved->user();
+            } catch (Throwable) {
+                continue;
+            }
+
+            if ($user === null) {
+                continue;
+            }
+
+            return $this->hasher->principal((string) $user->getAuthIdentifier());
+        }
+
+        return 'anon';
+    }
+
+    private function bytesOut(Response $response): int
+    {
+        if ($response instanceof StreamedResponse) {
+            return -1;
+        }
+
+        $content = $response->getContent();
+        if ($content === false) {
+            $length = $response->headers->get('Content-Length');
+
+            return $length !== null ? (int) $length : -1;
+        }
+
+        return strlen($content);
+    }
+
+    private function responseShape(Response $response): string
+    {
+        if ($response instanceof StreamedResponse) {
+            return 'stream';
+        }
+
+        if ($response instanceof BinaryFileResponse) {
+            return 'file';
+        }
+
+        if ($response instanceof RedirectResponse) {
+            return 'redirect';
+        }
+
+        if ($response->isRedirection() && $response->headers->has('Location')) {
+            return 'redirect';
+        }
+
+        $content = $response->getContent();
+        if ($content === false || $content === '') {
+            return 'empty';
+        }
+
+        $type = strtolower(trim(explode(';', (string) $response->headers->get('Content-Type', ''))[0]));
+
+        if ($response instanceof JsonResponse || str_ends_with($type, 'json') || str_contains($type, '+json')) {
+            if (strlen($content) <= $this->maxResponseBytes) {
+                $decoded = json_decode($content, true);
+                if (json_last_error() === JSON_ERROR_NONE) {
+                    return $this->reducer->reduce($decoded);
+                }
+            }
+
+            return $type !== '' ? $type : 'application/json';
+        }
+
+        return match ($type) {
+            '', 'text/html' => 'html',
+            'text/plain' => 'text',
+            default => $type,
+        };
+    }
+
+    /** @return array<int, array<string, string>> */
+    private function bound(Request $request): array
+    {
+        $route = $request->route();
+        if ($route === null) {
+            return [];
+        }
+
+        $bound = [];
+        foreach ($route->parameters() as $name => $value) {
+            if ($value instanceof UrlRoutable) {
+                $bound[] = ['model' => class_basename($value), 'id_hash' => $this->hasher->idHash((string) $value->getRouteKey())];
+            } elseif ($value instanceof UnitEnum) {
+                $key = $value instanceof BackedEnum ? (string) $value->value : $value->name;
+                $bound[] = ['model' => class_basename($value), 'id_hash' => $this->hasher->idHash($key)];
+            } elseif (is_object($value)) {
+                $bound[] = ['model' => class_basename($value), 'id_hash' => $this->hasher->idHash((string) spl_object_id($value))];
+            } else {
+                $bound[] = ['param' => (string) $name, 'id_hash' => $this->hasher->idHash((string) $value)];
+            }
+        }
+
+        return $bound;
+    }
+}

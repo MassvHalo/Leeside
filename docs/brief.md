@@ -1,0 +1,288 @@
+# leeside/laravel build brief
+
+As of 2026-10-29. This file is the contract: the event schema and the check
+protocol here are what leesided (the Rust engine) is built against.
+
+## What to build
+
+Two repos, both PHP, both buildable before leesided exists.
+
+| Repo | What it is | Why it comes first |
+| --- | --- | --- |
+| `leeside-laravel` | Composer package `leeside/laravel`: the capture layer. One global middleware that emits a PII-free turn event per request, one route-group middleware that asks leesided for a rule match, a shape reducer, hashing, transports, and a `leeside:tap` dev command that stands in for leesided. | It defines the event schema leesided ingests and the check protocol leesided serves. Freezing both here means the Rust side has a contract to build against. |
+| `leeside-sample` | A stock Laravel app with the package installed through a path repository and a handful of portal-shaped routes (login with OTP validation, venues with model binding, a JSON API, a 403, a 404, a 500) plus a traffic script. | Produces real session-shaped events on a laptop tonight, and is the harness for the overhead measurement and the PII diff before anything touches a production app. |
+
+No production application is touched in this phase. The package is the only
+thing that will ever be installed there, so it must carry no app-specific
+assumptions.
+
+## Package spec: leeside/laravel
+
+Namespace `Leeside\Laravel`, PHP 8.2+, `illuminate/*` ^11|^12|^13 (current
+Laravel is 13.x), auto-discovered service provider, publishable
+`config/leeside.php`. Zero runtime dependencies beyond Illuminate.
+
+### Two middlewares, not one
+
+Laravel runs global middleware before routing, so a single global middleware
+can neither see the route template in `handle()` nor the session. Split the job:
+
+| Middleware | Registered | handle() | terminate() |
+| --- | --- | --- | --- |
+| `CaptureTurn` | Global, appended (catches 404s and unrouted turns) | Stamps `ts` and `hrtime` on a per-request `TurnContext`. Nothing else. | After the response has gone out: build the event, hand it to the transport. Never throws. |
+| `GateTurn` | Appended to the `web` and `api` groups; added to middleware priority after `SubstituteBindings` so it runs after auth and binding | Sets `route` on the context, builds the probe, calls `RuleClient::check()` within the timeout, applies the verdict only when `mode == enforce`. | none |
+
+`TurnContext` is a scoped container binding (Octane-safe), reset by `begin()`
+on every request.
+
+The service provider also registers:
+
+- A `renderable` callback on the exception handler, typed `Throwable`, that
+  returns null and records the exception on the context. This is the only hook
+  that sees `ValidationException`, `ModelNotFoundException`,
+  `AuthorizationException` and `TokenMismatchException`; Laravel never reports
+  those, so `reportable` callbacks never see them. Laravel wraps the last three
+  in Symfony HTTP exceptions before rendering; record the class basename of the
+  original cause (unwrap one level of `getPrevious()` on an HTTP exception).
+- Listeners for `Login`, `Failed`, `Logout`, `Registered`, `PasswordReset`,
+  `Lockout`, `Verified` that record only the event name (last one wins).
+- A `RouteMatched` listener that records the route template, for routes
+  outside the gated groups.
+- Middleware registration: the global middleware through the HTTP kernel's
+  `pushMiddleware()` when the kernel is already resolved and through
+  `afterResolving()` otherwise, so console processes never resolve the kernel.
+  The gate goes into the groups with `Router::pushMiddlewareToGroup()` and into
+  the priority list with `addToMiddlewarePriorityAfter()` when that method
+  exists. `register_middleware = false` turns all of this off for apps that
+  wire it in `bootstrap/app.php` themselves.
+
+### The event, one per request, schema v1
+
+| Field | Example | Rule |
+| --- | --- | --- |
+| `v`, `ts` | 1, 1761600000.123 | schema version; wall clock at handle() |
+| `session_key` | 16 hex | HMAC of the session id; falls back to `peer_key` when no session |
+| `peer_key` | 16 hex | HMAC of ip + user agent, always present |
+| `principal` | 16 hex or `anon` | HMAC of the auth identifier of an already-resolved user (check `hasUser()` on each configured guard); never resolve a guard from here, that can cost a query |
+| `verb`, `route` | `POST`, `portal.login` | route name, else the URI pattern with `{param}` braces, else `_unrouted`; never the raw path |
+| `status`, `latency_ms`, `bytes_in`, `bytes_out` | 422, 38.2, 410, 1204 | `bytes_in` from Content-Length; `bytes_out` is -1 for streamed responses |
+| `req_shape`, `resp_shape` | `{otp:str:6,phone:str:10}` | shape of `$request->all()` and of the JSON body (up to 64 KB); else `html`, `redirect`, `file`, `stream`, `empty`, `text`, or the main content type |
+| `bound` | `[{model:"Venue",id_hash:"7f3a9c21"}]` | route parameters: model basename + 8-hex HMAC of the key; scalar params as `{param, id_hash}` |
+| `validation_failed` | `["otp"]` | keys of `ValidationException::errors()`, never messages |
+| `exception` | `ModelNotFoundException` | class basename of the original cause |
+| `auth_event` | `login_failed` | last auth event name during the turn |
+| `gate` | `{action, mode, rule, applied}` | the verdict received and what was actually done; null when no check answered |
+| `ua_hash` | 8 hex | hashed user agent |
+| `dropped_since_last` | 0 | events dropped since the last successful send |
+
+Example:
+
+```json
+{"v":1,"ts":1761600000.123,"session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978",
+ "principal":"anon","verb":"POST","route":"portal.login","status":422,"latency_ms":38.2,
+ "bytes_in":410,"bytes_out":1204,"req_shape":"{otp:str:6,phone:str:10}",
+ "resp_shape":"{errors:{otp:[str:23*1]},message:str:23}","bound":[],
+ "validation_failed":["otp"],"exception":"ValidationException","auth_event":null,
+ "gate":null,"ua_hash":"9c8b7a6f","dropped_since_last":0}
+```
+
+### Shape notation
+
+Keys and types, never values.
+
+- Scalars: `null`, `bool`, `int`, `num`, `file`, `obj`, `unk`.
+- Strings: `str:<n>`, exact length up to 64, then `>64`, `>256`, `>1k`, `>4k`,
+  `>16k`, `>64k`.
+- Lists: `[int*12]`, typed by the first element.
+- Maps: `{k:shape,...}`, keys sorted; a key longer than 24 chars is cut; a key
+  that is itself a number of 6+ digits becomes `#`; reserved characters in
+  keys (`: , { } [ ] *`) become `_`.
+- Depth cap 4 renders as `{…}` or `[…]`; key cap 32 renders as `…+N`; the
+  whole shape is cut at 2 KB.
+
+### Hashing
+
+HMAC-SHA256 under `LEESIDE_HASH_KEY` (derived from `APP_KEY` when unset, as
+HMAC of the string "leeside"), one namespace per field so a session hash and a
+principal hash of the same value never match. Truncated: session, principal
+and peer to 16 hex; id and user agent to 8 hex.
+
+Sampling is deterministic on `session_key`: the first 8 hex digits as a draw
+in [0, 1) compared against `sample_rate`, so a session is wholly in or out.
+The synchronous check is never sampled.
+
+### Transports
+
+Behind a `Transport` interface with `send(array $event): bool`, which never
+throws and never blocks the request:
+
+- `udg`: one datagram per event via `stream_socket_sendto()` on
+  `udg://<events socket>`, non-blocking, 1 s backoff after a failed connect,
+  drop and count on any failure. Datagrams are atomic, so there is no framing.
+- `log`: one JSON line per event to a Laravel log channel, for before leesided
+  exists.
+- `null`: discard.
+- `array`: in memory, for tests.
+
+### Sync check protocol
+
+Behind a `RuleClient` interface with `check(array $probe): Verdict`, which
+never throws and returns allow on any failure.
+
+Client connects to `unix://<check socket>`, writes one JSON line, reads one
+JSON line, closes. Connect and read are each bounded by `check.timeout_ms`
+(default 2). After a failed connect the client skips the socket for 1 s, since
+leesided being down is the normal state of a fresh install.
+
+Probe:
+
+```json
+{"v":1,"ts":1761600000.123,"verb":"POST","route":"portal.login",
+ "session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon"}
+```
+
+Verdict:
+
+```json
+{"action":"block","mode":"enforce","rule":"portal-otp-burst","retry_after":30}
+```
+
+Actions: `allow`, `log`, `watch`, `rate_limit`, `challenge`, `block`.
+Modes: `monitor`, `shadow`, `enforce`. Unknown values decode to allow and
+monitor. No listener, timeout, bad JSON: all allow.
+
+In enforce mode: `block` returns 403; `rate_limit` returns 429 with
+`Retry-After`; `challenge` sets the request attribute `leeside.challenge` (to
+the rule name) and lets the request continue, so the app decides what a
+step-up looks like (re-OTP, captcha, re-login). Every other action, and every
+verdict in monitor or shadow, is recorded on the event's `gate` field and
+changes nothing. Denial bodies are generic (`Forbidden`, `Too Many Requests`,
+JSON when the request expects JSON); no Leeside headers on the wire.
+
+### Config keys
+
+```php
+'enabled'             => env('LEESIDE_ENABLED', true),          // kill switch
+'register_middleware' => env('LEESIDE_REGISTER_MIDDLEWARE', true),
+'gate_groups'         => ['web', 'api'],
+'sample_rate'         => (float) env('LEESIDE_SAMPLE_RATE', 1.0),
+'hash_key'            => env('LEESIDE_HASH_KEY'),
+'transport'           => env('LEESIDE_TRANSPORT', 'udg'),       // udg | log | null
+'events_socket'       => env('LEESIDE_EVENTS_SOCKET', '/run/leeside/events.sock'),
+'log_channel'         => env('LEESIDE_LOG_CHANNEL'),
+'check' => [
+    'enabled'    => env('LEESIDE_CHECK_ENABLED', true),
+    'socket'     => env('LEESIDE_CHECK_SOCKET', '/run/leeside/check.sock'),
+    'timeout_ms' => (int) env('LEESIDE_CHECK_TIMEOUT_MS', 2),
+],
+'shape' => ['max_depth' => 4, 'max_keys' => 32, 'max_response_bytes' => 65536, 'max_shape_length' => 2048],
+'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],  // route names or URI fnmatch patterns
+```
+
+Relative socket paths resolve against `base_path()`.
+
+### php artisan leeside:tap
+
+Binds the events datagram socket and pretty-prints each event (`--raw` for
+NDJSON). With `--gate` it also serves the check socket, answering
+`--action=block --mode=enforce --route=portal.login` (route repeatable) and
+`allow` otherwise. This is the stand-in for leesided until the Rust engine
+answers the same sockets.
+
+### Never written, by construction
+
+Raw paths with ids, query strings, header values other than the hashed user
+agent, body values, phone numbers, OTPs, payment fields, tokens, cookies,
+validation messages, exception messages, redirect targets. Reduction to shape
+and hashing happen inside the middleware before serialisation; the event array
+is built from reduced values only.
+
+### Tests
+
+PHPUnit with orchestra/testbench:
+
+- Reducer notation on nested payloads, lists, files and numeric keys.
+- Hasher namespaces differ for the same input; sampling is deterministic.
+- A feature test that boots routes mirroring the sample app, drives them with
+  phone and OTP values, binds `ArrayTransport` and `ArrayRuleClient` in the
+  container, and asserts the emitted event field by field.
+- A PII scan: collect every literal value the test sent (phones, OTPs, ids,
+  the user agent) and assert none appears in `json_encode()` of any event.
+- Gate tests: block (403), rate_limit (429 with Retry-After), challenge
+  (attribute set, request continues), shadow (no effect, gate recorded),
+  timeout and missing socket (allow).
+- 404 and 500 are captured with `_unrouted` / the route and the exception
+  basename; a 404 from a bound model records `ModelNotFoundException`.
+- Routes in `ignore` produce no event and no check.
+
+## Sample app spec: leeside-sample
+
+A stock `composer create-project laravel/laravel leeside-sample`, SQLite, with
+the package pulled in through a path repository so edits to the package show up
+without a publish:
+
+```json
+"repositories": [{ "type": "path", "url": "../leeside-laravel", "options": { "symlink": true } }],
+"require": { "leeside/laravel": "@dev" }
+```
+
+`.env` additions: `LEESIDE_EVENTS_SOCKET=storage/leeside/events.sock`,
+`LEESIDE_CHECK_SOCKET=storage/leeside/check.sock`, `LEESIDE_HASH_KEY=` (a
+random 32-byte value).
+
+### Routes
+
+Deliberately portal-shaped so the events look like a captive portal's will.
+
+| Route name | Verb and URI | Behaviour |
+| --- | --- | --- |
+| `home` | GET / | the welcome view (an `html` response) |
+| `portal.login` | POST /portal/login | validates `phone` digits:10 and `otp` digits:6; OTP `123456` fires `Login` and returns JSON `{ok:true}`; any other OTP fires `Failed` and returns 401 JSON |
+| `venues.show` | GET /venues/{venue} | route-model binding on `Venue`; 404 via `ModelNotFoundException` for unknown ids |
+| `api.venues.index` | GET /api/venues | JSON list of venues |
+| `api.venues.visit` | POST /api/venues/{venue}/visit | a mutation; validates `guests` integer |
+| `secret` | GET /secret | `abort(403)` |
+| `boom` | GET /boom | throws `RuntimeException` (a 500) |
+
+`Venue` model, migration (`id`, `name`, `city`, timestamps), seeder with six
+venues. A `challenge` demo: a tiny app middleware that, when
+`leeside.challenge` is set on the request, returns 428 with
+`{"step_up":"otp"}`, so the whole verdict set can be shown end to end.
+
+### bin/traffic.sh
+
+curl against `php artisan serve` with a cookie jar so the session key is
+stable. Three acts: a benign browse (home, three venues, API list, one visit);
+a validation burst (ten logins with bad phone lengths and bad OTPs); an
+enumeration (venues 1 to 25, most 404). Prints nothing itself; the tap shows
+the events.
+
+### Three-terminal flow (README)
+
+```bash
+php artisan leeside:tap                     # terminal 1: events and, with --gate, verdicts
+php artisan serve                           # terminal 2
+bin/traffic.sh                              # terminal 3
+php artisan leeside:tap --gate --action=block --route=portal.login   # then rerun act two
+```
+
+### Two measurements the sample must make possible
+
+They gate the production rollout:
+
+1. Added latency per request with the package on versus
+   `LEESIDE_ENABLED=false`, 500 requests each over the serve loop (target
+   under 1 ms added).
+2. A PII diff: run the traffic script, concatenate the tapped events, grep for
+   every phone number, OTP, venue id and user agent string the script sent.
+   Expect zero hits.
+
+## Done when
+
+- `composer test` is green in the package.
+- The tap shows events from all three acts of the traffic script.
+- The PII grep is empty.
+- The added latency is under 1 ms.
+- The event JSON and the check protocol in this file are unchanged, or the
+  change is written here first, so the Rust session starts from the same file.
+
