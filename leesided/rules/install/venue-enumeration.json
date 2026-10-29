@@ -1,0 +1,14 @@
+{
+  "id": "venue-enumeration",
+  "note": "One peer walking venue ids: fifteen distinct ids within ten minutes",
+  "mode": "shadow",
+  "action": "block",
+  "match": { "route": ["venues.show", "api.venues.visit"], "verb": ["GET", "POST"], "principal": "any" },
+  "when": {
+    "all": [
+      { "scope": "peer", "window_s": 600, "distinct": { "field": "bound_id", "model": "Venue" }, "gte": 15 },
+      { "scope": "peer", "window_s": 600, "count": { "exception": ["ModelNotFoundException"] }, "gte": 8 }
+    ]
+  },
+  "origin": { "kind": "install" }
+}

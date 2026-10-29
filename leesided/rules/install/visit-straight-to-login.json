@@ -1,0 +1,9 @@
+{
+  "id": "visit-straight-to-login",
+  "note": "A visit posted right after a login with nothing viewed in between",
+  "mode": "monitor",
+  "action": "challenge",
+  "match": { "route": ["api.venues.visit"], "verb": ["POST"], "principal": "any" },
+  "when": { "sequence": ["portal.login", "api.venues.visit"] },
+  "origin": { "kind": "install" }
+}

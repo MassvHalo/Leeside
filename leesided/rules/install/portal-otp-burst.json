@@ -1,0 +1,15 @@
+{
+  "id": "portal-otp-burst",
+  "note": "Five OTP failures within two minutes from one session",
+  "mode": "enforce",
+  "action": "rate_limit",
+  "retry_after_s": 30,
+  "match": { "route": ["portal.login"], "verb": ["POST"], "principal": "any" },
+  "when": {
+    "scope": "session",
+    "window_s": 120,
+    "count": { "auth_event": ["login_failed"] },
+    "gte": 5
+  },
+  "origin": { "kind": "install" }
+}
