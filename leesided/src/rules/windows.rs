@@ -21,7 +21,7 @@ pub const FLAG_WATCH: u8 = 1;
 
 /// One turn as a rule sees it. Built by ingest from the event, never from
 /// raw values: every string is already a symbol, every id already a hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnSummary {
     pub ts_ms: u64,
     pub route: Sym,
@@ -34,6 +34,11 @@ pub struct TurnSummary {
     pub req_shape: Sym,
     /// (model, id_hash parsed from the 8 hex).
     pub bound: SmallVec<[(Sym, u32); 2]>,
+    /// -1 for a streamed response.
+    pub bytes_out: i64,
+    pub latency_ms: f32,
+    /// The 8-hex hashed user agent, for hijack features.
+    pub ua_hash: u32,
 }
 
 /// A ring of the newest `WINDOW_TURNS` turns plus the running totals the
@@ -304,6 +309,9 @@ pub(crate) fn turn(ts_ms: u64, route: Sym, status: u16) -> TurnSummary {
         auth_event: None,
         req_shape: Sym(0),
         bound: SmallVec::new(),
+        bytes_out: 0,
+        latency_ms: 0.0,
+        ua_hash: 0,
     }
 }
 

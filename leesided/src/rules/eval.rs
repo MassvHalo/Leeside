@@ -47,6 +47,19 @@ pub enum VerdictAction {
     Block,
 }
 
+impl VerdictAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VerdictAction::Allow => "allow",
+            VerdictAction::Log => "log",
+            VerdictAction::Watch => "watch",
+            VerdictAction::RateLimit => "rate_limit",
+            VerdictAction::Challenge => "challenge",
+            VerdictAction::Block => "block",
+        }
+    }
+}
+
 impl From<Action> for VerdictAction {
     fn from(a: Action) -> Self {
         match a {

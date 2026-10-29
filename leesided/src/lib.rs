@@ -3,6 +3,8 @@
 
 pub mod api;
 pub mod check;
+pub mod config;
+pub mod engine;
 pub mod ingest;
 pub mod rules;
 pub mod store;

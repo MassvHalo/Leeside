@@ -429,6 +429,9 @@ fn summary(e: &Event, ts_ms: u64, syms: &Symbols) -> TurnSummary {
             .iter()
             .map(|(m, id)| (syms.intern(m), id8(&format!("{id:08x}")).unwrap()))
             .collect::<SmallVec<_>>(),
+        bytes_out: 0,
+        latency_ms: 0.0,
+        ua_hash: 0,
     }
 }
 

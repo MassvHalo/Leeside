@@ -131,6 +131,9 @@ fn turn(rng: &mut Rng, syms: &Symbols, ts_ms: u64) -> TurnSummary {
             "[]"
         }),
         bound,
+        bytes_out: 1024,
+        latency_ms: 10.0,
+        ua_hash: 0,
     }
 }
 

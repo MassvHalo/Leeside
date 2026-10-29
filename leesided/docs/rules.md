@@ -206,6 +206,7 @@ The event tables the rules join to:
 -- one row per ingested event, schema v1 fields as columns, shapes and hashes only
 CREATE TABLE turns (
   session_key       TEXT NOT NULL,
+  ts_us             INTEGER NOT NULL,  -- round(ts * 1e6); the join key with the check record
   ts                REAL NOT NULL,
   peer_key          TEXT NOT NULL,
   principal         TEXT NOT NULL,
@@ -224,13 +225,24 @@ CREATE TABLE turns (
   gate              TEXT,               -- JSON as received, NULL = no verdict reached the app
   ua_hash           TEXT NOT NULL,
   dropped_since_last INTEGER NOT NULL,
-  rules_matched     TEXT,               -- JSON list of {rule, version, action, mode}, from the check record
+  rules_matched     TEXT,               -- JSON list of {rule, version, action, mode, proposed|sticky}, from the check record
   verdict           TEXT,               -- the action answered, from the check record
   ruleset_hash      BLOB,               -- the set that judged it
-  PRIMARY KEY (session_key, ts)
+  PRIMARY KEY (session_key, ts_us)
 );
-CREATE INDEX turns_peer ON turns (peer_key, ts);
-CREATE INDEX turns_principal ON turns (principal, ts);
+CREATE INDEX turns_peer ON turns (peer_key, ts_us);
+CREATE INDEX turns_principal ON turns (principal, ts_us);
+CREATE INDEX turns_ts ON turns (ts_us);
+
+-- one feature vector per ingested turn: the Windside training corpus.
+-- vector is a JSON array of f32 in the order features::NAMES gives for that version
+CREATE TABLE features (
+  session_key TEXT NOT NULL,
+  ts_us       INTEGER NOT NULL,
+  version     INTEGER NOT NULL,
+  vector      TEXT NOT NULL,            -- "values" is reserved in SQLite
+  PRIMARY KEY (session_key, ts_us)
+);
 
 -- one row per closed session window
 CREATE TABLE conversations (
@@ -251,10 +263,27 @@ CREATE TABLE schema_version (version INTEGER NOT NULL);
 ```
 
 Check records are not a table of their own: a `CheckRecord` is an `UPDATE
-turns SET rules_matched, verdict, ruleset_hash WHERE session_key = ? AND ts
-= ?`, retried once from a small pending map if the turn has not landed yet
-(the event arrives after the check). Pending records older than 60 s are
-dropped and counted as `check.unjoined`.
+turns SET rules_matched, verdict, ruleset_hash WHERE peer_key = ? AND ts_us
+= ?`, held in a small pending map if the turn has not landed yet (the event
+arrives after the check) and applied when it does. Pending records older
+than 60 s are dropped and counted as `check.unjoined`.
+
+**The join key is `(peer_key, ts_us)`, not `(session_key, ts)`.** Two
+reasons, both found in the first end-to-end run. Laravel regenerates the
+session id on login (and logout), so the probe of a login turn carries the
+old session key and its event the new one; the peer key is the same on both
+because it is computed per request from ip and user agent. And `ts_us`
+(microseconds, integer) makes the equality exact where a float compare would
+depend on serialisation. `turns` still keys on `(session_key, ts_us)`; the
+join uses the `turns_peer` index. A consequence worth knowing: the turns
+before a login sit in the old session's window and the turns after in the
+new one, so a session-scope `count` does not see across a successful login.
+Peer scope does.
+
+**Turns with no check at all.** A 404 from route-model binding is thrown
+before `GateTurn` runs (the gate sits after `SubstituteBindings`), so those
+turns have `gate = null` and no check record. They are not fail-opens; the
+fail-open count is `gate = null` where a check record *exists*.
 
 ## Part 2: implementation
 
@@ -596,9 +625,29 @@ Environment variables, read once at start; no config file in v1.
 | `LEESIDED_API` | `127.0.0.1:7390` | the local HTTP API |
 | `LEESIDED_ENFORCE` | `true` | `false` pins the global mode to monitor |
 | `LEESIDED_RULES_DIR` | `rules/install` next to the binary, else the repo path | the install set |
+| `LEESIDED_SOCKET_MODE` | `660` (octal) | permission bits on both sockets |
+| `LEESIDED_SOCKET_GID` | unset | numeric group to chown the sockets to (www-data's gid on the sample host); numeric so the daemon never reads `/etc/group` |
+
+Socket paths count against the 108-byte `sun_path` limit; keep
+`LEESIDED_SOCKET_DIR` short.
 
 Subcommands: `leesided serve` (default), `leesided rules schema`, `leesided
-rules export`, `leesided rules validate <file>`.
+rules export`, `leesided rules validate <file>`. `serve` stops on SIGINT
+after flushing stats and draining the writer (`StoreOp::Shutdown`).
+
+The install set is imported as `active` in **shadow** regardless of the mode
+its file says, so a git-tracked `enforce` never goes live on first start;
+an operator promotes it with `PUT /rules/{id}`.
+
+### Windside groundwork
+
+`features.rs` is the v1 extractor: 30 named `f32`s per turn over the
+session window (volume, pacing, error ratios, auth, breadth, payload,
+navigation, user-agent changes) plus two over the peer window and
+`is_anon`. Ingest writes one `features` row per event, so the training
+corpus accumulates from the first deploy. `features::NAMES` and
+`features::VERSION` are what a model file must match. Windside scoring on
+the check path is not wired yet; the extractor cost is paid on ingest only.
 
 ### Tests and bench
 
