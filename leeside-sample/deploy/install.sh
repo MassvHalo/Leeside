@@ -16,6 +16,7 @@ SAMPLE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$SAMPLE_DIR")"
 PROD=/var/www/leeside
 DOMAIN=webapp.leeside.halowifi.com
+UI_DOMAIN=leeside.halowifi.com
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -52,15 +53,30 @@ ufw allow OpenSSH >/dev/null
 ufw allow 'Nginx Full' >/dev/null
 ufw --force enable >/dev/null
 
-cp "$SCRIPT_DIR/nginx/$DOMAIN.conf" /etc/nginx/sites-available/"$DOMAIN.conf"
-ln -sf /etc/nginx/sites-available/"$DOMAIN.conf" /etc/nginx/sites-enabled/"$DOMAIN.conf"
+# The API token: generated once, kept across reinstalls.
+mkdir -p /etc/leeside
+if [ ! -s /etc/leeside/leesided.env ]; then
+    printf 'LEESIDED_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/leeside/leesided.env
+fi
+chown root:www-data /etc/leeside/leesided.env
+chmod 0640 /etc/leeside/leesided.env
+
+mkdir -p /var/www/leeside-ui
+chown www-data:www-data /var/www/leeside-ui
+
+for site in "$DOMAIN" "$UI_DOMAIN"; do
+    cp "$SCRIPT_DIR/nginx/$site.conf" /etc/nginx/sites-available/"$site.conf"
+    ln -sf /etc/nginx/sites-available/"$site.conf" /etc/nginx/sites-enabled/"$site.conf"
+done
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl enable --now nginx
 systemctl reload-or-restart nginx
 
-certbot --nginx -d "$DOMAIN" --redirect --agree-tos --no-eff-email \
-    -m mrinal@halowifi.com -n --deploy-hook 'systemctl reload nginx'
+for site in "$DOMAIN" "$UI_DOMAIN"; do
+    certbot --nginx -d "$site" --redirect --agree-tos --no-eff-email \
+        -m mrinal@halowifi.com -n --deploy-hook 'systemctl reload nginx'
+done
 certbot renew --dry-run
 
 cp "$SCRIPT_DIR/logrotate/leeside" /etc/logrotate.d/leeside
