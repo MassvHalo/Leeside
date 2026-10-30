@@ -17,6 +17,8 @@ pub struct Config {
     pub socket_mode: u32,
     /// Numeric group to chown the sockets to (www-data on the sample host), when set.
     pub socket_gid: Option<u32>,
+    /// When set, every API route but `/health` needs `Authorization: Bearer <token>`.
+    pub api_token: Option<String>,
 }
 
 impl Default for Config {
@@ -29,6 +31,7 @@ impl Default for Config {
             rules_dir: default_rules_dir(),
             socket_mode: 0o660,
             socket_gid: None,
+            api_token: None,
         }
     }
 }
@@ -75,6 +78,11 @@ impl Config {
                 v.parse()
                     .unwrap_or_else(|_| panic!("LEESIDED_SOCKET_GID: not a number: {v}")),
             );
+        }
+        if let Ok(v) = std::env::var("LEESIDED_API_TOKEN") {
+            if !v.is_empty() {
+                cfg.api_token = Some(v);
+            }
         }
         cfg
     }

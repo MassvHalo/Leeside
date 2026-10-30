@@ -138,6 +138,17 @@ pub struct StoredRule {
     pub updated_at: i64,
 }
 
+/// Filters for `recent_turns`; `verdict = "none"` means no check record.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct TurnQuery {
+    pub peer: Option<String>,
+    pub session: Option<String>,
+    pub route: Option<String>,
+    pub verdict: Option<String>,
+    #[serde(default)]
+    pub limit: i64,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VersionRow {
     pub version: u32,
@@ -397,6 +408,48 @@ impl Store {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 e => Err(e),
             })
+        })
+    }
+
+    /// Newest turns first, for the UI. Each filter is optional; `limit` is
+    /// clamped by the caller.
+    pub fn recent_turns(&self, q: &TurnQuery) -> Result<Vec<serde_json::Value>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt = c.prepare(
+                "SELECT ts, session_key, peer_key, principal, verb, route, status, latency_ms, \
+                 bound, exception, auth_event, validation_failed, rules_matched, verdict \
+                 FROM turns \
+                 WHERE (?1 IS NULL OR peer_key = ?1) AND (?2 IS NULL OR session_key = ?2) \
+                 AND (?3 IS NULL OR route = ?3) \
+                 AND (?4 IS NULL OR (?4 = 'none' AND verdict IS NULL) OR verdict = ?4) \
+                 ORDER BY ts_us DESC LIMIT ?5",
+            )?;
+            let json_col = |s: Option<String>| {
+                s.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or(serde_json::Value::Null)
+            };
+            let rows = stmt.query_map(
+                params![q.peer, q.session, q.route, q.verdict, q.limit],
+                |r| {
+                    Ok(serde_json::json!({
+                        "ts": r.get::<_, f64>(0)?,
+                        "session_key": r.get::<_, String>(1)?,
+                        "peer_key": r.get::<_, String>(2)?,
+                        "principal": r.get::<_, String>(3)?,
+                        "verb": r.get::<_, String>(4)?,
+                        "route": r.get::<_, String>(5)?,
+                        "status": r.get::<_, i64>(6)?,
+                        "latency_ms": r.get::<_, f64>(7)?,
+                        "bound": json_col(r.get(8)?),
+                        "exception": r.get::<_, Option<String>>(9)?,
+                        "auth_event": r.get::<_, Option<String>>(10)?,
+                        "validation_failed": json_col(r.get(11)?),
+                        "rules_matched": json_col(r.get(12)?),
+                        "verdict": r.get::<_, Option<String>>(13)?,
+                    }))
+                },
+            )?;
+            rows.collect()
         })
     }
 

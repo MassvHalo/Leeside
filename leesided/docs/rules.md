@@ -586,8 +586,12 @@ global mode, reload rules.
 
 ### API, mode, sweeps
 
-axum on `127.0.0.1:<port>`, no auth in v1 (same host as the UI; the day the
-UI moves off-host this gets a token, written into the brief first).
+axum on `127.0.0.1:<port>`. The UI is served off-host, at
+`https://leeside.halowifi.com`, by nginx, which proxies `/api/` to this
+port; so with `LEESIDED_API_TOKEN` set, every route but `/health` needs
+`Authorization: Bearer <token>` and answers 401 otherwise (compared in
+constant time). Unset, the API is open, for local runs and tests. The
+token lives in `/etc/leeside/leesided.env` on the host.
 
 | Route | Does |
 | --- | --- |
@@ -602,7 +606,10 @@ UI moves off-host this gets a token, written into the brief first).
 | `GET /rules/schema` | the JSON Schema from schemars |
 | `GET /rules/export` | the active set as JSON, for seeding another host |
 | `GET /mode`, `PUT /mode` | global mode; `PUT {"mode":"monitor"}` is the kill switch |
-| `GET /health` | `{ ok, generation, hash, mode, windows, dropped }` |
+| `GET /decisions` | live sticky decisions, soonest to expire first, with the server's `now` |
+| `DELETE /decisions/{scope}/{key}` | lift one decision now; 404 if none; the rule can trip again |
+| `GET /turns?peer=&session=&route=&verdict=&limit=` | newest turns first; `verdict=none` for turns with no check record; `limit` 1..=500, default 100 |
+| `GET /health` | `{ ok, generation, hash, mode, windows, dropped }`; never needs the token |
 
 Spark's proposals arrive through the incident pipeline as `RuleWrite {
 state: proposed, changed_by: "spark" }` inside the process, never through

@@ -1,14 +1,17 @@
-//! The local HTTP API on 127.0.0.1: rules, mode, health. No auth in v1; the
-//! day the UI moves off-host this gets a token, written into the brief first.
+//! The local HTTP API on 127.0.0.1: rules, mode, decisions, turns, health.
+//! With `LEESIDED_API_TOKEN` set, every route but `/health` needs
+//! `Authorization: Bearer <token>`; the UI reaches it through nginx.
 
 use crate::engine::Engine;
 use crate::rules::compile::State;
-use crate::rules::model::{Mode, Rule};
-use crate::store::{self, StoreError};
-use axum::extract::{Path, Query, State as AxState};
-use axum::http::StatusCode;
+use crate::rules::model::{Mode, Rule, Scope};
+use crate::rules::windows::key16;
+use crate::store::{self, StoreError, StoreOp, TurnQuery};
+use axum::extract::{Path, Query, Request, State as AxState};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -16,8 +19,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 pub fn router(engine: Arc<Engine>) -> Router {
+    let token: Option<Arc<str>> = engine.cfg.api_token.as_deref().map(Arc::from);
     Router::new()
-        .route("/health", get(health))
         .route("/rules", get(list).post(create))
         .route("/rules/schema", get(schema))
         .route("/rules/export", get(export))
@@ -27,7 +30,45 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/rules/{id}/accept", post(accept))
         .route("/rules/{id}/retire", post(retire))
         .route("/mode", get(mode_get).put(mode_put))
+        .route("/decisions", get(decisions))
+        .route("/decisions/{scope}/{key}", delete(unblock))
+        .route("/turns", get(turns))
+        .route_layer(middleware::from_fn(move |req: Request, next: Next| {
+            let token = token.clone();
+            async move { authorize(token.as_deref(), req, next).await }
+        }))
+        .route("/health", get(health))
         .with_state(engine)
+}
+
+async fn authorize(token: Option<&str>, req: Request, next: Next) -> Response {
+    let Some(want) = token else {
+        return next.run(req).await;
+    };
+    let got = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if got.is_some_and(|g| same(g.as_bytes(), want.as_bytes())) {
+        next.run(req).await
+    } else {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": "bearer token required" }),
+        )
+        .into_response()
+    }
+}
+
+/// Constant time in the length of `want`, so the token cannot be guessed a
+/// byte at a time from response timing.
+fn same(got: &[u8], want: &[u8]) -> bool {
+    let mut diff = (got.len() != want.len()) as u8;
+    for (i, w) in want.iter().enumerate() {
+        diff |= got.get(i).copied().unwrap_or(0) ^ w;
+    }
+    diff == 0
 }
 
 pub async fn serve(engine: Arc<Engine>, listener: TcpListener) {
@@ -228,6 +269,35 @@ async fn validate(Json(body): Json<Value>) -> Json<Value> {
         Ok(_) => Json(json!({ "ok": true, "errors": [] })),
         Err(errors) => Json(json!({ "ok": false, "errors": errors })),
     }
+}
+
+async fn decisions(AxState(e): AxState<Arc<Engine>>) -> Json<Value> {
+    let now = store::now_s();
+    Json(json!({ "now": now, "decisions": e.decisions.live(now) }))
+}
+
+/// Lifts one sticky decision: a block or a rate limit ends now.
+async fn unblock(
+    AxState(e): AxState<Arc<Engine>>,
+    Path((scope, key)): Path<(String, String)>,
+) -> ApiResult {
+    let scope = match scope.as_str() {
+        "session" => Scope::Session,
+        "peer" => Scope::Peer,
+        "principal" => Scope::Principal,
+        _ => return Err(bad_request("scope must be session, peer or principal")),
+    };
+    let key = key16(&key).ok_or_else(|| bad_request("key must be 16 hex"))?;
+    if !e.decisions.remove(scope, key) {
+        return Err(StoreError::NotFound.into());
+    }
+    e.store.send(StoreOp::DecisionDelete { scope, key });
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn turns(AxState(e): AxState<Arc<Engine>>, Query(mut q): Query<TurnQuery>) -> ApiResult {
+    q.limit = if q.limit <= 0 { 100 } else { q.limit.min(500) };
+    Ok(Json(json!({ "turns": e.store.recent_turns(&q)? })).into_response())
 }
 
 async fn mode_get(AxState(e): AxState<Arc<Engine>>) -> Json<Value> {

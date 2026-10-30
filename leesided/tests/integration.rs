@@ -34,6 +34,10 @@ impl Harness {
     }
 
     async fn open(dir: PathBuf) -> Harness {
+        Harness::open_with(dir, None).await
+    }
+
+    async fn open_with(dir: PathBuf, api_token: Option<&str>) -> Harness {
         let cfg = Config {
             socket_dir: dir.clone(),
             db: dir.join("leesided.sqlite"),
@@ -42,6 +46,7 @@ impl Harness {
             rules_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/install")),
             socket_mode: 0o600,
             socket_gid: None,
+            api_token: api_token.map(String::from),
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -80,10 +85,23 @@ impl Harness {
     }
 
     async fn http(&self, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+        self.http_as(None, method, path, body).await
+    }
+
+    async fn http_as(
+        &self,
+        token: Option<&str>,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
         let mut s = TcpStream::connect(self.running.api_addr).await.unwrap();
         let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let auth = token
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
         let req = format!(
-            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
         s.write_all(req.as_bytes()).await.unwrap();
@@ -398,6 +416,95 @@ async fn block_sticks_for_block_min() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_token_guards_everything_but_health() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let h = Harness::open_with(dir, Some("s3cret-token")).await;
+
+    assert_eq!(h.http("GET", "/health", None).await.0, 200);
+    for path in ["/rules", "/mode", "/decisions", "/turns"] {
+        assert_eq!(
+            h.http("GET", path, None).await.0,
+            401,
+            "{path} without a token"
+        );
+        assert_eq!(
+            h.http_as(Some("s3cret-tokeN"), "GET", path, None).await.0,
+            401,
+            "{path} with a wrong token"
+        );
+        assert_eq!(
+            h.http_as(Some("s3cret-token"), "GET", path, None).await.0,
+            200,
+            "{path} with the token"
+        );
+    }
+    let (st, _) = h
+        .http("PUT", "/mode", Some(&json!({"mode": "enforce"})))
+        .await;
+    assert_eq!(st, 401);
+    assert_eq!(
+        h.engine.mode(),
+        Mode::Monitor,
+        "an unauthorised write changes nothing"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decisions_list_and_unblock_and_turns() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let mut v = rule_json("home-block", "enforce", "block", "home");
+    v["block_min"] = 10.into();
+    let rule: Rule = serde_json::from_value(v).unwrap();
+    h.engine
+        .write_rule(rule, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let ts = now_f64();
+    assert_eq!(
+        h.probe(&probe_json(ts, "GET", "home", SESSION)).await["action"],
+        "block"
+    );
+
+    let (st, body) = h.http("GET", "/decisions", None).await;
+    assert_eq!(st, 200);
+    let list = body["decisions"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["scope"], "session");
+    assert_eq!(list[0]["key"], SESSION);
+    assert_eq!(list[0]["rule"], "home-block");
+
+    assert_eq!(h.http("DELETE", "/decisions/session/zz", None).await.0, 400);
+    let gone = format!("/decisions/session/{SESSION}");
+    assert_eq!(h.http("DELETE", &gone, None).await.0, 204);
+    assert_eq!(h.http("DELETE", &gone, None).await.0, 404);
+    assert!(h.engine.decisions.is_empty());
+
+    h.event(&login_failed_event(ts, SESSION)).await;
+    h.wait_for("turn stored", || {
+        h.engine.store.count("turns").unwrap_or(0) == 1
+    })
+    .await;
+    let (st, body) = h
+        .http("GET", &format!("/turns?peer={PEER}&limit=5"), None)
+        .await;
+    assert_eq!(st, 200);
+    let turns = body["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["route"], "portal.login");
+    assert_eq!(turns[0]["auth_event"], "login_failed");
+    let (_, body) = h.http("GET", "/turns?peer=0000000000000000", None).await;
+    assert!(body["turns"].as_array().unwrap().is_empty());
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_validate_schema_export_and_pinned_mode() {
     let h = Harness::start().await;
     let (st, v) = h
@@ -460,6 +567,7 @@ async fn api_validate_schema_export_and_pinned_mode() {
         rules_dir: dir.clone(),
         socket_mode: 0o600,
         socket_gid: None,
+        api_token: None,
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();

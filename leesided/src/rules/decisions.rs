@@ -87,6 +87,18 @@ impl Decisions {
         self.map.insert((d.scope, d.key), d);
     }
 
+    /// Every live decision, soonest to expire first.
+    pub fn live(&self, now_s: i64) -> Vec<Decision> {
+        let mut out: Vec<Decision> = self
+            .map
+            .iter()
+            .filter(|e| e.value().expires_at > now_s)
+            .map(|e| e.value().clone())
+            .collect();
+        out.sort_by_key(|d| d.expires_at);
+        out
+    }
+
     pub fn remove(&self, scope: Scope, key: u64) -> bool {
         self.map.remove(&(scope, key)).is_some()
     }
