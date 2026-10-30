@@ -39,6 +39,7 @@ dumps. Unknown fields are rejected at every level.
 | `mode` | `monitor` \| `shadow` \| `enforce` | the rule's own ceiling; the effective mode is `min(global, rule)` |
 | `action` | `log` \| `watch` \| `rate_limit` \| `challenge` \| `block` | what the verdict carries; `allow` is never written in a rule, it is the absence of a hit |
 | `retry_after_s` | int | 1..=86400; required with `rate_limit`, rejected with any other action; also the stickiness of that decision |
+| `block_min` | int, optional | 1..=1440; minutes a `block` sticks to the session; rejected with any other action; absent = 1440 (the 24 h conversation cap) |
 | `match` | object | which probes the rule is evaluated for (below) |
 | `when` | condition or `{ "all": [c1, c2, c3] }`, optional | what the window must show; absent means the rule fires on every matching probe (a per-route `log` or `watch`) |
 | `expires_at` | unix seconds, optional | after this the rule evaluates as shadow until the sweep writes that downgrade; must be in the future at write time |
@@ -105,13 +106,14 @@ through the schema and `POST /rules/validate`.
 ```json
 {
   "id": "venue-enumeration",
-  "note": "One peer walking venue ids: fifteen distinct ids within ten minutes",
+  "note": "One peer walking venue ids: five distinct ids within ten minutes",
   "mode": "shadow",
   "action": "block",
+  "block_min": 10,
   "match": { "route": ["venues.show", "api.venues.visit"], "verb": ["GET", "POST"], "principal": "any" },
   "when": { "all": [
     { "scope": "peer", "window_s": 600,
-      "distinct": { "field": "bound_id", "model": "Venue" }, "gte": 15 },
+      "distinct": { "field": "bound_id", "model": "Venue" }, "gte": 5 },
     { "scope": "peer", "window_s": 600,
       "count": { "exception": ["ModelNotFoundException"] }, "gte": 8 }
   ] },
@@ -334,6 +336,7 @@ pub struct Rule {
     pub mode: Mode,                                     // monitor | shadow | enforce
     pub action: Action,                                 // log | watch | rate_limit | challenge | block
     #[serde(default)] pub retry_after_s: Option<u32>,   // 1..=86400; only with rate_limit
+    #[serde(default)] pub block_min: Option<u32>,       // 1..=1440; only with block
     #[serde(rename = "match")] pub matcher: Match,
     #[serde(default)] pub when: Option<When>,
     #[serde(default)] pub expires_at: Option<i64>,      // unix seconds
@@ -401,6 +404,7 @@ struct Compiled {
     principal: PrincipalKind,
     conds: SmallVec<[CCond; 3]>,
     action: Action, mode: Mode, retry_after_s: u32,
+    block_ttl_s: u32,               // block_min * 60, default 86400
     expires_at: Option<i64>,
     proposed: bool,                 // evaluated for stats only, never the verdict
 }
@@ -524,8 +528,8 @@ loaded; round trip under 1 ms including the socket.
    verdict is the non-proposed hit with the highest `action`; ties go to the
    lowest `ix` (rules load sorted by `id`, so this is deterministic). No
    hits: `allow` with mode = global.
-7. Stickiness: `block` inserts a decision on the session, expiring at
-   conversation close (24 h cap); `rate_limit` inserts one on the first
+7. Stickiness: `block` inserts a decision on the session for `block_min`
+   minutes (default the 24 h conversation cap); `rate_limit` inserts one on the first
    condition's `scope` key (`Hit.sticky`, session for a rule with no `when`;
    `None` when that key is absent, in which case nothing sticks) for
    `retry_after_s`. Insert into the mirror, then `StoreOp::DecisionUpsert`

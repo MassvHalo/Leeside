@@ -186,6 +186,10 @@ pub struct Rule {
     /// 1..=86400; required with `rate_limit`, rejected otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u32>,
+    /// 1..=1440 minutes a `block` sticks to the session; only with `block`.
+    /// Absent = the conversation's 24 h cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_min: Option<u32>,
     /// Which probes the rule is evaluated for.
     #[serde(rename = "match")]
     pub matcher: Match,
@@ -351,6 +355,7 @@ pub const MAX_WINDOW_S: u32 = 86_400;
 /// A window holds 64 turns, so a larger distinct count can never hold.
 pub const MAX_DISTINCT: u32 = 64;
 pub const MAX_RETRY_AFTER_S: u32 = 86_400;
+pub const MAX_BLOCK_MIN: u32 = 1_440;
 pub const MAX_NOTE_CHARS: usize = 200;
 pub const MAX_STRING_CHARS: usize = 256;
 
@@ -426,6 +431,15 @@ impl Rule {
             }
             (_, Some(_)) if self.action != Action::RateLimit => {
                 e.push("retry_after_s", "only allowed with action rate_limit")
+            }
+            _ => {}
+        }
+        match (self.action, self.block_min) {
+            (Action::Block, Some(m)) if !(1..=MAX_BLOCK_MIN).contains(&m) => {
+                e.push("block_min", format!("must be 1 to {MAX_BLOCK_MIN}"))
+            }
+            (_, Some(_)) if self.action != Action::Block => {
+                e.push("block_min", "only allowed with action block")
             }
             _ => {}
         }
@@ -738,6 +752,26 @@ mod tests {
         assert!(with(|v| {
             v["action"] = "rate_limit".into();
             v["retry_after_s"] = 86400.into();
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn block_min_only_with_block() {
+        assert_eq!(paths(with(|v| v["block_min"] = 10.into())), ["block_min"]);
+        assert!(with(|v| v["action"] = "block".into()).is_ok());
+        for bad in [0, 1441] {
+            assert_eq!(
+                paths(with(|v| {
+                    v["action"] = "block".into();
+                    v["block_min"] = bad.into();
+                })),
+                ["block_min"]
+            );
+        }
+        assert!(with(|v| {
+            v["action"] = "block".into();
+            v["block_min"] = 1440.into();
         })
         .is_ok());
     }

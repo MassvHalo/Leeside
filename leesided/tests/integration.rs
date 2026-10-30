@@ -368,6 +368,36 @@ async fn proposed_rule_counts_but_never_wins_until_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn block_sticks_for_block_min() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let mut v = rule_json("home-block", "enforce", "block", "home");
+    v["block_min"] = 10.into();
+    let rule: Rule = serde_json::from_value(v).unwrap();
+    h.engine
+        .write_rule(rule, State::Active, "operator", None)
+        .await
+        .unwrap();
+
+    let now = now_f64();
+    let v = h.probe(&probe_json(now, "GET", "home", SESSION)).await;
+    assert_eq!(v["action"], "block");
+    assert_eq!(h.engine.decisions.len(), 1);
+    let now_s = now as i64;
+    assert!(
+        h.engine.decisions.sweep(now_s + 590).is_empty(),
+        "still live at 9m50s"
+    );
+    assert_eq!(
+        h.engine.decisions.sweep(now_s + 610).len(),
+        1,
+        "gone by 10m10s"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_validate_schema_export_and_pinned_mode() {
     let h = Harness::start().await;
     let (st, v) = h

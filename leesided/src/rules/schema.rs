@@ -27,6 +27,7 @@ mod tests {
             "mode",
             "action",
             "retry_after_s",
+            "block_min",
             "match",
             "when",
             "expires_at",

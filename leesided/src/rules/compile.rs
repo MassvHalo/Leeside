@@ -14,6 +14,9 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// How long a `block` without `block_min` sticks: the conversation's 24 h cap.
+pub const BLOCK_TTL_S: u32 = 24 * 3600;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -239,6 +242,8 @@ pub struct Compiled {
     pub action: Action,
     pub mode: Mode,
     pub retry_after_s: u32,
+    /// How long a `block` sticks to the session.
+    pub block_ttl_s: u32,
     pub expires_at: Option<i64>,
     /// Evaluated for stats only, never the verdict.
     pub proposed: bool,
@@ -307,6 +312,7 @@ impl RuleSet {
                 action: rule.action,
                 mode: rule.mode,
                 retry_after_s: rule.retry_after_s.unwrap_or(0),
+                block_ttl_s: rule.block_min.map_or(BLOCK_TTL_S, |m| m * 60),
                 expires_at: rule.expires_at,
                 proposed: m.state == State::Proposed,
             });

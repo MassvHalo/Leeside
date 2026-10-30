@@ -21,9 +21,6 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// How long a `block` sticks to a session: the conversation's 24 h cap.
-pub const BLOCK_TTL_S: i64 = 24 * 3600;
-
 #[derive(Default)]
 pub struct Counters {
     pub checks: AtomicU64,
@@ -250,7 +247,7 @@ impl Engine {
             let c = &rs.rules[h.ix as usize];
             let meta = &rs.meta[h.ix as usize];
             let sticky = match h.action {
-                Action::Block => Some((Scope::Session, session, now_s + BLOCK_TTL_S)),
+                Action::Block => Some((Scope::Session, session, now_s + c.block_ttl_s as i64)),
                 Action::RateLimit => h
                     .sticky
                     .map(|(s, k)| (s, k, now_s + c.retry_after_s as i64)),

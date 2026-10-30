@@ -254,6 +254,7 @@ fn rule(i: usize) -> impl Strategy<Value = (Rule, bool)> {
                     mode,
                     action,
                     retry_after_s: (action == Action::RateLimit).then_some(30),
+                    block_min: None,
                     matcher: Match { route: routes.clone(), verb, principal },
                     when,
                     expires_at,
