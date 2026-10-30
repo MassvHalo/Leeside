@@ -65,8 +65,13 @@ certbot renew --dry-run
 
 cp "$SCRIPT_DIR/logrotate/leeside" /etc/logrotate.d/leeside
 
-cp "$SCRIPT_DIR/systemd/leeside-tap.service" /etc/systemd/system/leeside-tap.service
+# leesided owns /run/leeside; the tap stand-in would hold events.sock.
+if [ -f /etc/systemd/system/leeside-tap.service ]; then
+    systemctl disable --now leeside-tap || true
+fi
+cp "$SCRIPT_DIR/systemd/leesided.service" /etc/systemd/system/leesided.service
 systemctl daemon-reload
-systemctl enable --now leeside-tap
+# Started by deploy.sh once the binary is in place.
+systemctl enable leesided
 
 bash "$SCRIPT_DIR/deploy.sh"

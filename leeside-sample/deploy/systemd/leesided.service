@@ -1,0 +1,25 @@
+[Unit]
+Description=Leeside daemon (rules, check and event sockets)
+After=network.target
+Wants=network.target
+Conflicts=leeside-tap.service
+Before=php8.5-fpm.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+# /run/leeside comes from /etc/tmpfiles.d/leeside.conf (0770 www-data).
+Environment=LEESIDED_SOCKET_DIR=/run/leeside
+Environment=LEESIDED_DB=/var/lib/leeside/leesided.sqlite
+Environment=LEESIDED_API=127.0.0.1:7390
+Environment=LEESIDED_RULES_DIR=/var/www/leeside/leesided/rules/install
+Environment=RUST_LOG=info
+StateDirectory=leeside
+ExecStart=/usr/local/bin/leesided serve
+StandardError=journal
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
