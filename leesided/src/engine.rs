@@ -2,7 +2,9 @@
 //! entry points: `check()` for a probe line and `ingest()` for an event
 //! datagram. The servers are thin loops around these.
 
+use crate::actors::{Ident, Kind, Resolver};
 use crate::config::Config;
+use crate::enrich::Enricher;
 use crate::rules::compile::State;
 use crate::rules::decisions::{Decision, Decisions};
 use crate::rules::eval::{eval, Probe, Verdict};
@@ -44,6 +46,10 @@ pub struct Engine {
     /// The package's `LEESIDE_HASH_KEY`, for `ip_hash` and `net_hash`;
     /// `None` leaves those columns null.
     pub hasher: Option<crate::hash::Hasher>,
+    /// Actor resolution (docs/actors.md): bindings, merges, deterministic ids.
+    pub resolver: Resolver,
+    /// GeoLite2 lookups for `asn` and `country`; empty when the files are absent.
+    pub enrich: Enricher,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +89,12 @@ struct ProbeWire<'a> {
     /// is an identity that stands in for the peer.
     #[serde(borrow, default)]
     credential_status: Option<Cow<'a, str>>,
+    /// Package-minted per request; joins the probe to its event.
+    #[serde(borrow, default)]
+    turn_id: Option<Cow<'a, str>>,
+    /// Present when and only when the tag was valid.
+    #[serde(borrow, default)]
+    tag_id: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +162,9 @@ struct EventWire<'a> {
     /// Request time in whole milliseconds, as the package stamps it.
     #[serde(default)]
     ts_ms: Option<i64>,
+    /// Package-minted per request; joins the event to its probe and seeds the actor id.
+    #[serde(default)]
+    turn_id: Option<String>,
 }
 
 /// Schema versions this build ingests. v2 is a superset of v1.
@@ -181,13 +196,25 @@ impl Engine {
         if hasher.is_none() {
             tracing::warn!("LEESIDED_HASH_KEY unset: ip_hash and net_hash stay null");
         }
+        // Actor ids only need to be deterministic per install, so without a
+        // shared key a fixed one still gives the same id for the same turn.
+        let resolver = Resolver::new(crate::hash::Hasher::new(
+            cfg.hash_key.as_deref().unwrap_or("leeside-actors"),
+        ));
+        let now_us = store::now_s() * 1_000_000;
+        resolver.load(store.load_actors()?, store.load_bindings(now_us)?);
+        let enrich = Enricher::open(cfg.geoip_asn.as_deref(), cfg.geoip_country.as_deref());
+        let (actors, strong, weak) = resolver.len();
         tracing::info!(
             mode = mode.as_str(),
             decisions = decisions.len(),
             ip_hashing = hasher.is_some(),
+            actors,
+            bindings = strong + weak,
+            geoip = !enrich.is_empty(),
             "engine open"
         );
-        Ok(Arc::new(Engine {
+        let engine = Arc::new(Engine {
             cfg,
             symbols,
             windows: Windows::default(),
@@ -199,7 +226,76 @@ impl Engine {
             counters: Counters::default(),
             started: Instant::now(),
             hasher,
-        }))
+            resolver,
+            enrich,
+        });
+        let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
+        if replayed > 0 {
+            tracing::info!(turns = replayed, "windows rebuilt from the last 24 h");
+        }
+        Ok(engine)
+    }
+
+    /// Refill the in-memory windows from stored turns, read-only: they
+    /// already carry their actor id, so this neither resolves nor writes.
+    fn replay_windows(&self, since_us: i64) -> Result<usize, StoreError> {
+        let rows = self.store.turns_since(since_us)?;
+        let syms = &self.symbols;
+        let mut n = 0;
+        for r in &rows {
+            let (Some(session), Some(peer)) = (key16(&r.session_key), key16(&r.peer_key)) else {
+                continue;
+            };
+            let principal = principal_key(&r.principal).ok().flatten();
+            let credential = r.credential_hash.as_deref().and_then(key16);
+            let actor = r.actor_id.as_deref().and_then(key16);
+            let bound: Vec<BoundWire> = serde_json::from_str(&r.bound).unwrap_or_default();
+            let validation: Vec<String> = r
+                .validation_failed
+                .as_deref()
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_default();
+            let summary = TurnSummary {
+                ts_ms: (r.ts_us / 1000) as u64,
+                route: syms.intern(&r.route),
+                verb: Verb::parse(&r.verb).unwrap_or(Verb::Get),
+                status: r.status,
+                validation_fields: validation.iter().map(|f| syms.intern(f)).collect(),
+                exception: r.exception.as_deref().map(|x| syms.intern(x)),
+                auth_event: r.auth_event.as_deref().map(|x| syms.intern(x)),
+                req_shape: syms.intern(&r.req_shape),
+                bound: bound
+                    .iter()
+                    .filter_map(|b| {
+                        let name = b.model.as_deref().or(b.param.as_deref())?;
+                        Some((syms.intern(name), id8(&b.id_hash)?))
+                    })
+                    .collect(),
+                bytes_out: r.bytes_out,
+                latency_ms: r.latency_ms as f32,
+                ua_hash: id8(&r.ua_hash)
+                    .or_else(|| key16(&r.ua_hash).map(|k| k as u32))
+                    .unwrap_or(0),
+                credential,
+                credential_status: r
+                    .credential_status
+                    .as_deref()
+                    .and_then(CredentialStatus::parse)
+                    .map_or(0, |s| s.code()),
+            };
+            self.windows.record(
+                &EventKeys {
+                    session,
+                    peer,
+                    principal,
+                    credential,
+                    actor,
+                },
+                summary,
+            );
+            n += 1;
+        }
+        Ok(n)
     }
 
     #[inline]
@@ -261,14 +357,47 @@ impl Engine {
         };
         let credential_verified =
             credential.is_some() && probe.credential_status.as_deref() == Some("verified");
+        let tag = match probe.tag_id.as_deref() {
+            None | Some("") => None,
+            Some(t) => match key16(t) {
+                Some(k) => Some(k),
+                None => return self.bad_probe(&rs, global),
+            },
+        };
+        let turn_id = probe
+            .turn_id
+            .as_deref()
+            .filter(|t| key16(t).is_some())
+            .map(str::to_string);
         let ts_us = store::ts_us(probe.ts);
         let ts_ms = (probe.ts * 1000.0) as u64;
         let hour = hour_of(now_s);
 
-        // Sticky first: session, then peer (skipped when a verified
+        // The actor, by the highest-precedence identifier present with a live
+        // binding: verified credential or principal, then session, then tag.
+        let mut idents: SmallVec<[Ident; 4]> = SmallVec::new();
+        if credential_verified {
+            idents.push(Ident::new(
+                Kind::Credential,
+                credential.expect("verified implies present"),
+            ));
+        }
+        if let Some(p) = principal {
+            idents.push(Ident::new(Kind::Principal, p));
+        }
+        if session != peer {
+            idents.push(Ident::new(Kind::Session, session));
+        }
+        if let Some(t) = tag {
+            idents.push(Ident::new(Kind::Tag, t));
+        }
+        let actor = self.resolver.lookup_any(&idents, ts_us as i64);
+
+        // Sticky first: actor, session, then peer (skipped when a verified
         // credential is presented: the credential is the identity there),
         // then principal, then credential.
-        let keys: SmallVec<[(Scope, u64); 4]> = [
+        let keys: SmallVec<[(Scope, u64); 5]> = [
+            actor.map(|a| (Scope::Actor, a)),
             Some((Scope::Session, session)),
             (!credential_verified).then_some((Scope::Peer, peer)),
             principal.map(|p| (Scope::Principal, p)),
@@ -302,6 +431,7 @@ impl Engine {
                 self.store.send(StoreOp::CheckRecord(CheckRecord {
                     peer_key: probe.peer_key.into_owned(),
                     ts_us,
+                    turn_id,
                     rules_matched: format!(
                         r#"[{{"rule":"{}","version":{},"action":"{}","mode":"{}","sticky":true}}]"#,
                         d.rule,
@@ -326,6 +456,7 @@ impl Engine {
             surface,
             credential,
             credential_verified,
+            actor,
         };
         let out = eval(&rs, &self.symbols, &self.windows, &p, global, now_s);
 
@@ -334,7 +465,15 @@ impl Engine {
             let c = &rs.rules[h.ix as usize];
             let meta = &rs.meta[h.ix as usize];
             let sticky = match h.action {
-                Action::Block => Some((Scope::Session, session, now_s + c.block_ttl_s as i64)),
+                // A block sticks to the actor when the rule reasons per actor
+                // and one is known, so it holds across every identifier bound
+                // to it; otherwise to the session as before.
+                Action::Block => match (c.sticky_scope, actor) {
+                    (Scope::Actor, Some(a)) => {
+                        Some((Scope::Actor, a, now_s + c.block_ttl_s as i64))
+                    }
+                    _ => Some((Scope::Session, session, now_s + c.block_ttl_s as i64)),
+                },
                 Action::RateLimit => h
                     .sticky
                     .map(|(s, k)| (s, k, now_s + c.retry_after_s as i64)),
@@ -380,6 +519,7 @@ impl Engine {
         self.store.send(StoreOp::CheckRecord(CheckRecord {
             peer_key: probe.peer_key.into_owned(),
             ts_us,
+            turn_id,
             rules_matched: matched,
             verdict: out.verdict.action.as_str().to_string(),
             ruleset_hash: rs.hash,
@@ -467,15 +607,92 @@ impl Engine {
                 .and_then(CredentialStatus::parse)
                 .map_or(0, |s| s.code()),
         };
+        let ts_us = store::ts_us(ev.ts);
+        let turn_id = match ev.turn_id.as_deref() {
+            None | Some("") => None,
+            Some(t) if key16(t).is_some() => Some(t.to_string()),
+            Some(_) => return Err(IngestError::Field("turn_id")),
+        };
+        // ASN and country from the address before it is dropped; null without the files.
+        let enriched = ev
+            .ip
+            .as_deref()
+            .filter(|ip| !ip.is_empty())
+            .map(|ip| self.enrich.lookup(ip))
+            .unwrap_or_default();
+
+        // Actor resolution (docs/actors.md): what counts as an identifier.
+        let credential_verified =
+            credential.is_some() && ev.credential_status.as_deref() == Some("verified");
+        let tag = match ev.tag_status.as_deref() {
+            Some("valid") | Some("issued") => ev.tag_id.as_deref().and_then(key16),
+            _ => None,
+        };
+        let net = net_hash.as_deref().and_then(key16);
+        let mut idents: SmallVec<[Ident; 8]> = SmallVec::new();
+        if let Some(p) = principal {
+            idents.push(Ident::new(Kind::Principal, p));
+        }
+        if credential_verified {
+            idents.push(Ident::new(
+                Kind::Credential,
+                credential.expect("verified implies present"),
+            ));
+        }
+        if session != peer {
+            idents.push(Ident::new(Kind::Session, session));
+        }
+        if let Some(t) = tag {
+            idents.push(Ident::new(Kind::Tag, t));
+        }
+        if let Some(n) = net {
+            idents.push(Ident::new(Kind::Net, n));
+            if let Some(ja4) = ev.ja4.as_deref().filter(|j| !j.is_empty()) {
+                idents.push(Ident::pair(
+                    Kind::Ja4Asn,
+                    self.resolver.key("ja4", ja4),
+                    enriched.asn.map_or(0, u64::from),
+                ));
+            }
+            if let Some(shape) = ev.shape_hash.as_deref().and_then(key16) {
+                idents.push(Ident::pair(Kind::ShapeNet, shape, n));
+            }
+            if let Some(ua) = key16(&ev.ua_hash) {
+                idents.push(Ident::pair(Kind::UaNet, ua, n));
+            }
+        }
+        // A v1 event has no turn id; the join key stands in as the seed.
+        let seed = turn_id
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", ev.peer_key, ts_us));
+        let resolution = self.resolver.resolve(&seed, ts_us, &idents);
+        for a in &resolution.actors_touched {
+            self.store
+                .send(StoreOp::ActorUpsert(store::ActorRow::from_actor(a)));
+        }
+        for (ident, b) in &resolution.bindings {
+            self.store
+                .send(StoreOp::BindingUpsert(store::BindingRow::new(*ident, *b)));
+        }
+        for m in &resolution.merges {
+            self.store.send(StoreOp::MergeInsert(store::MergeRow {
+                merged_id: format!("{:016x}", m.merged),
+                into_id: format!("{:016x}", m.into),
+                at_us: ts_us,
+                via_kind: m.via.as_str().to_string(),
+            }));
+        }
+        let actor = resolution.actor;
+
         let keys = EventKeys {
             session,
             peer,
             principal,
             credential,
+            actor: Some(actor),
         };
         let ts_ms = summary.ts_ms;
         self.windows.record(&keys, summary);
-        let ts_us = store::ts_us(ev.ts);
 
         if let Some(s) = self.windows.session(session) {
             let p = self.windows.peer(peer);
@@ -522,7 +739,10 @@ impl Engine {
             tag_status: ev.tag_status,
             ip_hash,
             net_hash,
-            asn: None,
+            asn: enriched.asn.map(i64::from),
+            country: enriched.country,
+            turn_id,
+            actor_id: Some(format!("{actor:016x}")),
             ip_trust: ev.ip_trust,
             ua_class: ev.ua_class,
             shape_hash: ev.shape_hash,
@@ -548,6 +768,12 @@ impl Engine {
         for closed in self.windows.sweep(now_ms) {
             self.store.send(StoreOp::ConversationClose(closed));
         }
+        for ident in self.resolver.sweep(now_s * 1_000_000) {
+            self.store.send(StoreOp::BindingDelete {
+                kind: ident.kind.as_str().to_string(),
+                value: format!("{:016x}", ident.value),
+            });
+        }
         if let Err(e) = self.rules.expire(now_s).await {
             tracing::error!(error = %e, "rule expiry sweep failed");
         }
@@ -562,8 +788,13 @@ impl Engine {
 
     pub fn health(&self) -> serde_json::Value {
         let rs = self.rules.current();
-        let (sessions, peers, principals, credentials) = self.windows.counts();
+        let (sessions, peers, principals, credentials, actor_windows) = self.windows.counts();
+        let (actors, strong, weak) = self.resolver.len();
         serde_json::json!({
+            "actors": { "count": actors, "strong_bindings": strong, "weak_values": weak,
+                        "merges": self.resolver.merges_done.load(Ordering::Relaxed),
+                        "windows": actor_windows },
+            "geoip": !self.enrich.is_empty(),
             "ok": true,
             "uptime_s": self.started.elapsed().as_secs(),
             "mode": self.mode().as_str(),

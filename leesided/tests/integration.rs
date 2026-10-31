@@ -48,6 +48,8 @@ impl Harness {
             socket_gid: None,
             api_token: api_token.map(String::from),
             hash_key: Some("test-key".into()),
+            geoip_asn: None,
+            geoip_country: None,
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -570,6 +572,8 @@ async fn api_validate_schema_export_and_pinned_mode() {
         socket_gid: None,
         api_token: None,
         hash_key: None,
+        geoip_asn: None,
+        geoip_country: None,
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -1171,4 +1175,306 @@ async fn forged_webhook_burst_trips_a_peer_rule_and_a_signed_one_does_not() {
     assert_eq!(v["action"], "allow", "{v}");
     h.running.abort();
     h.engine.shutdown().await;
+}
+
+fn tagged_event(
+    ts: f64,
+    turn_id: &str,
+    session: &str,
+    principal: &str,
+    tag: &str,
+    route: &str,
+) -> String {
+    json!({"v":2,"ts":ts,"turn_id":turn_id,"session_key":session,"peer_key":PEER,"principal":principal,"verb":"GET",
+        "route":route,"status":200,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,"req_shape":"[]","resp_shape":"html",
+        "bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,"surface":"web","tag_id":tag,"tag_status":"valid",
+        "ip":"203.0.113.7","ip_trust":"direct","ua_class":"chromium"})
+    .to_string()
+}
+
+fn tagged_probe(ts: f64, turn_id: &str, session: &str, tag: Option<&str>, route: &str) -> String {
+    json!({"v":2,"ts":ts,"turn_id":turn_id,"verb":"GET","route":route,"surface":"web","session_key":session,
+        "peer_key":PEER,"principal":"anon","tag_id":tag}).to_string()
+}
+
+const TAG: &str = "7d2b9e4c1a6f0e3b";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_change() {
+    use leesided::actors::{Ident, Kind};
+    use leesided::rules::model::Scope;
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let rule: Rule = serde_json::from_value(json!({
+        "id": "actor-home-burst", "note": "three home loads by one actor", "mode": "enforce", "action": "block",
+        "match": {"route": ["home"], "verb": ["GET"], "principal": "any", "surface": ["web"]},
+        "when": {"scope": "actor", "window_s": 600, "count": {}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(rule, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_f64();
+    // Two sessions, one tag: the browser cleared its session cookie but kept the tag.
+    h.event(&tagged_event(
+        now - 30.0,
+        "0000000000000a01",
+        "1111111111111111",
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    h.event(&tagged_event(
+        now - 20.0,
+        "0000000000000a02",
+        "1111111111111111",
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    h.event(&tagged_event(
+        now - 10.0,
+        "0000000000000a03",
+        "2222222222222222",
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    let tag = Ident::new(Kind::Tag, 0x7d2b9e4c1a6f0e3b);
+    h.wait_for("tag bound", || {
+        h.engine.resolver.lookup(tag, (now * 1e6) as i64).is_some()
+    })
+    .await;
+    let actor = h.engine.resolver.lookup(tag, (now * 1e6) as i64).unwrap();
+    h.wait_for("actor window of 3", || {
+        h.engine.windows.actor(actor).is_some_and(|w| w.len() == 3)
+    })
+    .await;
+    assert_eq!(
+        h.engine.resolver.lookup(
+            Ident::new(Kind::Session, 0x1111111111111111),
+            (now * 1e6) as i64
+        ),
+        Some(actor)
+    );
+    assert_eq!(
+        h.engine.resolver.lookup(
+            Ident::new(Kind::Session, 0x2222222222222222),
+            (now * 1e6) as i64
+        ),
+        Some(actor)
+    );
+    h.engine.store.flush().await;
+    let ids: Vec<Option<String>> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            let mut st = c.prepare("SELECT actor_id FROM turns WHERE turn_id IN ('0000000000000a01','0000000000000a02','0000000000000a03')")?;
+            let rows = st.query_map([], |r| r.get::<_, Option<String>>(0))?;
+            rows.collect()
+        })
+        .unwrap();
+    assert_eq!(ids.len(), 3);
+    assert!(
+        ids.iter()
+            .all(|i| i.as_deref() == Some(&format!("{actor:016x}")[..])),
+        "{ids:?}"
+    );
+
+    // A third, fresh session with the old tag: the probe finds the actor, the rule fires on its window.
+    let v = h
+        .probe(&tagged_probe(
+            now,
+            "0000000000000a04",
+            "3333333333333333",
+            Some(TAG),
+            "home",
+        ))
+        .await;
+    assert_eq!(v["action"], "block", "{v}");
+    assert_eq!(v["rule"], "actor-home-burst");
+    assert!(
+        h.engine
+            .decisions
+            .get(Scope::Actor, actor, store_now())
+            .is_some(),
+        "the block stuck to the actor"
+    );
+    // Another fresh session, a route the rule does not match: the sticky actor decision answers.
+    let v = h
+        .probe(&tagged_probe(
+            now,
+            "0000000000000a05",
+            "4444444444444444",
+            Some(TAG),
+            "venues.show",
+        ))
+        .await;
+    assert_eq!(
+        v["action"], "block",
+        "sticky on the actor across sessions: {v}"
+    );
+    // Without the tag, a new session is nobody: no actor, no block.
+    let v = h
+        .probe(&tagged_probe(
+            now,
+            "0000000000000a06",
+            "5555555555555555",
+            None,
+            "venues.show",
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
+    // The API shows the actor with its bindings, by any merged id.
+    let (st, detail) = h.http("GET", &format!("/actors/{actor:016x}"), None).await;
+    assert_eq!(st, 200, "{detail}");
+    let kinds: Vec<&str> = detail["detail"]["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"tag") && kinds.contains(&"session"),
+        "{kinds:?}"
+    );
+    assert_eq!(detail["detail"]["actor"]["turns"], 3);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+fn store_now() -> i64 {
+    leesided::store::now_s()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
+    use leesided::actors::{Ident, Kind};
+    let script = |now: f64| {
+        vec![
+            tagged_event(
+                now - 40.0,
+                "0000000000000b01",
+                "1111111111111111",
+                "anon",
+                TAG,
+                "home",
+            ),
+            tagged_event(
+                now - 30.0,
+                "0000000000000b02",
+                "1111111111111111",
+                "anon",
+                TAG,
+                "venues.show",
+            ),
+            // Login regenerates the session: the tag carries the guest actor into the user's.
+            tagged_event(
+                now - 20.0,
+                "0000000000000b03",
+                "2222222222222222",
+                "0f0f0f0f0f0f0f0f",
+                TAG,
+                "portal.login",
+            ),
+            tagged_event(
+                now - 10.0,
+                "0000000000000b04",
+                "2222222222222222",
+                "0f0f0f0f0f0f0f0f",
+                TAG,
+                "home",
+            ),
+        ]
+    };
+    let now = now_f64();
+    let read_ids = |h: &Harness| -> Vec<(String, String)> {
+        h.engine
+            .store
+            .with_reader(|c| {
+                let mut st = c.prepare("SELECT turn_id, actor_id FROM turns WHERE turn_id LIKE '0000000000000b%' ORDER BY turn_id")?;
+                let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect()
+            })
+            .unwrap()
+    };
+
+    let h = Harness::start().await;
+    for e in script(now) {
+        h.event(&e).await;
+    }
+    let tag = Ident::new(Kind::Tag, 0x7d2b9e4c1a6f0e3b);
+    let principal = Ident::new(Kind::Principal, 0x0f0f0f0f0f0f0f0f);
+    h.wait_for("principal bound", || {
+        h.engine
+            .resolver
+            .lookup(principal, (now * 1e6) as i64)
+            .is_some()
+    })
+    .await;
+    let actor = h.engine.resolver.lookup(tag, (now * 1e6) as i64).unwrap();
+    assert_eq!(
+        h.engine.resolver.lookup(principal, (now * 1e6) as i64),
+        Some(actor),
+        "guest actor became the user's"
+    );
+    h.engine.store.flush().await;
+    let first = read_ids(&h);
+    assert_eq!(first.len(), 4);
+    assert!(
+        first.iter().all(|(_, a)| *a == format!("{actor:016x}")),
+        "{first:?}"
+    );
+
+    // Restart on the same store: bindings reload, windows rebuild from turns.
+    let h = h.restart().await;
+    assert_eq!(
+        h.engine.resolver.lookup(tag, (now * 1e6) as i64),
+        Some(actor)
+    );
+    assert_eq!(
+        h.engine.resolver.lookup(principal, (now * 1e6) as i64),
+        Some(actor)
+    );
+    assert!(
+        h.engine.windows.actor(actor).is_some_and(|w| w.len() == 4),
+        "actor window rebuilt from stored turns"
+    );
+    assert_eq!(
+        h.http("GET", "/health", None).await.1["actors"]["count"]
+            .as_u64()
+            .unwrap(),
+        1
+    );
+    // A probe for a brand-new session with the tag names the same actor.
+    let probe_ids = [Ident::new(Kind::Session, 0x9999999999999999), tag];
+    assert_eq!(
+        h.engine.resolver.lookup_any(&probe_ids, (now * 1e6) as i64),
+        Some(actor)
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+
+    // The same script into an empty store yields the same assignments.
+    let h2 = Harness::start().await;
+    for e in script(now) {
+        h2.event(&e).await;
+    }
+    h2.wait_for("principal bound again", || {
+        h2.engine
+            .resolver
+            .lookup(principal, (now * 1e6) as i64)
+            .is_some()
+    })
+    .await;
+    h2.engine.store.flush().await;
+    assert_eq!(read_ids(&h2), first, "deterministic across stores");
+    h2.running.abort();
+    h2.engine.shutdown().await;
 }

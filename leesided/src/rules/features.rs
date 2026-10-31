@@ -221,6 +221,7 @@ mod tests {
             peer: 2,
             principal: None,
             credential: None,
+            actor: None,
         };
         let login = syms.intern("portal.login");
         let home = syms.intern("home");

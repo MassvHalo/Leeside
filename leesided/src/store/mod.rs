@@ -30,6 +30,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         4,
         include_str!("../../migrations/0004_credential_status.sql"),
     ),
+    (5, include_str!("../../migrations/0005_actors.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +93,9 @@ pub struct TurnRow {
     pub h2_fp: Option<String>,
     pub remote_port: Option<i64>,
     pub ts_ms: Option<i64>,
+    pub turn_id: Option<String>,
+    pub actor_id: Option<String>,
+    pub country: Option<String>,
 }
 
 /// What the check answered, to be joined onto the turn row once it lands.
@@ -103,6 +107,8 @@ pub struct CheckRecord {
     /// within a request.
     pub peer_key: String,
     pub ts_us: i64,
+    /// Present on a v2 probe: the join is on it alone; a v1 probe joins on `(peer_key, ts_us)`.
+    pub turn_id: Option<String>,
     pub rules_matched: String,
     pub verdict: String,
     pub ruleset_hash: [u8; 32],
@@ -149,10 +155,95 @@ pub enum StoreOp {
         ack: oneshot::Sender<Result<u32, StoreError>>,
     },
     ModeSet(Mode),
+    ActorUpsert(ActorRow),
+    BindingUpsert(BindingRow),
+    BindingDelete {
+        kind: String,
+        value: String,
+    },
+    MergeInsert(MergeRow),
     /// Commit everything queued before this and reply.
     Flush(oneshot::Sender<()>),
     /// Flush, reply, and end the writer loop.
     Shutdown(oneshot::Sender<()>),
+}
+
+/// An `actors` row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActorRow {
+    pub id: String,
+    pub opened_us: i64,
+    pub last_us: i64,
+    pub merged_into: Option<String>,
+    pub turns: u32,
+}
+
+impl ActorRow {
+    pub fn from_actor(a: &crate::actors::Actor) -> ActorRow {
+        ActorRow {
+            id: format!("{:016x}", a.id),
+            opened_us: a.opened_us,
+            last_us: a.last_us,
+            merged_into: a.merged_into.map(|m| format!("{m:016x}")),
+            turns: a.turns,
+        }
+    }
+}
+
+/// An `actor_bindings` row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BindingRow {
+    pub kind: String,
+    pub value: String,
+    pub actor_id: String,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub expires_at: i64,
+}
+
+impl BindingRow {
+    pub fn new(ident: crate::actors::Ident, b: crate::actors::Binding) -> BindingRow {
+        BindingRow {
+            kind: ident.kind.as_str().to_string(),
+            value: format!("{:016x}", ident.value),
+            actor_id: format!("{:016x}", b.actor),
+            first_seen: b.first_seen_us,
+            last_seen: b.last_seen_us,
+            expires_at: b.expires_us,
+        }
+    }
+}
+
+/// An `actor_merges` row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MergeRow {
+    pub merged_id: String,
+    pub into_id: String,
+    pub at_us: i64,
+    pub via_kind: String,
+}
+
+/// What a turn row gives back for the window rebuild at start.
+#[derive(Debug, Clone)]
+pub struct ReplayRow {
+    pub session_key: String,
+    pub peer_key: String,
+    pub principal: String,
+    pub credential_hash: Option<String>,
+    pub credential_status: Option<String>,
+    pub actor_id: Option<String>,
+    pub ts_us: i64,
+    pub route: String,
+    pub verb: String,
+    pub status: u16,
+    pub validation_failed: Option<String>,
+    pub exception: Option<String>,
+    pub auth_event: Option<String>,
+    pub req_shape: String,
+    pub bound: String,
+    pub bytes_out: i64,
+    pub latency_ms: f64,
+    pub ua_hash: String,
 }
 
 /// A `rules` row as stored.
@@ -449,7 +540,7 @@ impl Store {
         self.with_reader(|c| {
             let mut stmt = c.prepare(
                 "SELECT ts, session_key, peer_key, principal, verb, route, status, latency_ms, \
-                 bound, exception, auth_event, validation_failed, rules_matched, verdict \
+                 bound, exception, auth_event, validation_failed, rules_matched, verdict, actor_id, turn_id \
                  FROM turns \
                  WHERE (?1 IS NULL OR peer_key = ?1) AND (?2 IS NULL OR session_key = ?2) \
                  AND (?3 IS NULL OR route = ?3) \
@@ -478,10 +569,173 @@ impl Store {
                         "validation_failed": json_col(r.get(11)?),
                         "rules_matched": json_col(r.get(12)?),
                         "verdict": r.get::<_, Option<String>>(13)?,
+                        "actor_id": r.get::<_, Option<String>>(14)?,
+                        "turn_id": r.get::<_, Option<String>>(15)?,
                     }))
                 },
             )?;
             rows.collect()
+        })
+    }
+
+    pub fn load_actors(&self) -> Result<Vec<crate::actors::Actor>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt =
+                c.prepare("SELECT id, opened_us, last_us, merged_into, turns FROM actors")?;
+            let rows = stmt.query_map([], |r| {
+                let id: String = r.get(0)?;
+                let merged: Option<String> = r.get(3)?;
+                Ok((
+                    id,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    merged,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?;
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter_map(|(id, opened, last, merged, turns)| {
+                    Some(crate::actors::actor_row(
+                        crate::rules::windows::key16(&id)?,
+                        opened,
+                        last,
+                        merged.as_deref().and_then(crate::rules::windows::key16),
+                        turns as u32,
+                    ))
+                })
+                .collect())
+        })
+    }
+
+    pub fn load_bindings(
+        &self,
+        now_us: i64,
+    ) -> Result<Vec<(crate::actors::Ident, crate::actors::Binding)>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt = c.prepare(
+                "SELECT kind, value, actor_id, first_seen, last_seen, expires_at FROM actor_bindings WHERE expires_at > ?1",
+            )?;
+            let rows = stmt.query_map(params![now_us], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })?;
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter_map(|(kind, value, actor, first, last, expires)| {
+                    Some((
+                        crate::actors::Ident::new(crate::actors::Kind::parse(&kind)?, crate::rules::windows::key16(&value)?),
+                        crate::actors::Binding {
+                            actor: crate::rules::windows::key16(&actor)?,
+                            first_seen_us: first,
+                            last_seen_us: last,
+                            expires_us: expires,
+                        },
+                    ))
+                })
+                .collect())
+        })
+    }
+
+    /// Turns since `since_us`, oldest first, for the window rebuild.
+    pub fn turns_since(&self, since_us: i64) -> Result<Vec<ReplayRow>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt = c.prepare(
+                "SELECT session_key, peer_key, principal, credential_hash, credential_status, actor_id, ts_us, \
+                 route, verb, status, validation_failed, exception, auth_event, req_shape, bound, bytes_out, \
+                 latency_ms, ua_hash FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
+            )?;
+            let rows = stmt.query_map(params![since_us], |r| {
+                Ok(ReplayRow {
+                    session_key: r.get(0)?,
+                    peer_key: r.get(1)?,
+                    principal: r.get(2)?,
+                    credential_hash: r.get(3)?,
+                    credential_status: r.get(4)?,
+                    actor_id: r.get(5)?,
+                    ts_us: r.get(6)?,
+                    route: r.get(7)?,
+                    verb: r.get(8)?,
+                    status: r.get::<_, i64>(9)? as u16,
+                    validation_failed: r.get(10)?,
+                    exception: r.get(11)?,
+                    auth_event: r.get(12)?,
+                    req_shape: r.get(13)?,
+                    bound: r.get(14)?,
+                    bytes_out: r.get(15)?,
+                    latency_ms: r.get(16)?,
+                    ua_hash: r.get(17)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// One actor for the API: its row, the ids merged into it, its live
+    /// bindings (hashes only) and its most recent turns.
+    pub fn actor_detail(
+        &self,
+        id: &str,
+        now_us: i64,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
+        self.with_reader(|c| {
+            let row = c
+                .query_row(
+                    "SELECT id, opened_us, last_us, merged_into, turns FROM actors WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "id": r.get::<_, String>(0)?, "opened_us": r.get::<_, i64>(1)?, "last_us": r.get::<_, i64>(2)?,
+                            "merged_into": r.get::<_, Option<String>>(3)?, "turns": r.get::<_, i64>(4)?,
+                        }))
+                    },
+                )
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(serde_json::Value::Null),
+                    e => Err(e),
+                })?;
+            if row.is_null() {
+                return Ok(None);
+            }
+            let mut merged = c.prepare("SELECT merged_id, at_us, via_kind FROM actor_merges WHERE into_id = ?1 ORDER BY at_us")?;
+            let merged: Vec<serde_json::Value> = merged
+                .query_map(params![id], |r| {
+                    Ok(serde_json::json!({ "merged_id": r.get::<_, String>(0)?, "at_us": r.get::<_, i64>(1)?, "via": r.get::<_, String>(2)? }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut bindings = c.prepare(
+                "SELECT kind, value, first_seen, last_seen, expires_at FROM actor_bindings WHERE actor_id = ?1 AND expires_at > ?2 ORDER BY kind, last_seen DESC",
+            )?;
+            let bindings: Vec<serde_json::Value> = bindings
+                .query_map(params![id, now_us], |r| {
+                    Ok(serde_json::json!({ "kind": r.get::<_, String>(0)?, "value": r.get::<_, String>(1)?, "first_seen": r.get::<_, i64>(2)?,
+                        "last_seen": r.get::<_, i64>(3)?, "expires_at": r.get::<_, i64>(4)? }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut ids: Vec<String> = merged.iter().filter_map(|m| m["merged_id"].as_str().map(String::from)).collect();
+            ids.push(id.to_string());
+            let marks = std::iter::repeat_n("?", ids.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT ts, turn_id, route, verb, status, surface, verdict, actor_id FROM turns WHERE actor_id IN ({marks}) ORDER BY ts_us DESC LIMIT 50"
+            );
+            let mut recent = c.prepare(&sql)?;
+            let recent: Vec<serde_json::Value> = recent
+                .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+                    Ok(serde_json::json!({ "ts": r.get::<_, f64>(0)?, "turn_id": r.get::<_, Option<String>>(1)?, "route": r.get::<_, String>(2)?,
+                        "verb": r.get::<_, String>(3)?, "status": r.get::<_, i64>(4)?, "surface": r.get::<_, Option<String>>(5)?,
+                        "verdict": r.get::<_, Option<String>>(6)?, "actor_id": r.get::<_, Option<String>>(7)? }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(Some(serde_json::json!({ "actor": row, "merged": merged, "bindings": bindings, "recent_turns": recent })))
         })
     }
 

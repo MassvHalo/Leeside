@@ -48,18 +48,28 @@ never merges through a lower one.** Concretely, for a turn carrying
 identifiers at several levels:
 
 1. Take the highest level present that has a live binding. That binding's
-   actor is the turn's actor. If no present identifier has a live binding,
-   the turn opens a new actor.
+   actor is the turn's actor, **provided the turn's own identity-level
+   identifiers do not contradict it**: Q logging in on P's browser carries
+   Q at level 1 and the tag bound to A, which holds P at level 1, so A is
+   not adoptable through the tag and the search continues. If no present
+   identifier names an adoptable actor, the turn opens a new one.
 2. Every present identifier at a lower level is re-pointed to that actor
    from this turn on, whatever it was bound to before. Nothing is merged by
    this step: the previous actor keeps its history.
 3. Two actors merge only when a turn links them through an identifier and
-   **neither actor has a live binding at a higher level that the other
-   contradicts**. Anonymous actor B (a tag, a session, no principal) linked
-   to anonymous actor A merges into A; the browser's anonymous history
-   joins. Actor B with principal Q linked by a shared tag to actor A with
-   principal P does not merge: the tag re-points to the current actor and
-   both histories stand (shared browser, logout then login).
+   **neither actor has a live identity-level binding that the other, or the
+   turn, contradicts**. Anonymous actor B (a tag, a session, no principal)
+   linked to anonymous actor A merges into A; the browser's anonymous
+   history joins. Actor B with principal Q linked by a shared tag to actor A
+   with principal P does not merge: the tag re-points to the current actor
+   and both histories stand (shared browser, logout then login).
+
+   Only level 1 partitions. A session or a tag is a browser, not a person,
+   and one browser legitimately holds many sessions over time (Laravel
+   regenerates one at every login), so a differing session can never block
+   a merge; that is exactly what makes the login-on-existing-session case
+   below a merge rather than a split. Found by the tests: an earlier draft
+   compared every level above the link and split the guest from the user.
 4. The same applies on the machine surfaces: two verified credentials under
    one `net` or `shape` cluster are two actors; weak kinds never merge
    anything (below).

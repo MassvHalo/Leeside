@@ -33,6 +33,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/decisions", get(decisions))
         .route("/decisions/{scope}/{key}", delete(unblock))
         .route("/turns", get(turns))
+        .route("/actors/{id}", get(actor))
         .route_layer(middleware::from_fn(move |req: Request, next: Next| {
             let token = token.clone();
             async move { authorize(token.as_deref(), req, next).await }
@@ -289,6 +290,17 @@ async fn unblock(
     }
     e.store.send(StoreOp::DecisionDelete { scope, key });
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// One actor: row, merged ids, live bindings (hashes only), recent turns.
+async fn actor(AxState(e): AxState<Arc<Engine>>, Path(id): Path<String>) -> ApiResult {
+    let key = key16(&id).ok_or_else(|| bad_request("actor id must be 16 hex"))?;
+    let canonical = format!("{:016x}", e.resolver.canonical(key));
+    let detail = e
+        .store
+        .actor_detail(&canonical, store::now_s() * 1_000_000)?
+        .ok_or(StoreError::NotFound)?;
+    Ok(Json(json!({ "requested": id, "canonical": canonical, "detail": detail })).into_response())
 }
 
 async fn turns(AxState(e): AxState<Arc<Engine>>, Query(mut q): Query<TurnQuery>) -> ApiResult {

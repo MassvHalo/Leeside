@@ -128,14 +128,17 @@ pub enum Scope {
     Principal,
     /// Keyed on `credential_hash`; the rate scope for `api` and `webhook`.
     Credential,
+    /// Keyed on the resolved actor (docs/actors.md); a block here holds for every identifier bound to it.
+    Actor,
 }
 
 impl Scope {
-    pub const ALL: [Scope; 4] = [
+    pub const ALL: [Scope; 5] = [
         Scope::Session,
         Scope::Peer,
         Scope::Principal,
         Scope::Credential,
+        Scope::Actor,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -144,6 +147,7 @@ impl Scope {
             Scope::Peer => "peer",
             Scope::Principal => "principal",
             Scope::Credential => "credential",
+            Scope::Actor => "actor",
         }
     }
 
@@ -153,6 +157,7 @@ impl Scope {
             "peer" => Some(Scope::Peer),
             "principal" => Some(Scope::Principal),
             "credential" => Some(Scope::Credential),
+            "actor" => Some(Scope::Actor),
             _ => None,
         }
     }

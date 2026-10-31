@@ -58,7 +58,7 @@ A condition. Exactly one of `count`, `distinct`, `sequence`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `scope` | `session` (default) \| `peer` \| `principal` \| `credential` | which window to look at; `principal` on an `anon` probe and `credential` without a presented credential read as empty; when a credential is presented `peer` reads as empty too (the credential is the identity; one address is many users), on any surface |
+| `scope` | `session` (default) \| `peer` \| `principal` \| `credential` \| `actor` | which window to look at; `principal` on an `anon` probe and `credential` without a presented credential read as empty; when a credential is presented `peer` reads as empty too (the credential is the identity; one address is many users), on any surface |
 | `window_s` | int, optional | 1..=86400; turns older than `probe.ts - window_s` are ignored; absent means the whole held window (64 turns) |
 | `count` | turn filter | number of earlier turns in the window matching the filter |
 | `gte`, `lte` | int | only with `count`, at least one of them; `lte: 0` means "no such turn" |
@@ -486,6 +486,20 @@ address is dropped; with no key configured both stay null and the start-up
 log says so. `asn` is null until GeoLite2 is wired. A v1 event leaves every
 v2 column null. `features.rs` is unchanged (the v1 vector); `surface`
 enters the vector with the next feature version.
+
+### Actors on this side
+
+As of 2026-10-31 (`docs/actors.md`). Ingest resolves every turn to an
+`actor_id` (deterministic from the package-minted `turn_id`), writes it on
+the turn, and keeps an `actors` window alongside the others. Rules gain
+`scope: actor`; a `block` whose first condition is actor-scoped sticks to
+the actor, so it holds for every identifier bound to it, including a fresh
+session carrying the old tag. The probe finds the actor by the
+highest-precedence identifier present with a live binding (verified
+credential or principal, then session, then tag). Check records join on
+`turn_id` when the probe carried one, else on `(peer_key, ts_us)`. At start
+the bindings and merges reload and the last 24 h of turns refill the
+windows read-only. Migration 0005.
 
 ### Conversation windows
 

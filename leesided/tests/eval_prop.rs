@@ -302,6 +302,8 @@ fn naive(
                 Scope::Principal => principal.is_some() && e.principal == principal,
                 // The generator never presents a credential, so that window is empty.
                 Scope::Credential => false,
+                // Nor an actor.
+                Scope::Actor => false,
             })
             .collect();
         let start = all.len().saturating_sub(WINDOW_TURNS);
@@ -466,7 +468,7 @@ proptest! {
         let windows = Windows::default();
         for (i, e) in events.iter().enumerate() {
             windows.record(
-                &EventKeys { session: e.session, peer: e.peer, principal: e.principal, credential: None },
+                &EventKeys { session: e.session, peer: e.peer, principal: e.principal, credential: None, actor: None },
                 summary(e, BASE_MS + i as u64 * 1000, &syms),
             );
         }
@@ -481,7 +483,7 @@ proptest! {
         let p = Probe { verb, route, session_key: session, peer_key: peer, principal, ts_ms,
             surface: Surface::Web,
             credential: None,
-            credential_verified: false };
+            credential_verified: false, actor: None };
         let got = eval(&rs, &syms, &windows, &p, global, NOW_S);
         let (want_hits, want_winner) = naive(&rules, &events, verb, route, session, peer, principal, ts_ms, global);
 

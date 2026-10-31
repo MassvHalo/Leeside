@@ -177,6 +177,7 @@ fn fixture() -> Fixture {
             peer: session % PEERS,
             principal: session.is_multiple_of(3).then_some(session),
             credential: None,
+            actor: None,
         };
         for _ in 0..64 {
             ts += 100;
@@ -220,6 +221,7 @@ fn run_one(f: &Fixture, p: &(Verb, String, u64, u64, Option<u64>, u64)) -> usize
         surface: Surface::Web,
         credential: None,
         credential_verified: false,
+        actor: None,
     };
     eval(&f.rs, &f.syms, &f.windows, &probe, Mode::Enforce, NOW_S)
         .hits

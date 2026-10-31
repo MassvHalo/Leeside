@@ -21,6 +21,9 @@ pub struct Config {
     pub api_token: Option<String>,
     /// The package's `LEESIDE_HASH_KEY`, so `ip_hash`/`net_hash` join with its values.
     pub hash_key: Option<String>,
+    /// GeoLite2-ASN.mmdb and GeoLite2-Country.mmdb for enrichment; unset or missing leaves asn and country null.
+    pub geoip_asn: Option<PathBuf>,
+    pub geoip_country: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -35,6 +38,8 @@ impl Default for Config {
             socket_gid: None,
             api_token: None,
             hash_key: None,
+            geoip_asn: None,
+            geoip_country: None,
         }
     }
 }
@@ -90,6 +95,16 @@ impl Config {
         if let Ok(v) = std::env::var("LEESIDED_HASH_KEY") {
             if !v.is_empty() {
                 cfg.hash_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_GEOIP_ASN") {
+            if !v.is_empty() {
+                cfg.geoip_asn = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_GEOIP_COUNTRY") {
+            if !v.is_empty() {
+                cfg.geoip_country = Some(PathBuf::from(v));
             }
         }
         cfg

@@ -27,6 +27,8 @@ pub struct Probe<'a> {
     pub credential: Option<u64>,
     /// Only a verified credential stands in for the peer.
     pub credential_verified: bool,
+    /// The canonical actor the probe's identifiers name, when any is bound.
+    pub actor: Option<u64>,
 }
 
 /// One rule whose conditions held.
@@ -117,8 +119,8 @@ pub struct Outcome {
 /// Each scope's window, fetched at most once per probe.
 struct Fetched<'a> {
     windows: &'a Windows,
-    keys: [Option<u64>; 4],
-    refs: [Option<Option<Ref<'a, u64, Window>>>; 4],
+    keys: [Option<u64>; 5],
+    refs: [Option<Option<Ref<'a, u64, Window>>>; 5],
 }
 
 impl<'a> Fetched<'a> {
@@ -136,8 +138,9 @@ impl<'a> Fetched<'a> {
                 peer,
                 probe.principal,
                 probe.credential,
+                probe.actor,
             ],
-            refs: [None, None, None, None],
+            refs: [None, None, None, None, None],
         }
     }
 
@@ -156,6 +159,7 @@ impl<'a> Fetched<'a> {
                 (Scope::Peer, Some(k)) => self.windows.peer(k),
                 (Scope::Principal, Some(k)) => self.windows.principal(k),
                 (Scope::Credential, Some(k)) => self.windows.credential(k),
+                (Scope::Actor, Some(k)) => self.windows.actor(k),
             };
             self.refs[i] = Some(fetched);
         }
@@ -387,6 +391,7 @@ mod tests {
                     peer: PEER,
                     principal: None,
                     credential: None,
+                    actor: None,
                 },
                 t,
             );
@@ -403,6 +408,7 @@ mod tests {
                 surface: Surface::Web,
                 credential: None,
                 credential_verified: false,
+                actor: None,
             }
         }
 
