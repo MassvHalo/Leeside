@@ -33,6 +33,10 @@ Route::get('/venues/{venue}', fn (Venue $venue) => response()->json($venue))->na
 
 Route::get('/secret', fn () => abort(403))->name('secret');
 
+// Reserved for the honeypot group: a named 404 for now, so the surface rule
+// can pick it up by route name later.
+Route::get('/admin-backup', fn () => abort(404))->name('admin.backup');
+
 Route::get('/boom', function () {
     throw new RuntimeException('boom');
 })->name('boom');
