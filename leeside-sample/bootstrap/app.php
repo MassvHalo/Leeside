@@ -20,6 +20,8 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->validateCsrfTokens(except: ['portal/login', 'api/*', 'webhooks/*']);
+        // Leeside's tag cookie is signed, not encrypted; it must travel in clear.
+        $middleware->encryptCookies(except: ['_lsd']);
         $middleware->appendToGroup('web', \App\Http\Middleware\ChallengeDemo::class);
         $middleware->group('webhook', [\App\Http\Middleware\VerifyWebhookSignature::class]);
     })
