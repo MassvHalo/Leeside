@@ -106,6 +106,86 @@ Example:
  "gate":null,"ua_hash":"9c8b7a6f","dropped_since_last":0}
 ```
 
+### The event, schema v2: surface, identifiers, tag, shape, flags
+
+As of 2026-10-31. Source: `docs/actor-identity.md`. v2 is v1 plus the fields
+below; every v1 field keeps its name and meaning. The package emits `v: 2`
+once it fills these; leesided accepts v1 and v2 side by side and stores
+null for v2 columns on a v1 event. leesided must accept v2 before the
+package ships it.
+
+**Surface.** `surface` is one of `honeypot`, `webhook`, `api`, `web`,
+evaluated in that order, first match wins: the route is in the honeypot
+group; the route name or path prefix is in the configured webhook list
+(default prefix `/webhooks/`); the request carries `Authorization: Bearer`,
+a configured API-key header (default `X-Api-Key`, `Api-Key`), the `api`
+middleware group or the `/api` prefix; else `web`. Config can force a
+surface by route name or path prefix. `is_asset` is true when the path ends
+in a configured static extension, whatever the surface.
+
+**Identifiers.** Facts, not identity: the package records them, leesided
+resolves actors from them (`docs/actor-identity.md` section 8).
+
+| Field | Content | Rule |
+| --- | --- | --- |
+| `surface`, `is_asset` | `web`, false | as above |
+| `credential_kind` | `bearer`, `api_key`, `webhook_sig`, null | which machine credential was presented |
+| `credential_hash` | 16 hex or null | HMAC (`credential` namespace) of the token, key, or verified webhook signer id; never the value |
+| `tag_id` | 16 hex or null | the id half of the Leeside tag cookie, hex |
+| `tag_status` | `valid`, `absent`, `malformed`, `bad_mac`, `issued` | `issued` when this response set a new tag |
+| `ip` | string or null | the client address as Laravel resolves it with trusted proxies; **socket transport only**: the `log` and `array` transports write null. leesided hashes it on ingest and stores `ip_hash` (16 hex, `ip` namespace), `net_hash` (16 hex of the /24 or /48, `net` namespace) and `asn`; the address is never written |
+| `ip_trust` | `direct`, `forwarded` | `forwarded` only when the hop was a trusted proxy |
+| `ua_class` | `chromium`, `firefox`, `safari`, `other_browser`, `library`, `empty` | cheap regex, no parser; the raw user agent never leaves PHP |
+| `ua_hash` | 16 hex | widened from 8; the v1 column is replaced |
+| `shape_hash` | 16 hex | the request-shape fingerprint below |
+| `shape` | object | its components, so leesided can re-derive with another recipe |
+| `flags` | list of strings | consistency flags below, per request only |
+| `ja4`, `ja4t`, `h2_fp` | string or null | copied from `X-Leeside-JA4`, `-JA4T`, `-H2` only when the hop was a trusted proxy; else null and the flag `proxy_header_untrusted`. Contract only: nothing produces them yet |
+
+`auth_id` from the source brief is `principal`; `session_hash` is
+`session_key`; `ts_ms` is `ts`, which already carries microseconds.
+
+**Tag cookie** (`web` surface only). Name `_lsd` (configurable). Value
+`base64url(id || issued_at) . "." . base64url(mac)`: `id` 16 random bytes,
+`issued_at` 4-byte big-endian unix seconds, `mac` the first 16 bytes of
+`HMAC-SHA256(secret, id || issued_at)`. Secret `LEESIDE_TAG_SECRET`, else
+derived from `APP_KEY` under the label `leeside-tag`. Attributes `HttpOnly;
+SameSite=Lax; Path=/; Max-Age=31536000`, plus `Secure` when the request is
+secure. Set only when `surface = web`, the response is `text/html` and no
+`valid` tag came in; never on `api`, `webhook` or assets; a valid tag is
+never rotated. Read from `$_COOKIE`, not the cookie bag, so `EncryptCookies`
+cannot interfere; the install step adds `_lsd` to the host's
+`encryptCookies(except: [...])`. An incoming value that looks like a
+Laravel encrypted payload is `malformed` and logs one config warning.
+Status: missing `absent`, wrong shape `malformed`, MAC mismatch `bad_mac`,
+MAC ok `valid`.
+
+This is the one place the package modifies a response other than a
+denial, and it happens in `handle()`, since `terminate()` runs after the
+response has gone out.
+
+**Request shape** (JA4H-style). `shape` holds `method`, `http_version`
+(`SERVER_PROTOCOL`), `has_cookie`, `has_referer`, `header_count` (client
+headers only, nginx-added `X-Forwarded-*` and `X-Real-IP` excluded),
+`accept_language` (first 4 chars of the primary language, else `0000`),
+`header_names_hash` (lowercased names in received order), `cookie_names_hash`
+(sorted names), `order_reliable` (false when header order was found not to
+survive FastCGI, in which case `header_names_hash` is over sorted names).
+`shape_hash` is the hash of those joined with `_`.
+
+**Flags**, each from the current request alone: `ua_chromium_no_ch`,
+`browser_no_sec_fetch`, `browser_no_accept_language`,
+`html_get_no_html_accept`, `library_ua_on_web`, `cookies_on_api`,
+`bearer_with_sec_fetch`, `tag_bad_mac`, `proxy_header_untrusted`.
+Definitions in `docs/actor-identity.md` section 5. Flags are features,
+never verdicts.
+
+**What leesided does with v2.** `turns` gains the columns above (migration
+0002). The probe gains `surface` so rules can match on it. Windows gain a
+`credential` scope keyed on `credential_hash`, and rate is never computed
+per peer on `api` or `webhook`: a peer-scope condition on those surfaces
+evaluates as empty. Actor resolution is a later phase.
+
 ### Shape notation
 
 Keys and types, never values.
@@ -124,8 +204,11 @@ Keys and types, never values.
 
 HMAC-SHA256 under `LEESIDE_HASH_KEY` (derived from `APP_KEY` when unset, as
 HMAC of the string "leeside"), one namespace per field so a session hash and a
-principal hash of the same value never match. Truncated: session, principal
-and peer to 16 hex; id and user agent to 8 hex.
+principal hash of the same value never match. Truncated: session, principal,
+peer, credential, tag, shape and (from v2) user agent to 16 hex; id to 8 hex.
+leesided uses the same key and recipe for `ip` and `net`, so values join
+across the two sides. There is one key and one recipe per install; no second
+salt.
 
 Sampling is deterministic on `session_key`: the first 8 hex digits as a draw
 in [0, 1) compared against `sample_rate`, so a session is wholly in or out.
@@ -159,6 +242,15 @@ Probe:
 ```json
 {"v":1,"ts":1761600000.123,"verb":"POST","route":"portal.login",
  "session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon"}
+```
+
+A v2 probe adds `surface` and, when present, `credential_hash`, so rules can
+match on the surface and count per credential:
+
+```json
+{"v":2,"ts":1761600000.123,"verb":"POST","route":"portal.login","surface":"web",
+ "session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon",
+ "credential_hash":null}
 ```
 
 Verdict:
@@ -197,6 +289,23 @@ JSON when the request expects JSON); no Leeside headers on the wire.
 ],
 'shape' => ['max_depth' => 4, 'max_keys' => 32, 'max_response_bytes' => 65536, 'max_shape_length' => 2048],
 'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],  // route names or URI fnmatch patterns
+// v2
+'surface' => [
+    'honeypot_group'  => 'honeypot',                       // middleware group name; may not exist yet
+    'webhook'         => ['/webhooks/'],                   // route names or path prefixes
+    'api_key_headers' => ['X-Api-Key', 'Api-Key'],
+    'force'           => [],                               // ['route.name' => 'api', '/partner/' => 'api']
+    'asset_extensions'=> ['css', 'js', 'map', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'woff', 'woff2', 'ttf'],
+],
+'tag' => [
+    'enabled' => env('LEESIDE_TAG_ENABLED', true),
+    'cookie'  => env('LEESIDE_TAG_COOKIE', '_lsd'),
+    'secret'  => env('LEESIDE_TAG_SECRET'),                // derived from APP_KEY when unset
+],
+'fingerprint' => [
+    'proxy_headers' => ['X-Leeside-JA4', 'X-Leeside-JA4T', 'X-Leeside-H2'],
+    'header_order_reliable' => env('LEESIDE_HEADER_ORDER_RELIABLE', true),   // set from the deploy-time test
+],
 ```
 
 Relative socket paths resolve against `base_path()`.
@@ -217,6 +326,14 @@ validation messages, exception messages, redirect targets. Reduction to shape
 and hashing happen inside the middleware before serialisation; the event array
 is built from reduced values only.
 
+v2 adds two bounded exceptions. The client `ip` travels only over the Unix
+socket to leesided on the same host, which hashes it on ingest and never
+stores the address; the `log` and `array` transports write null. The tag
+cookie's `id` is a random value the package itself minted, carries nothing
+about the user, and is stored as `tag_id`; the cookie's MAC is never stored.
+The raw user agent, credential values and header values still never leave
+PHP: what crosses is `ua_class`, `credential_hash` and `shape`.
+
 ### Tests
 
 PHPUnit with orchestra/testbench:
@@ -234,6 +351,24 @@ PHPUnit with orchestra/testbench:
 - 404 and 500 are captured with `_unrouted` / the route and the exception
   basename; a 404 from a bound model records `ModelNotFoundException`.
 - Routes in `ignore` produce no event and no check.
+
+v2 (`docs/actor-identity.md` section 10):
+
+- The tag is issued on an HTML `web` response and only there; never on
+  `api`, `webhook`, JSON or asset responses. A valid tag presented back
+  yields `valid` and no new `Set-Cookie`; a tampered MAC yields `bad_mac`
+  and the flag; an encrypted-looking value yields `malformed` and one
+  logged warning.
+- Surface: bearer on a `web` route is `api`; the webhook prefix is
+  `webhook`; a `force` override by route name wins.
+- `credential_hash` is stable across requests for one token and never
+  equals the token; the PII scan covers tokens, cookies and the user agent.
+- `X-Leeside-JA4` from a hop that is not a trusted proxy is dropped and
+  flagged.
+- `ip` is null under the `log` and `array` transports.
+- Header-order survival through nginx + php-fpm is a script in
+  `leeside-sample/deploy/`, run against the real stack; its result sets
+  `header_order_reliable`.
 
 ## Sample app spec: leeside-sample
 
