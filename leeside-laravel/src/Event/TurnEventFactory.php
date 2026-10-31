@@ -71,6 +71,7 @@ class TurnEventFactory
         return [
             'v' => 2,
             'ts' => $context->ts ?? microtime(true),
+            'turn_id' => $context->turnId ?? bin2hex(random_bytes(8)),
             'verb' => $request->getMethod(),
             'route' => $context->route ?? RouteName::fromRoute($request->route()),
             'surface' => $this->surface->classify($request, $request->route()),
@@ -79,6 +80,8 @@ class TurnEventFactory
             'principal' => $principal,
             'credential_hash' => $credential['value'] === null ? null : $this->hasher->credentialHash($credential['value']),
             'credential_status' => $this->credentialStatus($request, $credential['kind'], $credential['value'], $principal),
+            // The tag outlives the session; only a valid one names an actor.
+            'tag_id' => $context->tagStatus === 'valid' ? $context->tagId : null,
         ];
     }
 
@@ -100,6 +103,7 @@ class TurnEventFactory
         return [
             'v' => $probe['v'],
             'ts' => $probe['ts'],
+            'turn_id' => $probe['turn_id'],
             'session_key' => $probe['session_key'],
             'peer_key' => $probe['peer_key'],
             'principal' => $probe['principal'],

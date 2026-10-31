@@ -286,7 +286,7 @@ class TurnEventFactoryTest extends TestCase
         $probe = $this->factory->probe($request, $context);
 
         $this->assertSame(
-            ['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash', 'credential_status'],
+            ['v', 'ts', 'turn_id', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash', 'credential_status', 'tag_id'],
             array_keys($probe)
         );
         $this->assertSame(2, $probe['v']);
@@ -298,7 +298,7 @@ class TurnEventFactoryTest extends TestCase
         $this->assertSame('anon', $probe['principal']);
 
         $event = $this->factory->build($request, new Response('ok'), $context);
-        foreach (['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash', 'credential_status'] as $key) {
+        foreach (['v', 'ts', 'turn_id', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash', 'credential_status', 'tag_id'] as $key) {
             $this->assertSame($probe[$key], $event[$key], "event[$key] matches probe[$key]");
         }
     }

@@ -26,7 +26,7 @@ bindings map.
 | Kind | Value | Strength | Level | TTL | Counts when |
 | --- | --- | --- | --- | --- | --- |
 | `principal` | the hashed auth id | strong | 1 (highest) | 365 d | present (not `anon`) |
-| `credential` | `credential_hash` | strong | 1 | 90 d | `credential_status = verified` only |
+| `credential` | `credential_hash` | strong | 1 | 365 d | `credential_status = verified` only. A credential is the actor on the machine surfaces, same rank as a principal; a quiet partner must not come back as a new actor. Key freshness is `credential_moved`'s job, not the binding's |
 | `session` | `session_key` | strong | 2 | 7 d | present and distinct from `peer_key` (the fallback is not a session) |
 | `tag` | `tag_id` | strong | 3 | 365 d | `tag_status` is `valid` or `issued` |
 | `net` | `net_hash` | weak | 4 | 6 h | present |
@@ -79,12 +79,25 @@ Worked cases the tests encode:
 - Two anonymous actors A (tag T, from a cookie-less burst that then got a
   tag) and B (session S5): a turn carries T and S5; neither holds a level-1
   binding; they merge, the older id canonical.
+- **Login on an existing session.** Guest actor G holds tag T and session
+  S1. Laravel regenerates the session on login, so the login turn carries P
+  (unbound), S2 (unbound) and T (bound to G). G holds no principal, so rule
+  3 allows the merge: P binds, S2 binds, and the pre-login browsing belongs
+  to the user. This is the mirror of the case below; the two differ only in
+  whether the earlier actor already holds a principal.
+- **Logout, then login as someone else** on the same browser: the counter
+  case above (Q, S4, T bound to A which holds P). No merge; T re-points.
 
 ## Ids and merges keep history
 
-Actor ids are deterministic: `actor_id = HMAC(actor, first turn's peer_key
-|| ts_us)` under the install key, 16 hex. The same first turn always opens
-the same actor, which is what the restart determinism test needs.
+Actor ids are deterministic and unique by construction: `actor_id =
+HMAC(actor, turn_id)` of the first turn, 16 hex, under the install key. The
+`turn_id` is minted by the package per request (8 random bytes, hex), rides
+on both the probe and the event, is stored on the turn row and is the join
+key between the two (schema v2, replacing `(peer_key, ts_us)`, which could
+collide for two first turns from one peer in the same microsecond). The same
+first turn always opens the same actor across a replay; two turns never
+share an id.
 
 When A and B merge, the **older actor id stays canonical** and
 `actor_merges(merged_id, into_id, at_ts_us, via_kind)` records B → A.
@@ -125,11 +138,19 @@ A weak cluster is a query over bindings, not an entity.
 - `Windows` gains an `actors` map; `scope: actor` joins the rule grammar and
   the sticky decisions. A `block` on an actor holds for every identifier
   bound to it.
-- The probe has no `tag_id`, so at probe time the actor is looked up from
-  `session_key`, then `principal`, then a verified `credential_hash`, in the
-  in-memory bindings map. A probe whose identifiers have no live binding has
-  no actor window (empty, like an anonymous principal scope). The event that
-  follows resolves fully and may open the actor.
+- At probe time the actor is looked up by the **highest-precedence
+  identifier present**: a verified `credential_hash` or the `principal`,
+  then `session_key`, then `tag_id`, in the in-memory bindings map. Not
+  session first: in the shared-browser case that would answer from the old
+  actor until the event re-points the session. The v2 probe carries
+  `tag_id` when and only when `tag_status` is `valid`; the tag is the one
+  identifier that outlives the session, so without it an actor-scope sticky
+  decision has a hole exactly when a blocked actor returns after session
+  expiry with a fresh session and the old tag. `TagTurn` runs ahead of the
+  gate, so the value exists; precedence keeps a replayed tag harmless, since
+  it sits below session and principal. A probe whose identifiers have no
+  live binding has no actor window (empty, like an anonymous principal
+  scope); the event that follows resolves fully and may open the actor.
 - `features.rs` moves to v2: the v1 vector plus the cluster features above,
   computed on the actor window; `surface` enters as four indicators.
 
@@ -150,7 +171,9 @@ as one that was not.
 `country` arrives with this migration), filled by a separate enrichment
 step at ingest from `GeoLite2-ASN.mmdb` and `GeoLite2-Country.mmdb` via the
 `maxminddb` crate (paths from `LEESIDED_GEOIP_ASN`, `LEESIDED_GEOIP_COUNTRY`;
-files refreshed weekly by `geoipupdate` from the unit's licence key). With
+files refreshed weekly by `geoipupdate`, which needs
+`LEESIDED_GEOIP_ACCOUNT_ID` and `LEESIDED_GEOIP_LICENSE_KEY` in the deploy
+example since MaxMind requires both; the daemon itself only reads the files). With
 a file missing the daemon logs once at start and leaves the column null.
 **No resolution path requires them**: `ja4+asn` degrades to `ja4` alone,
 `country` is a feature for the Accept-Language check and nothing else. The
@@ -183,8 +206,10 @@ CREATE TABLE actor_merges (
   at_us       INTEGER NOT NULL,
   via_kind    TEXT NOT NULL
 );
+ALTER TABLE turns ADD COLUMN turn_id TEXT;      -- v2 join key and the seed of actor ids
 ALTER TABLE turns ADD COLUMN actor_id TEXT;
 ALTER TABLE turns ADD COLUMN country TEXT;
+CREATE UNIQUE INDEX turns_turn_id ON turns (turn_id) WHERE turn_id IS NOT NULL;
 CREATE INDEX turns_actor ON turns (actor_id, ts_us);
 ```
 
@@ -220,15 +245,10 @@ corrected by expiry and the partition rule, not by hand.
 
 ## Open choices for you
 
-1. TTLs as tabled (principal and tag a year, credential 90 days, session 7
-   days, weak kinds 6 hours). Say if any should differ.
-2. The probe lacks `tag_id`. Adding it is a package change (the tag is read
-   before the gate, so it is available); without it, a returning anonymous
-   browser is actor-less at probe time until its first event lands. I'd
-   leave it out of v1 and add it if the gap shows in data.
-3. Deterministic ids from the first turn mean an actor opened by a replayed
-   event gets the same id; a collision needs two turns with the same
-   `peer_key` and `ts_us`, which the join already assumes cannot happen.
+1. Resolved: TTLs as tabled, with credential at a year.
+2. Resolved: `tag_id` is on the v2 probe when the tag is `valid` (above).
+3. Resolved: ids derive from the package-minted `turn_id`, so there is no
+   collision assumption to defend (above).
 
 Order of work once approved: migration and in-memory structures; the
 resolver with the partition tests; wiring into ingest and the check path

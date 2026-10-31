@@ -10,6 +10,8 @@ class TurnContext
 {
     public ?float $ts = null;
     public ?int $hrtime = null;
+    /** 16 hex minted per request: the probe/event join key and the seed of actor ids. */
+    public ?string $turnId = null;
     public ?string $route = null;
     public ?string $exception = null;
     /** @var string[]|null */
@@ -26,6 +28,7 @@ class TurnContext
     {
         $this->ts = microtime(true);
         $this->hrtime = hrtime(true);
+        $this->turnId = bin2hex(random_bytes(8));
         $this->route = null;
         $this->exception = null;
         $this->validationFailed = null;
