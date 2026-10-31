@@ -48,4 +48,18 @@ return [
     // Route names or URI fnmatch patterns that produce no event and no check.
     'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],
 
+    // Schema v2: which kind of client a request belongs to. Evaluated in
+    // order: force, honeypot group, webhook list, api (bearer, API-key header,
+    // the api group or the /api prefix), else web.
+    'surface' => [
+        // Middleware group name whose routes are honeypots; may not exist yet.
+        'honeypot_group' => 'honeypot',
+        // Route names (fnmatch) or path prefixes (leading slash).
+        'webhook' => ['/webhooks/'],
+        'api_key_headers' => ['X-Api-Key', 'Api-Key'],
+        // Force a surface by route name or path prefix: ['partner.*' => 'api', '/partner/' => 'api'].
+        'force' => [],
+        'asset_extensions' => ['css', 'js', 'map', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico', 'webp', 'woff', 'woff2', 'ttf'],
+    ],
+
 ];

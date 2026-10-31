@@ -9,7 +9,10 @@ acts only when the verdict says enforce. Read ../docs/brief.md first.
 ## Non-negotiables
 - Nothing identifying leaves the app unhashed, nothing valued leaves it
   unreduced. Reduce and hash before the event array exists. No raw paths,
-  query strings, body values, header values (except the hashed user agent),
+  query strings, body values, header values (except the hashed user agent,
+  its cheap class, and the hash of a presented credential; the client
+  address travels on the socket to leesided only, which hashes it and never
+  stores it, and the log and array transports null it),
   validation messages or exception messages, ever.
 - No model call anywhere in this package. The sync check talks to leesided
   only, bounded by check.timeout_ms, and fails open on every failure.

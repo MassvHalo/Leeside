@@ -26,7 +26,7 @@ class CaptureTest extends SampleAppTestCase
         $event = $this->lastEvent();
         $hasher = $this->hasher();
 
-        $this->assertSame(1, $event['v']);
+        $this->assertSame(2, $event['v']);
         $this->assertIsFloat($event['ts']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $event['session_key']);
         $this->assertNotSame($event['peer_key'], $event['session_key']);

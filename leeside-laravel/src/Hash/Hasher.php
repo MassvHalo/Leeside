@@ -39,10 +39,16 @@ class Hasher
         return $this->truncate($this->hmac('id', $key), 8);
     }
 
-    /** 8 hex. */
+    /** 16 hex (8 before schema v2). The raw user agent never leaves the app. */
     public function uaHash(string $userAgent): string
     {
-        return $this->truncate($this->hmac('ua', $userAgent), 8);
+        return $this->truncate($this->hmac('ua', $userAgent), 16);
+    }
+
+    /** 16 hex, of a bearer token, API key or verified webhook signer id. */
+    public function credentialHash(string $credential): string
+    {
+        return $this->truncate($this->hmac('credential', $credential), 16);
     }
 
     /**

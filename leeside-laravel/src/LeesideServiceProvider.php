@@ -25,6 +25,7 @@ use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Middleware\CaptureTurn;
 use Leeside\Laravel\Middleware\GateTurn;
 use Leeside\Laravel\Reduce\ShapeReducer;
+use Leeside\Laravel\Surface\SurfaceClassifier;
 use Leeside\Laravel\Transport\LogTransport;
 use Leeside\Laravel\Transport\NullTransport;
 use Leeside\Laravel\Transport\Transport;
@@ -49,6 +50,8 @@ class LeesideServiceProvider extends ServiceProvider
             (array) $app['config']->get('leeside.shape', [])
         ));
 
+        $this->app->singleton(SurfaceClassifier::class, fn ($app) => new SurfaceClassifier($app['config']));
+
         $this->app->singleton(TurnEventFactory::class, fn ($app) => new TurnEventFactory(
             $app[Hasher::class],
             $app[ShapeReducer::class],
@@ -58,7 +61,8 @@ class LeesideServiceProvider extends ServiceProvider
                 'sample_rate' => (float) $app['config']->get('leeside.sample_rate', 1.0),
                 'guards' => array_keys((array) $app['config']->get('auth.guards', ['web' => []])),
                 'max_response_bytes' => (int) $app['config']->get('leeside.shape.max_response_bytes', 65536),
-            ]
+            ],
+            $app[SurfaceClassifier::class]
         ));
 
         $this->app->singleton(Transport::class, function ($app) {

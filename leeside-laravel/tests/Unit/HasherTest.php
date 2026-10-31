@@ -35,7 +35,7 @@ class HasherTest extends TestCase
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $this->hasher->peerKey('1.2.3.4', 'ua'));
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $this->hasher->principal('1'));
         $this->assertMatchesRegularExpression('/^[0-9a-f]{8}$/', $this->hasher->idHash('1'));
-        $this->assertMatchesRegularExpression('/^[0-9a-f]{8}$/', $this->hasher->uaHash('ua'));
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $this->hasher->uaHash('ua'));
     }
 
     public function test_hashing_is_deterministic_and_input_sensitive(): void

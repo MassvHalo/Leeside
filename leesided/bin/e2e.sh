@@ -13,6 +13,10 @@ WORK="${E2E_DIR:-/tmp/leeside-e2e}"
 API=127.0.0.1:7391
 PORT=8765
 rm -rf "$WORK"; mkdir -p "$WORK/run"
+if curl -sf "http://$API/health" >/dev/null 2>&1; then
+  echo "something already answers on $API (a previous run?); stop it first: pgrep -a leesided" >&2
+  exit 1
+fi
 
 cleanup() { kill "${PPID_:-}" 2>/dev/null; kill -INT "${LPID:-}" 2>/dev/null; wait "${LPID:-}" 2>/dev/null; }
 trap cleanup EXIT

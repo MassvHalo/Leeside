@@ -55,7 +55,7 @@ class TurnEventFactoryTest extends TestCase
         $event = $this->factory->build($request, $response, $context);
 
         $peer = $this->hasher->peerKey('10.0.0.9', 'TestAgent/1.0');
-        $this->assertSame(1, $event['v']);
+        $this->assertSame(2, $event['v']);
         $this->assertSame($context->ts, $event['ts']);
         $this->assertSame($peer, $event['session_key']);
         $this->assertSame($peer, $event['peer_key']);
@@ -286,10 +286,10 @@ class TurnEventFactoryTest extends TestCase
         $probe = $this->factory->probe($request, $context);
 
         $this->assertSame(
-            ['v', 'ts', 'verb', 'route', 'session_key', 'peer_key', 'principal'],
+            ['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash'],
             array_keys($probe)
         );
-        $this->assertSame(1, $probe['v']);
+        $this->assertSame(2, $probe['v']);
         $this->assertSame($context->ts, $probe['ts']);
         $this->assertSame('POST', $probe['verb']);
         $this->assertSame('portal.login', $probe['route']);
@@ -298,7 +298,7 @@ class TurnEventFactoryTest extends TestCase
         $this->assertSame('anon', $probe['principal']);
 
         $event = $this->factory->build($request, new Response('ok'), $context);
-        foreach (['v', 'ts', 'verb', 'route', 'session_key', 'peer_key', 'principal'] as $key) {
+        foreach (['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash'] as $key) {
             $this->assertSame($probe[$key], $event[$key], "event[$key] matches probe[$key]");
         }
     }

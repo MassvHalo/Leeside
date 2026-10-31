@@ -9,6 +9,8 @@ use Illuminate\Http\Request;
 use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Reduce\ShapeReducer;
 use Leeside\Laravel\Stats;
+use Leeside\Laravel\Surface\SurfaceClassifier;
+use Leeside\Laravel\Surface\UserAgentClass;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\RedirectResponse;
@@ -23,6 +25,7 @@ class TurnEventFactory
     /** @var string[] */
     private readonly array $guards;
     private readonly int $maxResponseBytes;
+    private readonly SurfaceClassifier $surface;
 
     /**
      * @param  array{sample_rate?: float, guards?: string[], max_response_bytes?: int}  $options
@@ -33,7 +36,9 @@ class TurnEventFactory
         private readonly AuthFactory $auth,
         private readonly Stats $stats,
         array $options = [],
+        ?SurfaceClassifier $surface = null,
     ) {
+        $this->surface = $surface ?? new SurfaceClassifier;
         $this->sampleRate = $options['sample_rate'] ?? 1.0;
         $this->guards = $options['guards'] ?? ['web'];
         $this->maxResponseBytes = $options['max_response_bytes'] ?? 65536;
@@ -46,15 +51,18 @@ class TurnEventFactory
         $peerKey = $this->hasher->peerKey($request->ip() ?? 'unknown', $userAgent);
 
         $sessionId = $this->sessionId($request);
+        $credential = $this->surface->credential($request)['value'];
 
         return [
-            'v' => 1,
+            'v' => 2,
             'ts' => $context->ts ?? microtime(true),
             'verb' => $request->getMethod(),
             'route' => $context->route ?? RouteName::fromRoute($request->route()),
+            'surface' => $this->surface->classify($request, $request->route()),
             'session_key' => $sessionId === null ? $peerKey : $this->hasher->sessionKey($sessionId),
             'peer_key' => $peerKey,
             'principal' => $this->principal(),
+            'credential_hash' => $credential === null ? null : $this->hasher->credentialHash($credential),
         ];
     }
 
@@ -90,7 +98,35 @@ class TurnEventFactory
             'gate' => $context->gate,
             'ua_hash' => $this->hasher->uaHash((string) $request->userAgent()),
             'dropped_since_last' => $this->stats->pending(),
+            // v2: identifiers and facts; leesided resolves actors from them.
+            'surface' => $probe['surface'],
+            'is_asset' => $this->surface->isAsset($request),
+            'credential_kind' => $this->surface->credential($request)['kind'],
+            'credential_hash' => $probe['credential_hash'],
+            // Socket transport only: log and array transports null this out.
+            'ip' => $request->ip(),
+            'ip_trust' => $this->ipTrust($request),
+            'ua_class' => UserAgentClass::classify($request->userAgent()),
+            'remote_port' => $this->remotePort($request),
+            'ts_ms' => (int) floor($probe['ts'] * 1000),
         ];
+    }
+
+    /** `forwarded` only when a trusted proxy resolved the client address. */
+    private function ipTrust(Request $request): string
+    {
+        try {
+            return count($request->getClientIps()) > 1 ? 'forwarded' : 'direct';
+        } catch (Throwable) {
+            return 'direct';
+        }
+    }
+
+    private function remotePort(Request $request): ?int
+    {
+        $port = $request->server->get('REMOTE_PORT');
+
+        return is_numeric($port) ? (int) $port : null;
     }
 
     private function sessionId(Request $request): ?string

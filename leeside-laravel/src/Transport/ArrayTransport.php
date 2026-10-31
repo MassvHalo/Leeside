@@ -14,6 +14,10 @@ class ArrayTransport implements Transport
             return false;
         }
 
+        if (array_key_exists('ip', $event)) {
+            $event['ip'] = null;
+        }
+
         $this->events[] = $event;
 
         return true;
