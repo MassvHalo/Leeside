@@ -132,8 +132,8 @@ resolves actors from them (`docs/actor-identity.md` section 8).
 | `credential_kind` | `bearer`, `api_key`, `webhook_sig`, null | which machine credential was presented |
 | `credential_hash` | 16 hex or null | HMAC (`credential` namespace) of the token, key, or verified webhook signer id; never the value |
 | `credential_status` | `verified`, `rejected`, `unverified`, null | null without a credential. `verified` when the app had verified it by the time Leeside looked: a resolved principal (auth middleware ran ahead), `leeside.webhook_signer` set by a verifying middleware ahead, or the app's registered `CredentialVerifier` returned true. `rejected` when it was unverified and the response was 401 or 403. Else `unverified`: a header was presented, nothing vouched for it |
-| `tag_id` | 16 hex or null | the id half of the Leeside tag cookie, hex |
-| `tag_status` | `valid`, `absent`, `malformed`, `bad_mac`, `issued` | `issued` when this response set a new tag |
+| `tag_id` | 16 hex or null | HMAC (`tag` namespace) of the cookie's 16-byte random id; after a response that issued a tag, the new id, so leesided can link the next request. Null for `bad_mac` and `malformed` unless a new tag was issued |
+| `tag_status` | `valid`, `absent`, `malformed`, `bad_mac`, `issued`, null | the incoming tag's status, except `absent` becomes `issued` when this response set one. Null when the tag middleware did not run (not the `web` group) or the tag is disabled |
 | `ip` | string or null | the client address as Laravel resolves it with trusted proxies; **socket transport only**: the `log` and `array` transports write null. leesided hashes it on ingest and stores `ip_hash` (16 hex, `ip` namespace), `net_hash` (16 hex of the /24 or /48, `net` namespace) and `asn`; the address is never written |
 | `ip_trust` | `direct`, `forwarded` | `forwarded` only when the hop was a trusted proxy |
 | `ua_class` | `chromium`, `firefox`, `safari`, `other_browser`, `library`, `empty` | cheap regex, no parser; the raw user agent never leaves PHP |

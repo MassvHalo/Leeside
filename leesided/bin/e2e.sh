@@ -36,6 +36,17 @@ for _ in $(seq 1 100); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && bre
 
 echo "== bin/traffic.sh in monitor mode (benign browse, validation burst, enumeration)"
 BASE_URL="http://127.0.0.1:$PORT" JAR="$WORK/jar.txt" bash bin/traffic.sh
+echo "== machine surfaces: two signed webhooks, one unsigned, one good API key, three wrong keys"
+BODY='{"order":42}'
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "${LEESIDE_DEMO_WEBHOOK_SECRET:-demo-webhook-secret}" | sed 's/^.* //')
+for signer in acct_1 acct_2; do
+  curl -s -o /dev/null -w "  webhook signed by $signer -> %{http_code}\n" -H 'Content-Type: application/json' -H "X-Signature: $SIG" -H "X-Signer: $signer" -d "$BODY" "http://127.0.0.1:$PORT/webhooks/demo"
+done
+curl -s -o /dev/null -w "  webhook unsigned -> %{http_code}\n" -H 'Content-Type: application/json' -d "$BODY" "http://127.0.0.1:$PORT/webhooks/demo"
+curl -s -o /dev/null -w "  api/ping good key -> %{http_code}\n" -H "X-Api-Key: ${LEESIDE_DEMO_API_KEY:-demo-api-key}" "http://127.0.0.1:$PORT/api/ping"
+for k in wrong-1 wrong-2 wrong-3; do
+  curl -s -o /dev/null -w "  api/ping $k -> %{http_code}\n" -H "X-Api-Key: $k" "http://127.0.0.1:$PORT/api/ping"
+done
 sleep 11   # one stats flush
 echo "== what leesided saw"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("checks", h["check"]["total"], "| events", h["ingest"]["total"], "| sessions", h["windows"]["sessions"], "| unjoined", h["check"]["unjoined"], "| dropped", h["store"]["dropped"])'
@@ -55,6 +66,14 @@ curl -s -i -c "$WORK/jar2.txt" -b "$WORK/jar2.txt" -A leeside-traffic/1.0 -d "ph
 curl -s -o /dev/null -c "$WORK/jar2.txt" -b "$WORK/jar2.txt" -A leeside-traffic/1.0 -w "  same session GET / -> %{http_code} (sticky)\n" "http://127.0.0.1:$PORT/"
 curl -s -o /dev/null -A leeside-traffic/1.0 -w "  no cookie  GET / -> %{http_code} (untouched)\n" "http://127.0.0.1:$PORT/"
 
+echo "== tag: a browser-like session, three HTML pages with a cookie jar"
+rm -f "$WORK/jar3.txt"
+for i in 1 2 3; do
+  curl -s -o /dev/null -c "$WORK/jar3.txt" -b "$WORK/jar3.txt" -A "Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0.0.0 Safari/537.36" -w "  GET / #$i -> %{http_code}\n" "http://127.0.0.1:$PORT/"
+done
+grep -c "_lsd" "$WORK/jar3.txt" | sed 's/^/  _lsd cookies in the jar: /'
+sleep 1
+sqlite3 "$WORK/leesided.sqlite" "select '  tag_status', coalesce(tag_status,'-'), count(*), count(distinct tag_id) as ids from turns where ua_class='chromium' group by 2;"
 echo "== every turn, by surface, credential status and verdict (events, not probes)"
 sqlite3 "$WORK/leesided.sqlite" "select coalesce(surface,'v1'), coalesce(credential_status,'-'), coalesce(verdict,'no check'), count(*) from turns group by 1,2,3 order by 4 desc;"
 echo "== the decision in SQLite"
