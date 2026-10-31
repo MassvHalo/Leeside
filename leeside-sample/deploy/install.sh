@@ -56,7 +56,15 @@ ufw --force enable >/dev/null
 # The API token: generated once, kept across reinstalls.
 mkdir -p /etc/leeside
 if [ ! -s /etc/leeside/leesided.env ]; then
-    printf 'LEESIDED_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/leeside/leesided.env
+    {
+        printf 'LEESIDED_API_TOKEN=%s\n' "$(openssl rand -hex 32)"
+        # Same value as the app's LEESIDE_HASH_KEY, so ip_hash/net_hash join.
+        printf 'LEESIDED_HASH_KEY=\n'
+        # MaxMind requires both for geoipupdate since May 2024; the daemon
+        # itself only reads the .mmdb files named in the unit.
+        printf 'LEESIDED_GEOIP_ACCOUNT_ID=\n'
+        printf 'LEESIDED_GEOIP_LICENSE_KEY=\n'
+    } > /etc/leeside/leesided.env
 fi
 chown root:www-data /etc/leeside/leesided.env
 chmod 0640 /etc/leeside/leesided.env
