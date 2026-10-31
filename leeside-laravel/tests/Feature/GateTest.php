@@ -28,7 +28,7 @@ class GateTest extends SampleAppTestCase
         $this->assertCount(1, $this->rules->probes);
         $probe = $this->rules->probes[0];
 
-        $this->assertSame(['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash'], array_keys($probe));
+        $this->assertSame(['v', 'ts', 'verb', 'route', 'surface', 'session_key', 'peer_key', 'principal', 'credential_hash', 'credential_status'], array_keys($probe));
         $this->assertSame('portal.login', $probe['route']);
         $this->assertSame('POST', $probe['verb']);
         $this->assertSame('anon', $probe['principal']);

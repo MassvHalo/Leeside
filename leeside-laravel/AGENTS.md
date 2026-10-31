@@ -24,6 +24,16 @@ acts only when the verdict says enforce. Read ../docs/brief.md first.
   verdicts are recorded on the event and change nothing.
 - No HaloWiFi assumptions. This package installs on any Laravel 11+ app.
 
+## Install notes the host app must follow (see README.md)
+- `encryptCookies(except: ['_lsd'])` so the tag cookie is readable and
+  writable in clear.
+- Webhook signature verification runs as middleware in the `webhook`
+  group, ahead of Leeside's gate, and sets `leeside.webhook_signer`; in the
+  controller it is too late for the probe.
+- API keys the app recognises are vouched for by binding
+  `Leeside\Laravel\Surface\CredentialVerifier`; an unverified header is
+  recorded but exempts nothing.
+
 ## Stack
 - PHP 8.2+, illuminate/* ^11|^12|^13 only. No other runtime dependencies.
 - Tests with PHPUnit and orchestra/testbench. `composer test` must pass.

@@ -9,8 +9,10 @@ return [
     // wires the middleware itself (e.g. in bootstrap/app.php).
     'register_middleware' => env('LEESIDE_REGISTER_MIDDLEWARE', true),
 
-    // Route groups the gate middleware is appended to.
-    'gate_groups' => ['web', 'api'],
+    // Route groups the gate middleware is appended to. Put webhook routes in a
+    // 'webhook' group whose signature verifier comes first: the gate is
+    // appended after it, so the verified signer is on the probe.
+    'gate_groups' => ['web', 'api', 'webhook'],
 
     // Deterministic sampling in [0, 1]; a session is wholly in or out.
     // The synchronous check is never sampled.

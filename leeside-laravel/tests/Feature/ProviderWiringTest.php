@@ -23,7 +23,7 @@ class ProviderWiringTest extends TestCase
     {
         $this->assertTrue($this->app['config']->get('leeside.enabled'));
         $this->assertTrue($this->app['config']->get('leeside.register_middleware'));
-        $this->assertSame(['web', 'api'], $this->app['config']->get('leeside.gate_groups'));
+        $this->assertSame(['web', 'api', 'webhook'], $this->app['config']->get('leeside.gate_groups'));
         $this->assertSame(1.0, $this->app['config']->get('leeside.sample_rate'));
         $this->assertSame('udg', $this->app['config']->get('leeside.transport'));
         $this->assertSame('/run/leeside/events.sock', $this->app['config']->get('leeside.events_socket'));

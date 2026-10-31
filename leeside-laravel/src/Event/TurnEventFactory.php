@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Reduce\ShapeReducer;
 use Leeside\Laravel\Stats;
+use Leeside\Laravel\Surface\CredentialVerifier;
 use Leeside\Laravel\Surface\SurfaceClassifier;
 use Leeside\Laravel\Surface\UserAgentClass;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -26,6 +27,7 @@ class TurnEventFactory
     private readonly array $guards;
     private readonly int $maxResponseBytes;
     private readonly SurfaceClassifier $surface;
+    private readonly ?CredentialVerifier $verifier;
 
     /**
      * @param  array{sample_rate?: float, guards?: string[], max_response_bytes?: int}  $options
@@ -37,8 +39,10 @@ class TurnEventFactory
         private readonly Stats $stats,
         array $options = [],
         ?SurfaceClassifier $surface = null,
+        ?CredentialVerifier $verifier = null,
     ) {
         $this->surface = $surface ?? new SurfaceClassifier;
+        $this->verifier = $verifier;
         $this->sampleRate = $options['sample_rate'] ?? 1.0;
         $this->guards = $options['guards'] ?? ['web'];
         $this->maxResponseBytes = $options['max_response_bytes'] ?? 65536;
@@ -51,7 +55,8 @@ class TurnEventFactory
         $peerKey = $this->hasher->peerKey($request->ip() ?? 'unknown', $userAgent);
 
         $sessionId = $this->sessionId($request);
-        $credential = $this->surface->credential($request)['value'];
+        $credential = $this->surface->credential($request);
+        $principal = $this->principal();
 
         return [
             'v' => 2,
@@ -61,8 +66,9 @@ class TurnEventFactory
             'surface' => $this->surface->classify($request, $request->route()),
             'session_key' => $sessionId === null ? $peerKey : $this->hasher->sessionKey($sessionId),
             'peer_key' => $peerKey,
-            'principal' => $this->principal(),
-            'credential_hash' => $credential === null ? null : $this->hasher->credentialHash($credential),
+            'principal' => $principal,
+            'credential_hash' => $credential['value'] === null ? null : $this->hasher->credentialHash($credential['value']),
+            'credential_status' => $this->credentialStatus($request, $credential['kind'], $credential['value'], $principal),
         ];
     }
 
@@ -103,6 +109,7 @@ class TurnEventFactory
             'is_asset' => $this->surface->isAsset($request),
             'credential_kind' => $this->surface->credential($request)['kind'],
             'credential_hash' => $probe['credential_hash'],
+            'credential_status' => $this->eventCredentialStatus($probe['credential_status'], $response->getStatusCode()),
             // Socket transport only: log and array transports null this out.
             'ip' => $request->ip(),
             'ip_trust' => $this->ipTrust($request),
@@ -110,6 +117,46 @@ class TurnEventFactory
             'remote_port' => $this->remotePort($request),
             'ts_ms' => (int) floor($probe['ts'] * 1000),
         ];
+    }
+
+    /**
+     * Whether something vouched for the credential by the time Leeside looked:
+     * a resolved principal (auth middleware ran ahead), a webhook signer set
+     * by a verifying middleware ahead, or the app's CredentialVerifier.
+     *
+     * @return 'verified'|'unverified'|null  null without a credential
+     */
+    private function credentialStatus(Request $request, ?string $kind, ?string $value, string $principal): ?string
+    {
+        if ($kind === null || $value === null) {
+            return null;
+        }
+
+        if ($principal !== 'anon' || $kind === 'webhook_sig') {
+            return 'verified';
+        }
+
+        if ($this->verifier !== null) {
+            try {
+                if ($this->verifier->verify($request, $kind, $value)) {
+                    return 'verified';
+                }
+            } catch (Throwable) {
+                // A failing verifier never vouches.
+            }
+        }
+
+        return 'unverified';
+    }
+
+    /** An unverified credential that the app answered 401 or 403 was rejected. */
+    private function eventCredentialStatus(?string $probeStatus, int $status): ?string
+    {
+        if ($probeStatus === 'unverified' && ($status === 401 || $status === 403)) {
+            return 'rejected';
+        }
+
+        return $probeStatus;
     }
 
     /** `forwarded` only when a trusted proxy resolved the client address. */

@@ -25,6 +25,7 @@ use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Middleware\CaptureTurn;
 use Leeside\Laravel\Middleware\GateTurn;
 use Leeside\Laravel\Reduce\ShapeReducer;
+use Leeside\Laravel\Surface\CredentialVerifier;
 use Leeside\Laravel\Surface\SurfaceClassifier;
 use Leeside\Laravel\Transport\LogTransport;
 use Leeside\Laravel\Transport\NullTransport;
@@ -62,7 +63,8 @@ class LeesideServiceProvider extends ServiceProvider
                 'guards' => array_keys((array) $app['config']->get('auth.guards', ['web' => []])),
                 'max_response_bytes' => (int) $app['config']->get('leeside.shape.max_response_bytes', 65536),
             ],
-            $app[SurfaceClassifier::class]
+            $app[SurfaceClassifier::class],
+            $app->bound(CredentialVerifier::class) ? $app[CredentialVerifier::class] : null
         ));
 
         $this->app->singleton(Transport::class, function ($app) {
