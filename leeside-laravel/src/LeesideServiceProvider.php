@@ -24,9 +24,11 @@ use Leeside\Laravel\Event\TurnEventFactory;
 use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Middleware\CaptureTurn;
 use Leeside\Laravel\Middleware\GateTurn;
+use Leeside\Laravel\Middleware\TagTurn;
 use Leeside\Laravel\Reduce\ShapeReducer;
 use Leeside\Laravel\Surface\CredentialVerifier;
 use Leeside\Laravel\Surface\SurfaceClassifier;
+use Leeside\Laravel\Tag\TagCookie;
 use Leeside\Laravel\Transport\LogTransport;
 use Leeside\Laravel\Transport\NullTransport;
 use Leeside\Laravel\Transport\Transport;
@@ -52,6 +54,12 @@ class LeesideServiceProvider extends ServiceProvider
         ));
 
         $this->app->singleton(SurfaceClassifier::class, fn ($app) => new SurfaceClassifier($app['config']));
+
+        $this->app->singleton(TagCookie::class, fn ($app) => TagCookie::fromConfig(
+            $this->stringOrNull($app['config']->get('leeside.tag.secret')),
+            (string) $app['config']->get('app.key', ''),
+            $this->stringOrNull($app['config']->get('leeside.tag.cookie'))
+        ));
 
         $this->app->singleton(TurnEventFactory::class, fn ($app) => new TurnEventFactory(
             $app[Hasher::class],
@@ -169,6 +177,10 @@ class LeesideServiceProvider extends ServiceProvider
         $groups = (array) $this->app['config']->get('leeside.gate_groups', ['web', 'api']);
 
         $pushGate = function () use ($router, $groups) {
+            // The tag lives on the web surface only; pushed before the gate so
+            // the host's EncryptCookies (outer) still sees the Set-Cookie on the
+            // way out, excepted or not.
+            $router->pushMiddlewareToGroup('web', TagTurn::class);
             foreach ($groups as $group) {
                 $router->pushMiddlewareToGroup($group, GateTurn::class);
             }

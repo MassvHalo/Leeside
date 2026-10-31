@@ -45,6 +45,12 @@ class Hasher
         return $this->truncate($this->hmac('ua', $userAgent), 16);
     }
 
+    /** 16 hex, of the tag cookie's random id; the id itself is never written. */
+    public function tagHash(string $tagId): string
+    {
+        return $this->truncate($this->hmac('tag', $tagId), 16);
+    }
+
     /** 16 hex, of a bearer token, API key or verified webhook signer id. */
     public function credentialHash(string $credential): string
     {

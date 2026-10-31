@@ -50,6 +50,15 @@ return [
     // Route names or URI fnmatch patterns that produce no event and no check.
     'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],
 
+    // Schema v2: the Leeside tag, a signed random id set on HTML pages of the
+    // web surface. The host app must list the cookie in encryptCookies(except:).
+    'tag' => [
+        'enabled' => env('LEESIDE_TAG_ENABLED', true),
+        'cookie' => env('LEESIDE_TAG_COOKIE', '_lsd'),
+        // Derived from APP_KEY under a fixed label when unset.
+        'secret' => env('LEESIDE_TAG_SECRET'),
+    ],
+
     // Schema v2: which kind of client a request belongs to. Evaluated in
     // order: force, honeypot group, webhook list, api (bearer, API-key header,
     // the api group or the /api prefix), else web.

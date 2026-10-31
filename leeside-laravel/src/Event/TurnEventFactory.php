@@ -110,6 +110,8 @@ class TurnEventFactory
             'credential_kind' => $this->surface->credential($request)['kind'],
             'credential_hash' => $probe['credential_hash'],
             'credential_status' => $this->eventCredentialStatus($probe['credential_status'], $response->getStatusCode()),
+            'tag_id' => $context->tagId,
+            'tag_status' => $context->tagStatus,
             // Socket transport only: log and array transports null this out.
             'ip' => $request->ip(),
             'ip_trust' => $this->ipTrust($request),

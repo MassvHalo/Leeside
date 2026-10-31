@@ -17,6 +17,10 @@ class TurnContext
     public ?string $authEvent = null;
     /** @var array{action: string, mode: string, rule: ?string, applied: bool}|null */
     public ?array $gate = null;
+    /** valid | absent | malformed | bad_mac | issued; null when the tag middleware did not run */
+    public ?string $tagStatus = null;
+    /** 16-hex keyed hash of the tag id the client carries after this turn */
+    public ?string $tagId = null;
 
     public function begin(): void
     {
@@ -27,6 +31,8 @@ class TurnContext
         $this->validationFailed = null;
         $this->authEvent = null;
         $this->gate = null;
+        $this->tagStatus = null;
+        $this->tagId = null;
     }
 
     public function latencyMs(): float
@@ -60,6 +66,12 @@ class TurnContext
     public function recordAuthEvent(string $event): void
     {
         $this->authEvent = $event;
+    }
+
+    public function recordTag(string $status, ?string $idHash): void
+    {
+        $this->tagStatus = $status;
+        $this->tagId = $idHash;
     }
 
     public function recordGate(string $action, string $mode, ?string $rule, bool $applied): void

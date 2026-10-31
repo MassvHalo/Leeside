@@ -24,6 +24,8 @@ class HasherTest extends TestCase
             $this->hasher->principal('same'),
             $this->hasher->idHash('same'),
             $this->hasher->uaHash('same'),
+            $this->hasher->credentialHash('same'),
+            $this->hasher->tagHash('same'),
         ];
 
         $this->assertSame($hashes, array_unique($hashes));
