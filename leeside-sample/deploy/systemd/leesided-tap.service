@@ -1,0 +1,29 @@
+[Unit]
+Description=Leeside passive fingerprint tap (JA4 and JA4T to leesided)
+# leesided/docs/tap.md. Needs CAP_NET_RAW; nothing else in leesided does, so
+# it is its own process. Not leeside-tap.service, which was the package's
+# stand-in for leesided and is gone.
+After=leesided.service
+Wants=leesided.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+Environment=LEESIDED_SOCKET_DIR=/run/leeside
+Environment=LEESIDED_TAP_PORTS=80,443
+Environment=LEESIDED_TAP_TLS_PORTS=443
+# LEESIDED_TAP_IFACE may be set in leesided.env; unset, the tap takes the
+# interface of the default route.
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/leeside/leesided.env
+ExecStart=/usr/local/bin/leesided tap
+StandardError=journal
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

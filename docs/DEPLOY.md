@@ -129,3 +129,27 @@ sudo chown -R www-data:www-data storage bootstrap/cache
 The datagram/stream sockets under `storage/leeside/` are created by
 `leeside:tap` (or leesided) at runtime; nothing to pre-create, but that
 directory needs the same writability when the tap runs as another user.
+
+## Passive fingerprint tap
+
+`leesided-tap.service` runs `leesided tap` as www-data with
+`CAP_NET_RAW` (the unit grants it; no setcap on the binary). It captures
+SYNs and ClientHellos on ports 80 and 443 of the default-route interface and
+sends JA4T and JA4 to leesided over `/run/leeside/fp.sock`; leesided fills
+the turn columns. Nothing changes for nginx or the package, and stopping
+the unit only leaves `ja4` and `ja4t` null again. Set `LEESIDED_TAP_IFACE`
+in `/etc/leeside/leesided.env` when the default route is not the interface
+clients arrive on. Check with:
+
+```bash
+systemctl status leesided-tap
+curl -s 127.0.0.1:7390/health | python3 -c 'import sys,json; print(json.load(sys.stdin)["tap"])'
+```
+
+`matched` should climb with traffic; a high `unknown` means the tap is on
+the wrong interface or the request reached PHP through a proxy, so
+`remote_port` is the proxy's.
+
+The e2e script's tap act needs the same capability on the development
+binary, once per build: `sudo setcap cap_net_raw+ep leesided/target/release/leesided`.
+Without it the act is skipped and says so.

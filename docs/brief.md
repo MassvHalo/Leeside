@@ -141,7 +141,7 @@ resolves actors from them (`docs/actor-identity.md` section 8).
 | `shape_hash` | 16 hex | the request-shape fingerprint below |
 | `shape` | object | its components, so leesided can re-derive with another recipe |
 | `flags` | list of strings | consistency flags below, per request only |
-| `ja4`, `ja4t`, `h2_fp` | string or null | copied from `X-Leeside-JA4`, `-JA4T`, `-H2` only when the hop was a trusted proxy; else null and the flag `proxy_header_untrusted`. Contract only: nothing produces them yet |
+| `ja4`, `ja4t`, `h2_fp` | string or null | copied from `X-Leeside-JA4`, `-JA4T`, `-H2` only when the hop was a trusted proxy; else null and the flag `proxy_header_untrusted`. No proxy produces them yet; leesided's passive tap (`leesided/docs/tap.md`) fills `ja4` and `ja4t` on its own side at ingest when the event brought null, and may add the flag `ua_vs_ja4_mismatch` to `flags` on the stored turn. `h2_fp` stays null until a proxy sends it |
 
 `auth_id` from the source brief is `principal`; `session_hash` is
 `session_key`; `ts_ms` is `ts`, which already carries microseconds.

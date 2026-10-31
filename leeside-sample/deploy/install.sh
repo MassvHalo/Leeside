@@ -94,8 +94,9 @@ if [ -f /etc/systemd/system/leeside-tap.service ]; then
     systemctl disable --now leeside-tap || true
 fi
 cp "$SCRIPT_DIR/systemd/leesided.service" /etc/systemd/system/leesided.service
+cp "$SCRIPT_DIR/systemd/leesided-tap.service" /etc/systemd/system/leesided-tap.service
 systemctl daemon-reload
 # Started by deploy.sh once the binary is in place.
-systemctl enable leesided
+systemctl enable leesided leesided-tap
 
 bash "$SCRIPT_DIR/deploy.sh"

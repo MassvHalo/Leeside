@@ -14,6 +14,8 @@ Environment=LEESIDED_SOCKET_DIR=/run/leeside
 Environment=LEESIDED_DB=/var/lib/leeside/leesided.sqlite
 Environment=LEESIDED_API=127.0.0.1:7390
 Environment=LEESIDED_RULES_DIR=/var/www/leeside/leesided/rules/install
+# JA4 to browser/library for the ua_vs_ja4_mismatch flag (leesided/docs/tap.md).
+Environment=LEESIDED_JA4_CLASSES=/var/www/leeside/leesided/data/ja4-classes.json
 Environment=RUST_LOG=info
 # GeoLite2 for asn and country enrichment (docs/actors.md). geoipupdate keeps
 # the files fresh weekly; with them absent leesided logs once and leaves the
