@@ -14,6 +14,15 @@ use Leeside\Laravel\Hash\Hasher;
  */
 final class RequestShape
 {
+    /** How header order arrives on this host, from deploy/header-order-check.sh. */
+    public const ORDER_RECEIVED = 'received';
+    public const ORDER_REVERSED = 'reversed';
+    public const ORDER_UNKNOWN = 'unknown';
+
+    /** What the header-names hash was taken over. */
+    public const RECIPE_RECEIVED = 'received';
+    public const RECIPE_SORTED = 'sorted';
+
     /** Headers nginx adds on the way in; they are not the client's. */
     private const PROXY_ADDED = [
         'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port', 'x-forwarded-prefix',
@@ -21,14 +30,16 @@ final class RequestShape
     ];
 
     /**
+     * `$order` is the host's transform: `received` and `reversed` are both
+     * recoverable, so the names are canonicalised to received order and
+     * hashed; only `unknown` falls back to sorted names.
+     *
      * @return array{shape_hash: string, shape: array<string, mixed>}
      */
-    public static function build(Request $request, Hasher $hasher, bool $orderReliable): array
+    public static function build(Request $request, Hasher $hasher, string $order = self::ORDER_UNKNOWN): array
     {
-        $names = self::headerNames($request);
-        if (! $orderReliable) {
-            sort($names);
-        }
+        $names = self::canonicalHeaderNames($request, $order);
+        $orderReliable = $order === self::ORDER_RECEIVED || $order === self::ORDER_REVERSED;
         $cookies = self::cookieNames($request);
 
         $shape = [
@@ -41,6 +52,7 @@ final class RequestShape
             'header_names_hash' => $hasher->shapeHash(implode(',', $names)),
             'cookie_names_hash' => $hasher->shapeHash(implode(',', $cookies)),
             'order_reliable' => $orderReliable,
+            'order_recipe' => $orderReliable ? self::RECIPE_RECEIVED : self::RECIPE_SORTED,
         ];
 
         $composite = implode('_', [
@@ -58,9 +70,34 @@ final class RequestShape
     }
 
     /**
-     * Lowercased client header names in received order. Symfony builds the
-     * bag from $_SERVER in its order, which FastCGI preserves (checked by
-     * leeside-sample/deploy/header-order-check.sh).
+     * Header names in the order the client sent them, as far as this host
+     * lets us know: `reversed` undoes php-fpm's prepend into $_SERVER,
+     * `received` is already right, `unknown` sorts.
+     *
+     * @return string[]
+     */
+    public static function canonicalHeaderNames(Request $request, string $order): array
+    {
+        $names = self::headerNames($request);
+
+        return match ($order) {
+            self::ORDER_RECEIVED => $names,
+            self::ORDER_REVERSED => array_reverse($names),
+            default => self::sorted($names),
+        };
+    }
+
+    private static function sorted(array $names): array
+    {
+        sort($names);
+
+        return $names;
+    }
+
+    /**
+     * Lowercased client header names in the order PHP exposed them. Symfony
+     * builds the bag from $_SERVER in its order; whether that is the client's
+     * order is what leeside-sample/deploy/header-order-check.sh measures.
      *
      * @return string[]
      */

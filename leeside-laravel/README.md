@@ -99,6 +99,14 @@ carried.
 An unverified credential the app answers 401 or 403 is recorded as
 `rejected`, which is what a credential-stuffing rule counts.
 
+## Header order
+
+Run `leeside-sample/deploy/header-order-check.sh` once per host and put its
+answer in `.env` as `LEESIDE_HEADER_ORDER` (`received`, `reversed` or
+`unknown`). php-fpm hands headers over reversed; the package undoes that
+before hashing header order, so the shape fingerprint stays comparable
+across hosts. `unknown` hashes sorted names.
+
 ## Surfaces
 
 Every event names its surface: `honeypot`, `webhook`, `api` or `web`, in

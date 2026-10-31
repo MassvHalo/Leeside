@@ -41,6 +41,17 @@ class RequestShapeTest extends TestCase
         return $request;
     }
 
+    /** A request whose $_SERVER has exactly these headers in exactly this order. */
+    private function rawRequest(array $names): Request
+    {
+        $server = ['SERVER_PROTOCOL' => 'HTTP/1.1', 'REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/page'];
+        foreach ($names as $name) {
+            $server['HTTP_'.strtoupper(str_replace('-', '_', $name))] = 'x';
+        }
+
+        return new Request([], [], [], [], [], $server);
+    }
+
     public function test_components_and_composite(): void
     {
         $request = $this->request([
@@ -53,7 +64,7 @@ class RequestShapeTest extends TestCase
             'X-Real-IP' => '203.0.113.1',
         ], 'POST', ['b' => '1', 'a' => '2']);
 
-        $built = RequestShape::build($request, $this->hasher, true);
+        $built = RequestShape::build($request, $this->hasher, RequestShape::ORDER_RECEIVED);
         $shape = $built['shape'];
 
         $this->assertSame('POST', $shape['method']);
@@ -65,6 +76,7 @@ class RequestShapeTest extends TestCase
         $this->assertSame(6, $shape['header_count']);
         $this->assertSame('fr-c', $shape['accept_language']);
         $this->assertTrue($shape['order_reliable']);
+        $this->assertSame('received', $shape['order_recipe']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $shape['header_names_hash']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $shape['cookie_names_hash']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $built['shape_hash']);
@@ -79,21 +91,46 @@ class RequestShapeTest extends TestCase
         }
     }
 
-    public function test_order_matters_when_reliable_and_not_when_sorted(): void
+    public function test_order_matters_when_known_and_not_when_unknown(): void
     {
         $a = $this->request(['X-Alpha' => '1', 'X-Zeta' => '2', 'Accept' => 'text/html']);
         $b = $this->request(['X-Zeta' => '2', 'X-Alpha' => '1', 'Accept' => 'text/html']);
 
         $this->assertNotSame(
-            RequestShape::build($a, $this->hasher, true)['shape_hash'],
-            RequestShape::build($b, $this->hasher, true)['shape_hash']
+            RequestShape::build($a, $this->hasher, RequestShape::ORDER_RECEIVED)['shape_hash'],
+            RequestShape::build($b, $this->hasher, RequestShape::ORDER_RECEIVED)['shape_hash']
         );
+        $unknown = RequestShape::build($a, $this->hasher)['shape'];
         $this->assertSame(
-            RequestShape::build($a, $this->hasher, false)['shape_hash'],
-            RequestShape::build($b, $this->hasher, false)['shape_hash'],
-            'with order unreliable, names are hashed sorted'
+            $unknown['header_names_hash'],
+            RequestShape::build($b, $this->hasher, RequestShape::ORDER_UNKNOWN)['shape']['header_names_hash'],
+            'unknown: names are hashed sorted'
         );
-        $this->assertFalse(RequestShape::build($a, $this->hasher, false)['shape']['order_reliable']);
+        $this->assertFalse($unknown['order_reliable']);
+        $this->assertSame('sorted', $unknown['order_recipe']);
+        $this->assertSame($this->hasher->shapeHash('accept,host,x-alpha,x-zeta'), $unknown['header_names_hash']);
+    }
+
+    public function test_reversed_arrival_canonicalises_to_the_received_hash(): void
+    {
+        // What the client sent, in order, and what php-fpm would hand us (reversed).
+        foreach ([
+            ['Host', 'X-Zeta', 'X-Alpha', 'X-Mid', 'Accept-Language', 'X-Omega'],
+            ['Host', 'X-Omega', 'X-Mid', 'X-Zeta', 'Accept-Language', 'X-Alpha'],
+            ['Host', 'Accept-Language', 'X-Alpha', 'X-Omega', 'X-Zeta', 'X-Mid'],
+        ] as $sent) {
+            // Built without Request::create's defaults, so the whole order,
+            // Host included, is under the test's control.
+            $received = $this->rawRequest($sent);
+            $arrived = $this->rawRequest(array_reverse($sent));
+
+            $want = RequestShape::build($received, $this->hasher, RequestShape::ORDER_RECEIVED)['shape'];
+            $got = RequestShape::build($arrived, $this->hasher, RequestShape::ORDER_REVERSED)['shape'];
+            $this->assertSame($want['header_names_hash'], $got['header_names_hash'], implode(',', $sent));
+            $this->assertTrue($got['order_reliable']);
+            $this->assertSame('received', $got['order_recipe']);
+            $this->assertNotSame($want['header_names_hash'], RequestShape::build($arrived, $this->hasher, RequestShape::ORDER_RECEIVED)['shape']['header_names_hash'], 'without the transform the hash differs');
+        }
     }
 
     public function test_accept_language_and_empty_cases(): void

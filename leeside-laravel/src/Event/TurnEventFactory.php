@@ -94,7 +94,7 @@ class TurnEventFactory
         }
 
         $uaClass = UserAgentClass::classify($request->userAgent());
-        $shape = RequestShape::build($request, $this->hasher, $this->headerOrderReliable());
+        $shape = RequestShape::build($request, $this->hasher, $this->headerOrder());
         $fingerprints = $this->proxyFingerprints($request);
 
         return [
@@ -198,10 +198,14 @@ class TurnEventFactory
         return $probeStatus;
     }
 
-    /** Whether header order survives this host's FastCGI path; set from deploy/header-order-check.sh. */
-    private function headerOrderReliable(): bool
+    /** How header order arrives on this host: received, reversed or unknown; set from deploy/header-order-check.sh. */
+    private function headerOrder(): string
     {
-        return (bool) ($this->config?->get('leeside.fingerprint.header_order_reliable') ?? false);
+        $order = strtolower((string) ($this->config?->get('leeside.fingerprint.header_order') ?? ''));
+
+        return in_array($order, [RequestShape::ORDER_RECEIVED, RequestShape::ORDER_REVERSED], true)
+            ? $order
+            : RequestShape::ORDER_UNKNOWN;
     }
 
     /**

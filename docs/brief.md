@@ -170,18 +170,25 @@ response has gone out.
 headers only, nginx-added `X-Forwarded-*` and `X-Real-IP` excluded),
 `accept_language` (first 4 chars of the primary language, else `0000`),
 `header_names_hash` (lowercased names in received order), `cookie_names_hash`
-(sorted names), `order_reliable` (false when header order was found not to
-survive FastCGI, in which case `header_names_hash` is over sorted names).
-`shape_hash` is the hash of those joined with `_`. All three hashes use the
-`shape` namespace.
+(sorted names), `order_reliable`, `order_recipe`. `shape_hash` is the hash
+of those joined with `_`. All three hashes use the `shape` namespace.
 
-Measured 2026-10-31 with `leeside-sample/deploy/header-order-check.sh` on
-nginx 1.28 and php-fpm 8.5: the order reaches PHP **exactly reversed**,
-deterministically, because php-fpm prepends FastCGI params into `$_SERVER`.
-The information survives but not as received order, so by this rule the
-host is `order_reliable = false`: `LEESIDE_HEADER_ORDER_RELIABLE=false` and
-names are hashed sorted. A "reversed" recipe that recovers the order is a
-later option; it would be a new `shape` version, not a silent change.
+**Header order is canonicalised, not discarded.** The install-time check
+(`leeside-sample/deploy/header-order-check.sh`) sends headers in known
+orders through a private nginx and php-fpm and reports the host's
+transform as `LEESIDE_HEADER_ORDER`: `received`, `reversed`, or `unknown`.
+For `received` and `reversed` the package canonicalises the names to the
+client's order and hashes that (`order_reliable: true`, `order_recipe:
+received`); only `unknown` falls back to sorted names (`order_reliable:
+false`, `order_recipe: sorted`). Measured 2026-10-31 on nginx 1.28 and
+php-fpm 8.5: **reversed**, deterministically, because php-fpm prepends
+FastCGI params into `$_SERVER`. The check also verifies the recipe: the
+same headers through the private stack and through the package's test
+client in received order give the same `header_names_hash`.
+
+This is shape v1. Should a deployed package have written shape rows under
+an earlier recipe, the namespace moves to `shape2` rather than mutating;
+none had when this changed.
 
 **Flags**, each from the current request alone: `ua_chromium_no_ch`,
 `browser_no_sec_fetch`, `browser_no_accept_language`,

@@ -61,10 +61,11 @@ return [
 
     // Schema v2: the request-shape fingerprint and proxy-provided fingerprints.
     'fingerprint' => [
-        // Does header order survive nginx -> FastCGI -> $_SERVER on this host?
-        // Run leeside-sample/deploy/header-order-check.sh; php-fpm reverses the
-        // order, so the default hashes sorted names.
-        'header_order_reliable' => (bool) env('LEESIDE_HEADER_ORDER_RELIABLE', false),
+        // How header order arrives in $_SERVER on this host: received, reversed
+        // (php-fpm prepends FastCGI params) or unknown. Measured once at install
+        // by leeside-sample/deploy/header-order-check.sh. received and reversed
+        // are canonicalised and hashed in received order; unknown hashes sorted.
+        'header_order' => env('LEESIDE_HEADER_ORDER', 'unknown'),
         // Headers a trusted proxy may add; from any other hop they are dropped and flagged.
         'proxy_headers' => ['ja4' => 'X-Leeside-JA4', 'ja4t' => 'X-Leeside-JA4T', 'h2_fp' => 'X-Leeside-H2'],
     ],

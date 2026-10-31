@@ -29,7 +29,8 @@ class ShapeFlagsTest extends SampleAppTestCase
         $this->assertTrue($shape['has_referer']);
         $this->assertSame('en-u', $shape['accept_language']);
         $this->assertIsInt($shape['header_count']);
-        $this->assertFalse($shape['order_reliable'], 'the default: php-fpm reverses header order');
+        $this->assertFalse($shape['order_reliable'], 'the default is unknown until the install-time check sets LEESIDE_HEADER_ORDER');
+        $this->assertSame('sorted', $shape['order_recipe']);
         $this->assertSame(['library_ua_on_web'], $event['flags']);
         $this->assertNull($event['ja4']);
         $this->assertNull($event['ja4t']);
@@ -47,12 +48,13 @@ class ShapeFlagsTest extends SampleAppTestCase
         $this->assertFalse($first['order_reliable']);
         $this->assertSame($first['header_names_hash'], $second['header_names_hash'], 'unreliable: sorted names, order ignored');
 
-        $this->app['config']->set('leeside.fingerprint.header_order_reliable', true);
+        $this->app['config']->set('leeside.fingerprint.header_order', 'received');
         $this->flushHeaders()->withHeaders(['X-Zeta' => '1', 'X-Alpha' => '2'])->get('/venues/1')->assertOk();
         $third = $this->lastEvent()['shape'];
         $this->flushHeaders()->withHeaders(['X-Alpha' => '2', 'X-Zeta' => '1'])->get('/venues/1')->assertOk();
         $fourth = $this->lastEvent()['shape'];
         $this->assertTrue($third['order_reliable']);
+        $this->assertSame('received', $third['order_recipe']);
         $this->assertNotSame($third['header_names_hash'], $fourth['header_names_hash'], 'reliable: order matters');
     }
 
