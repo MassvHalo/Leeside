@@ -110,23 +110,29 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                     }
                     StoreOp::ActorUpsert(a) => {
                         tx.execute(
-                            "INSERT INTO actors (id, opened_us, last_us, merged_into, turns) VALUES (?1, ?2, ?3, ?4, ?5) \
-                             ON CONFLICT(id) DO UPDATE SET last_us = excluded.last_us, merged_into = excluded.merged_into, turns = excluded.turns",
-                            params![a.id, a.opened_us, a.last_us, a.merged_into, a.turns],
+                            "INSERT INTO actors (id, opened_us, last_us, merged_into, turns, confirmed) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                             ON CONFLICT(id) DO UPDATE SET last_us = excluded.last_us, merged_into = excluded.merged_into, turns = excluded.turns, confirmed = excluded.confirmed",
+                            params![a.id, a.opened_us, a.last_us, a.merged_into, a.turns, a.confirmed as i64],
                         )?;
                     }
                     StoreOp::BindingUpsert(b) => {
                         tx.execute(
-                            "INSERT INTO actor_bindings (kind, value, actor_id, first_seen, last_seen, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                            "INSERT INTO actor_bindings (kind, value, actor_id, first_seen, last_seen, expires_at, returned) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                              ON CONFLICT(kind, value) DO UPDATE SET actor_id = excluded.actor_id, first_seen = excluded.first_seen, \
-                             last_seen = excluded.last_seen, expires_at = excluded.expires_at",
-                            params![b.kind, b.value, b.actor_id, b.first_seen, b.last_seen, b.expires_at],
+                             last_seen = excluded.last_seen, expires_at = excluded.expires_at, returned = excluded.returned",
+                            params![b.kind, b.value, b.actor_id, b.first_seen, b.last_seen, b.expires_at, b.returned as i64],
                         )?;
                     }
                     StoreOp::BindingDelete { kind, value } => {
                         tx.execute(
                             "DELETE FROM actor_bindings WHERE kind = ?1 AND value = ?2",
                             params![kind, value],
+                        )?;
+                    }
+                    StoreOp::ActorDelete(id) => {
+                        tx.execute(
+                            "DELETE FROM actors WHERE id = ?1 AND merged_into IS NULL",
+                            params![id],
                         )?;
                     }
                     StoreOp::MergeInsert(m) => {
@@ -200,9 +206,9 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
          latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, validation_failed, exception, \
          auth_event, gate, ua_hash, dropped_since_last, surface, is_asset, credential_kind, \
          credential_hash, credential_status, tag_id, tag_status, ip_hash, net_hash, asn, ip_trust, ua_class, shape_hash, \
-         shape, flags, ja4, ja4t, h2_fp, remote_port, ts_ms, turn_id, actor_id, country) \
+         shape, flags, ja4, ja4t, h2_fp, remote_port, ts_ms, turn_id, actor_id, country, cluster_key) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, \
-         ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43)",
+         ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44)",
         params![
             r.session_key,
             r.ts_us,
@@ -247,6 +253,7 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
             r.turn_id,
             r.actor_id,
             r.country,
+            r.cluster_key,
         ],
     )?;
     Ok(())

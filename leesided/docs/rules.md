@@ -499,7 +499,10 @@ highest-precedence identifier present with a live binding (verified
 credential or principal, then session, then tag). Check records join on
 `turn_id` when the probe carried one, else on `(peer_key, ts_us)`. At start
 the bindings and merges reload and the last 24 h of turns refill the
-windows read-only. Migration 0005.
+windows read-only. Migration 0005. A turn with no strong identifier has no
+actor; `cluster_key = hash(net_hash || shape_hash)` keys a `clusters` window
+for it instead, and unconfirmed actors are swept with their last binding
+(migration 0006).
 
 ### Conversation windows
 

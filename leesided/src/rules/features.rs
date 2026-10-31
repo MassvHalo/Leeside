@@ -222,6 +222,7 @@ mod tests {
             principal: None,
             credential: None,
             actor: None,
+            cluster: None,
         };
         let login = syms.intern("portal.login");
         let home = syms.intern("home");

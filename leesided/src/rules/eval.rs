@@ -392,6 +392,7 @@ mod tests {
                     principal: None,
                     credential: None,
                     actor: None,
+                    cluster: None,
                 },
                 t,
             );

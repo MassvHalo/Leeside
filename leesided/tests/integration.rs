@@ -1221,7 +1221,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     // Two sessions, one tag: the browser cleared its session cookie but kept the tag.
     h.event(&tagged_event(
         now - 30.0,
-        "0000000000000a01",
+        "00000000000000000000000000000a01",
         "1111111111111111",
         "anon",
         TAG,
@@ -1230,7 +1230,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     .await;
     h.event(&tagged_event(
         now - 20.0,
-        "0000000000000a02",
+        "00000000000000000000000000000a02",
         "1111111111111111",
         "anon",
         TAG,
@@ -1239,7 +1239,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     .await;
     h.event(&tagged_event(
         now - 10.0,
-        "0000000000000a03",
+        "00000000000000000000000000000a03",
         "2222222222222222",
         "anon",
         TAG,
@@ -1275,7 +1275,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
         .engine
         .store
         .with_reader(|c| {
-            let mut st = c.prepare("SELECT actor_id FROM turns WHERE turn_id IN ('0000000000000a01','0000000000000a02','0000000000000a03')")?;
+            let mut st = c.prepare("SELECT actor_id FROM turns WHERE turn_id IN ('00000000000000000000000000000a01','00000000000000000000000000000a02','00000000000000000000000000000a03')")?;
             let rows = st.query_map([], |r| r.get::<_, Option<String>>(0))?;
             rows.collect()
         })
@@ -1291,7 +1291,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     let v = h
         .probe(&tagged_probe(
             now,
-            "0000000000000a04",
+            "00000000000000000000000000000a04",
             "3333333333333333",
             Some(TAG),
             "home",
@@ -1310,7 +1310,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     let v = h
         .probe(&tagged_probe(
             now,
-            "0000000000000a05",
+            "00000000000000000000000000000a05",
             "4444444444444444",
             Some(TAG),
             "venues.show",
@@ -1324,7 +1324,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     let v = h
         .probe(&tagged_probe(
             now,
-            "0000000000000a06",
+            "00000000000000000000000000000a06",
             "5555555555555555",
             None,
             "venues.show",
@@ -1360,7 +1360,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
         vec![
             tagged_event(
                 now - 40.0,
-                "0000000000000b01",
+                "00000000000000000000000000000b01",
                 "1111111111111111",
                 "anon",
                 TAG,
@@ -1368,7 +1368,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
             ),
             tagged_event(
                 now - 30.0,
-                "0000000000000b02",
+                "00000000000000000000000000000b02",
                 "1111111111111111",
                 "anon",
                 TAG,
@@ -1377,7 +1377,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
             // Login regenerates the session: the tag carries the guest actor into the user's.
             tagged_event(
                 now - 20.0,
-                "0000000000000b03",
+                "00000000000000000000000000000b03",
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
                 TAG,
@@ -1385,7 +1385,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
             ),
             tagged_event(
                 now - 10.0,
-                "0000000000000b04",
+                "00000000000000000000000000000b04",
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
                 TAG,
@@ -1398,7 +1398,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
         h.engine
             .store
             .with_reader(|c| {
-                let mut st = c.prepare("SELECT turn_id, actor_id FROM turns WHERE turn_id LIKE '0000000000000b%' ORDER BY turn_id")?;
+                let mut st = c.prepare("SELECT turn_id, actor_id FROM turns WHERE turn_id LIKE '00000000000000000000000000000b%' ORDER BY turn_id")?;
                 let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
                 rows.collect()
             })
@@ -1477,4 +1477,69 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
     assert_eq!(read_ids(&h2), first, "deterministic across stores");
     h2.running.abort();
     h2.engine.shutdown().await;
+}
+
+fn tagless_event(ts: f64, turn_id: &str, session: &str) -> String {
+    json!({"v":2,"ts":ts,"turn_id":turn_id,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"GET",
+        "route":"home","status":200,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,"req_shape":"[]","resp_shape":"html",
+        "bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,"surface":"web","tag_status":"issued","tag_id":null,
+        "ip":"203.0.113.7","ip_trust":"direct","ua_class":"library","shape_hash":"aaaaaaaaaaaaaaaa"})
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cookie_less_scanner_leaves_one_cluster_window_and_no_actors() {
+    let h = Harness::start().await;
+    let now = now_f64();
+    // Laravel mints a session per request for a client that returns no cookie;
+    // the tag is issued every time and never comes back.
+    for i in 0..100u64 {
+        h.event(&tagless_event(
+            now - 200.0 + i as f64,
+            &format!("{i:032x}"),
+            &format!("{:016x}", 0x5000 + i),
+        ))
+        .await;
+    }
+    h.wait_for("100 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 100
+    })
+    .await;
+    let counts = h.engine.windows.counts();
+    assert_eq!(
+        counts.5, 1,
+        "one cluster window for the whole burst: {counts:?}"
+    );
+    assert_eq!(
+        counts.4, 100,
+        "one provisional actor per fresh session, for now"
+    );
+    let cluster = h.engine.resolver.cluster_key(
+        &leesided::hash::Hasher::new("test-key").hex16("net", "203.0.113.0/24"),
+        "aaaaaaaaaaaaaaaa",
+    );
+    assert!(
+        h.engine
+            .windows
+            .cluster(cluster)
+            .is_some_and(|w| w.len() == 64),
+        "the cluster window holds the newest 64"
+    );
+    // A day later nothing came back: the sweep removes every binding and every unconfirmed actor.
+    let swept = h
+        .engine
+        .resolver
+        .sweep(((now + 25.0 * 3600.0) * 1e6) as i64);
+    assert_eq!(swept.actors.len(), 100);
+    assert_eq!(h.engine.resolver.len().0, 0, "zero actors after the sweep");
+    h.engine.store.flush().await;
+    let with_actor: i64 = h
+        .engine
+        .store
+        .with_reader(|c| c.query_row("SELECT count(actor_id) FROM turns", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(with_actor, 100, "turns keep the id they were ingested with");
+    h.running.abort();
+    h.engine.shutdown().await;
 }

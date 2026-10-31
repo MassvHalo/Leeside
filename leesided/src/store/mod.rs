@@ -31,6 +31,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0004_credential_status.sql"),
     ),
     (5, include_str!("../../migrations/0005_actors.sql")),
+    (
+        6,
+        include_str!("../../migrations/0006_cluster_and_provisional.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +100,7 @@ pub struct TurnRow {
     pub turn_id: Option<String>,
     pub actor_id: Option<String>,
     pub country: Option<String>,
+    pub cluster_key: Option<String>,
 }
 
 /// What the check answered, to be joined onto the turn row once it lands.
@@ -162,6 +167,8 @@ pub enum StoreOp {
         value: String,
     },
     MergeInsert(MergeRow),
+    /// An unconfirmed actor whose last binding expired.
+    ActorDelete(String),
     /// Commit everything queued before this and reply.
     Flush(oneshot::Sender<()>),
     /// Flush, reply, and end the writer loop.
@@ -176,6 +183,7 @@ pub struct ActorRow {
     pub last_us: i64,
     pub merged_into: Option<String>,
     pub turns: u32,
+    pub confirmed: bool,
 }
 
 impl ActorRow {
@@ -186,6 +194,7 @@ impl ActorRow {
             last_us: a.last_us,
             merged_into: a.merged_into.map(|m| format!("{m:016x}")),
             turns: a.turns,
+            confirmed: a.confirmed,
         }
     }
 }
@@ -199,6 +208,7 @@ pub struct BindingRow {
     pub first_seen: i64,
     pub last_seen: i64,
     pub expires_at: i64,
+    pub returned: bool,
 }
 
 impl BindingRow {
@@ -210,6 +220,7 @@ impl BindingRow {
             first_seen: b.first_seen_us,
             last_seen: b.last_seen_us,
             expires_at: b.expires_us,
+            returned: b.returned,
         }
     }
 }
@@ -244,6 +255,7 @@ pub struct ReplayRow {
     pub bytes_out: i64,
     pub latency_ms: f64,
     pub ua_hash: String,
+    pub cluster_key: Option<String>,
 }
 
 /// A `rules` row as stored.
@@ -580,8 +592,9 @@ impl Store {
 
     pub fn load_actors(&self) -> Result<Vec<crate::actors::Actor>, StoreError> {
         self.with_reader(|c| {
-            let mut stmt =
-                c.prepare("SELECT id, opened_us, last_us, merged_into, turns FROM actors")?;
+            let mut stmt = c.prepare(
+                "SELECT id, opened_us, last_us, merged_into, turns, confirmed FROM actors",
+            )?;
             let rows = stmt.query_map([], |r| {
                 let id: String = r.get(0)?;
                 let merged: Option<String> = r.get(3)?;
@@ -591,17 +604,19 @@ impl Store {
                     r.get::<_, i64>(2)?,
                     merged,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)? != 0,
                 ))
             })?;
             Ok(rows
                 .filter_map(|r| r.ok())
-                .filter_map(|(id, opened, last, merged, turns)| {
+                .filter_map(|(id, opened, last, merged, turns, confirmed)| {
                     Some(crate::actors::actor_row(
                         crate::rules::windows::key16(&id)?,
                         opened,
                         last,
                         merged.as_deref().and_then(crate::rules::windows::key16),
                         turns as u32,
+                        confirmed,
                     ))
                 })
                 .collect())
@@ -614,7 +629,8 @@ impl Store {
     ) -> Result<Vec<(crate::actors::Ident, crate::actors::Binding)>, StoreError> {
         self.with_reader(|c| {
             let mut stmt = c.prepare(
-                "SELECT kind, value, actor_id, first_seen, last_seen, expires_at FROM actor_bindings WHERE expires_at > ?1",
+                "SELECT kind, value, actor_id, first_seen, last_seen, expires_at, returned \
+                 FROM actor_bindings WHERE expires_at > ?1",
             )?;
             let rows = stmt.query_map(params![now_us], |r| {
                 Ok((
@@ -624,18 +640,23 @@ impl Store {
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)? != 0,
                 ))
             })?;
             Ok(rows
                 .filter_map(|r| r.ok())
-                .filter_map(|(kind, value, actor, first, last, expires)| {
+                .filter_map(|(kind, value, actor, first, last, expires, returned)| {
                     Some((
-                        crate::actors::Ident::new(crate::actors::Kind::parse(&kind)?, crate::rules::windows::key16(&value)?),
+                        crate::actors::Ident::new(
+                            crate::actors::Kind::parse(&kind)?,
+                            crate::rules::windows::key16(&value)?,
+                        ),
                         crate::actors::Binding {
                             actor: crate::rules::windows::key16(&actor)?,
                             first_seen_us: first,
                             last_seen_us: last,
                             expires_us: expires,
+                            returned,
                         },
                     ))
                 })
@@ -649,7 +670,7 @@ impl Store {
             let mut stmt = c.prepare(
                 "SELECT session_key, peer_key, principal, credential_hash, credential_status, actor_id, ts_us, \
                  route, verb, status, validation_failed, exception, auth_event, req_shape, bound, bytes_out, \
-                 latency_ms, ua_hash FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
+                 latency_ms, ua_hash, cluster_key FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
             )?;
             let rows = stmt.query_map(params![since_us], |r| {
                 Ok(ReplayRow {
@@ -671,6 +692,7 @@ impl Store {
                     bytes_out: r.get(15)?,
                     latency_ms: r.get(16)?,
                     ua_hash: r.get(17)?,
+                    cluster_key: r.get(18)?,
                 })
             })?;
             rows.collect()

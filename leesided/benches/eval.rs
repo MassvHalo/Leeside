@@ -178,6 +178,7 @@ fn fixture() -> Fixture {
             principal: session.is_multiple_of(3).then_some(session),
             credential: None,
             actor: None,
+            cluster: None,
         };
         for _ in 0..64 {
             ts += 100;

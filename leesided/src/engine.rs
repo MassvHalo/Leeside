@@ -13,7 +13,7 @@ use crate::rules::model::{Action, CredentialStatus, Mode, Scope, Surface, Verb};
 use crate::rules::service::RulesService;
 use crate::rules::stats::{hour_of, Stats};
 use crate::rules::symbols::Symbols;
-use crate::rules::windows::{id8, key16, principal_key, EventKeys, TurnSummary, Windows};
+use crate::rules::windows::{id8, is_hex, key16, principal_key, EventKeys, TurnSummary, Windows};
 use crate::store::{self, CheckRecord, FeatureRow, Store, StoreError, StoreOp, TurnRow};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -290,6 +290,7 @@ impl Engine {
                     principal,
                     credential,
                     actor,
+                    cluster: r.cluster_key.as_deref().and_then(key16),
                 },
                 summary,
             );
@@ -367,7 +368,7 @@ impl Engine {
         let turn_id = probe
             .turn_id
             .as_deref()
-            .filter(|t| key16(t).is_some())
+            .filter(|t| is_hex(t, 32))
             .map(str::to_string);
         let ts_us = store::ts_us(probe.ts);
         let ts_ms = (probe.ts * 1000.0) as u64;
@@ -610,7 +611,7 @@ impl Engine {
         let ts_us = store::ts_us(ev.ts);
         let turn_id = match ev.turn_id.as_deref() {
             None | Some("") => None,
-            Some(t) if key16(t).is_some() => Some(t.to_string()),
+            Some(t) if is_hex(t, 32) => Some(t.to_string()),
             Some(_) => return Err(IngestError::Field("turn_id")),
         };
         // ASN and country from the address before it is dropped; null without the files.
@@ -683,13 +684,19 @@ impl Engine {
             }));
         }
         let actor = resolution.actor;
+        // Cookie-less traffic has no actor; the cluster is its window.
+        let cluster = match (net_hash.as_deref(), ev.shape_hash.as_deref()) {
+            (Some(n), Some(s)) if key16(s).is_some() => Some(self.resolver.cluster_key(n, s)),
+            _ => None,
+        };
 
         let keys = EventKeys {
             session,
             peer,
             principal,
             credential,
-            actor: Some(actor),
+            actor,
+            cluster,
         };
         let ts_ms = summary.ts_ms;
         self.windows.record(&keys, summary);
@@ -742,7 +749,8 @@ impl Engine {
             asn: enriched.asn.map(i64::from),
             country: enriched.country,
             turn_id,
-            actor_id: Some(format!("{actor:016x}")),
+            actor_id: actor.map(|a| format!("{a:016x}")),
+            cluster_key: cluster.map(|c| format!("{c:016x}")),
             ip_trust: ev.ip_trust,
             ua_class: ev.ua_class,
             shape_hash: ev.shape_hash,
@@ -768,11 +776,16 @@ impl Engine {
         for closed in self.windows.sweep(now_ms) {
             self.store.send(StoreOp::ConversationClose(closed));
         }
-        for ident in self.resolver.sweep(now_s * 1_000_000) {
+        let swept = self.resolver.sweep(now_s * 1_000_000);
+        for ident in swept.bindings {
             self.store.send(StoreOp::BindingDelete {
                 kind: ident.kind.as_str().to_string(),
                 value: format!("{:016x}", ident.value),
             });
+        }
+        for id in swept.actors {
+            self.store.send(StoreOp::ActorDelete(format!("{id:016x}")));
+            self.windows.drop_actor(id);
         }
         if let Err(e) = self.rules.expire(now_s).await {
             tracing::error!(error = %e, "rule expiry sweep failed");
@@ -788,7 +801,8 @@ impl Engine {
 
     pub fn health(&self) -> serde_json::Value {
         let rs = self.rules.current();
-        let (sessions, peers, principals, credentials, actor_windows) = self.windows.counts();
+        let (sessions, peers, principals, credentials, actor_windows, clusters) =
+            self.windows.counts();
         let (actors, strong, weak) = self.resolver.len();
         serde_json::json!({
             "actors": { "count": actors, "strong_bindings": strong, "weak_values": weak,
@@ -802,7 +816,7 @@ impl Engine {
             "rules": { "loaded": rs.len(), "generation": rs.generation, "hash": &*rs.hash_hex,
                        "invalid": self.rules.invalid().len() },
             "windows": { "sessions": sessions, "peers": peers, "principals": principals,
-                         "credentials": credentials,
+                         "credentials": credentials, "clusters": clusters,
                          "dropped_for_cap": self.windows.dropped_for_cap() },
             "schema_versions": SCHEMA_VERSIONS,
             "ip_hashing": self.hasher.is_some(),

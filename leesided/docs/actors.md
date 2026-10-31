@@ -102,7 +102,7 @@ Worked cases the tests encode:
 
 Actor ids are deterministic and unique by construction: `actor_id =
 HMAC(actor, turn_id)` of the first turn, 16 hex, under the install key. The
-`turn_id` is minted by the package per request (8 random bytes, hex), rides
+`turn_id` is minted by the package per request (16 random bytes, 32 hex), rides
 on both the probe and the event, is stored on the turn row and is the join
 key between the two (schema v2, replacing `(peer_key, ts_us)`, which could
 collide for two first turns from one peer in the same microsecond). The same
@@ -116,6 +116,35 @@ rewritten**. Everything downstream resolves through the canonical id:
 `canonical(actor_id)` follows `merged_into` to the root (path-compressed in
 memory), and features, labels, scores and the UI key on the canonical id.
 A query for an actor's turns is `actor_id IN (id, every id merged into it)`.
+
+## Identifier-less turns, provisional bindings, clusters
+
+Before the review of 2026-10-31 a turn with no principal, credential, session
+or valid tag opened a new actor seeded from its `turn_id` and bound only weak
+keys: 100 tagless turns were 100 actors. The rule now:
+
+- **No actor without a strong identifier.** Such a turn has `actor_id` null.
+  No merging through weak keys, as before: a peer or shape cluster is never
+  an actor.
+- **Browser-side identifiers are provisional until they return.** A session
+  or tag binding created by one turn lives 24 h; when the same value comes
+  back on a later turn it is `returned`, gets its full TTL, and the actor
+  becomes `confirmed`. A principal or credential binding confirms the actor
+  at once. The sweep removes expired bindings and then any unconfirmed actor
+  left with none, so a scanner that ignores cookies, and a tag that was
+  issued but never came back, leave nothing behind (the turns keep the id
+  they were ingested with; `GET /actors/{id}` answers 404 for it).
+- **`cluster_key = hash(net_hash || shape_hash)`**, its own namespace, on
+  every turn that has both, with a window per cluster alongside the actor
+  windows. Cookie-less traffic still has a window to score, and
+  `tag_dropped` becomes computable: a tag issued on a cluster followed by
+  tagless turns on the same cluster. Features v2 emits per-cluster windows
+  as well as per-actor ones.
+
+Tests: 100 tagless turns from one peer leave zero actors after the sweep and
+one populated cluster window; a browser's first turn (issued) followed by a
+return (valid) leaves one durable actor; two cookie-less browsers behind one
+NAT with the same shape get two actors once their tags return, never one.
 
 ## Bindings expire
 
@@ -246,6 +275,10 @@ corrected by expiry and the partition rule, not by hand.
   stay two; the cluster features count two.
 - Machine surfaces: two verified credentials on one `net` are two actors;
   an unverified credential binds nothing; a verified one binds at level 1.
+- One principal with two verified credentials (one user, two API tokens) is
+  one actor; two verified credentials with no principal under one net are
+  two actors. The identity test is per kind: principals settle it when both
+  sides have one, else credentials must share a value.
 - Determinism across restart, as above.
 - Enrichment: with the mmdb files absent, ingest succeeds, `asn` and
   `country` are null, one warning at start; with files present (a fixture

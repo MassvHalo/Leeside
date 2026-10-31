@@ -468,7 +468,7 @@ proptest! {
         let windows = Windows::default();
         for (i, e) in events.iter().enumerate() {
             windows.record(
-                &EventKeys { session: e.session, peer: e.peer, principal: e.principal, credential: None, actor: None },
+                &EventKeys { session: e.session, peer: e.peer, principal: e.principal, credential: None, actor: None, cluster: None },
                 summary(e, BASE_MS + i as u64 * 1000, &syms),
             );
         }
