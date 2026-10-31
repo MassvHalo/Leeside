@@ -118,7 +118,7 @@ class TagTest extends SampleAppTestCase
         $this->assertCount(2, $probes);
         $this->assertNull($probes[0]['tag_id'], 'issued after the probe: not on it');
         $this->assertSame($firstId, $probes[1]['tag_id'], 'a valid tag is on the probe, so leesided can find the actor');
-        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $probes[1]['turn_id']);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $probes[1]['turn_id']);
         $this->assertSame($probes[1]['turn_id'], $event['turn_id'], 'probe and event share the turn id');
         $this->assertNotSame($probes[0]['turn_id'], $probes[1]['turn_id']);
     }

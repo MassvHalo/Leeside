@@ -197,7 +197,7 @@ none had when this changed.
 Definitions in `docs/actor-identity.md` section 5. Flags are features,
 never verdicts.
 
-| `turn_id` | 16 hex | minted by the package per request (8 random bytes), on the probe and the event; the join key between them and the seed of leesided's actor ids |
+| `turn_id` | 32 hex | minted by the package per request (16 random bytes), on the probe and the event; the join key between them and the seed of leesided's actor ids |
 | `remote_port` | int or null | the client source port, to tell users apart behind one NAT address |
 | `ts_ms` | int | request time in whole milliseconds; `ts` keeps the float with microseconds |
 
@@ -290,7 +290,7 @@ surface, count per credential, and leesided can find the actor at probe
 time by the highest-precedence identifier present:
 
 ```json
-{"v":2,"ts":1761600000.123,"turn_id":"3f9c2e71a0b4d6e8","verb":"POST","route":"portal.login",
+{"v":2,"ts":1761600000.123,"turn_id":"3f9c2e71a0b4d6e8a1b2c3d4e5f60718","verb":"POST","route":"portal.login",
  "surface":"web","session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon",
  "credential_hash":null,"credential_status":null,"tag_id":"7d2b9e4c1a6f0e3b"}
 ```

@@ -71,7 +71,7 @@ class TurnEventFactory
         return [
             'v' => 2,
             'ts' => $context->ts ?? microtime(true),
-            'turn_id' => $context->turnId ?? bin2hex(random_bytes(8)),
+            'turn_id' => $context->turnId ?? bin2hex(random_bytes(16)),
             'verb' => $request->getMethod(),
             'route' => $context->route ?? RouteName::fromRoute($request->route()),
             'surface' => $this->surface->classify($request, $request->route()),
