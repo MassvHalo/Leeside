@@ -50,6 +50,10 @@ impl Harness {
             hash_key: Some("test-key".into()),
             geoip_asn: None,
             geoip_country: None,
+            ja4_classes: Some(PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/data/ja4-classes.json"
+            ))),
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -575,6 +579,7 @@ async fn api_validate_schema_export_and_pinned_mode() {
         hash_key: None,
         geoip_asn: None,
         geoip_country: None,
+        ja4_classes: None,
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -1752,4 +1757,214 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
     assert_eq!(fresh, after, "same turns, same vectors, restart or not");
     h2.running.abort();
     h2.engine.shutdown().await;
+}
+
+// ---- the passive tap (docs/tap.md) ----
+
+/// A v2 web turn from 203.0.113.7 with a source port, as php-fpm reports it.
+fn fp_event(ts: f64, turn_id: &str, port: u16, ja4: Option<&str>, ua_class: &str) -> String {
+    json!({"v":2,"ts":ts,"ts_ms":(ts * 1000.0) as i64,"turn_id":turn_id,"session_key":"1234123412341234","peer_key":PEER,
+        "principal":"anon","verb":"GET","route":"home","status":200,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,
+        "req_shape":"[]","resp_shape":"html","bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,"surface":"web","tag_status":"absent","tag_id":null,
+        "ip":"203.0.113.7","remote_port":port,"ip_trust":"direct","ua_class":ua_class,"shape_hash":"aaaaaaaaaaaaaaaa",
+        "flags":["library_ua_on_web"],"ja4":ja4})
+    .to_string()
+}
+
+const PYTHON_JA4: &str = "t13d181000_85036bcba153_d41ae481755e";
+const SOME_JA4T: &str = "65535_2-4-8-1-3_1460_7";
+
+impl Harness {
+    async fn fp(&self, msg: Value) {
+        let sock = UnixDatagram::unbound().unwrap();
+        sock.send_to(msg.to_string().as_bytes(), self.dir.join("fp.sock"))
+            .await
+            .expect("send fp");
+    }
+
+    fn turn_fp(&self, turn_id: &str) -> (Option<String>, Option<String>, Option<String>) {
+        self.engine
+            .store
+            .with_reader(|c| {
+                c.query_row(
+                    "SELECT ja4, ja4t, flags FROM turns WHERE turn_id = ?1",
+                    rusqlite::params![turn_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    }
+
+    async fn settle(&self, events: u64) {
+        self.wait_for("events", || {
+            self.engine.counters.events.load(Ordering::Relaxed) == events
+        })
+        .await;
+        self.engine.store.flush().await;
+    }
+}
+
+fn fp_msg(ts_ms: u64, port: u16) -> Value {
+    json!({"v":1,"ts_ms":ts_ms,"ip":"203.0.113.7","port":port})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
+    let h = Harness::start().await;
+    let now = now_f64();
+    let t0 = (now * 1000.0) as u64;
+    // SYN, then ClientHello, then the request: the usual order.
+    let mut syn = fp_msg(t0 - 100, 51234);
+    syn["ja4t"] = SOME_JA4T.into();
+    syn["tls"] = true.into();
+    h.fp(syn).await;
+    let mut hello = fp_msg(t0 - 50, 51234);
+    hello["ja4"] = "t13d1516h2_8daaf6152771_e5627efa2ab1".into();
+    h.fp(hello).await;
+    h.wait_for("2 tap messages", || h.engine.conns.stats().messages == 2)
+        .await;
+    h.event(&fp_event(now, &"c".repeat(32), 51234, None, "library"))
+        .await;
+    // Another port the tap never saw: nothing to join, the turn waits.
+    h.event(&fp_event(now + 0.1, &"d".repeat(32), 51235, None, "library"))
+        .await;
+    h.settle(2).await;
+    assert_eq!(
+        (h.engine.store.dropped(), h.engine.store.count("turns").unwrap()),
+        (0, 2),
+        "bad_event {}",
+        h.engine.counters.bad_event.load(Ordering::Relaxed)
+    );
+    let (ja4, ja4t, flags) = h.turn_fp(&"c".repeat(32));
+    assert_eq!(ja4.as_deref(), Some("t13d1516h2_8daaf6152771_e5627efa2ab1"));
+    assert_eq!(ja4t.as_deref(), Some(SOME_JA4T));
+    assert_eq!(
+        flags.as_deref(),
+        Some("[\"library_ua_on_web\"]"),
+        "no mismatch for a library UA"
+    );
+    let (ja4, ja4t, _) = h.turn_fp(&"d".repeat(32));
+    assert!(ja4.is_none() && ja4t.is_none());
+    let s = h.engine.conns.stats();
+    assert_eq!(
+        (s.matched, s.unknown, s.deferred, s.missed),
+        (1, 1, 1, 0),
+        "{s:?}"
+    );
+    // 60 s later nothing came: the wait ends and the columns stay null.
+    h.engine.conns.sweep(t0 + 61_000);
+    assert_eq!(h.engine.conns.stats().missed, 1);
+    let (_, health) = h.http("GET", "/health", None).await;
+    assert_eq!(health["tap"]["matched"], 1);
+    assert!(health["ja4_classes"].as_u64().unwrap() >= 6);
+    // The store never saw the address: the turn carries hashes only.
+    let raw: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT count(*) FROM turns WHERE ip_hash LIKE '%203.0.113%' OR cluster_key LIKE '%203.0%'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(raw, 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_event_can_beat_the_tap_datagram_and_still_be_filled() {
+    let h = Harness::start().await;
+    let now = now_f64();
+    let t0 = (now * 1000.0) as u64;
+    // A browser UA whose TLS stack turns out to be Python's: the late fill
+    // also brings the mismatch flag, through json_insert on the stored row.
+    h.event(&fp_event(now, &"e".repeat(32), 51300, None, "firefox"))
+        .await;
+    h.settle(1).await;
+    let (ja4, ja4t, flags) = h.turn_fp(&"e".repeat(32));
+    assert!(ja4.is_none() && ja4t.is_none());
+    assert_eq!(flags.as_deref(), Some("[\"library_ua_on_web\"]"));
+    assert_eq!(h.engine.conns.stats().deferred, 1);
+    let mut syn = fp_msg(t0 - 30, 51300);
+    syn["ja4t"] = SOME_JA4T.into();
+    syn["tls"] = true.into();
+    h.fp(syn).await;
+    let mut hello = fp_msg(t0 - 10, 51300);
+    hello["ja4"] = PYTHON_JA4.into();
+    h.fp(hello).await;
+    h.wait_for("late fills", || h.engine.conns.stats().filled_late == 2)
+        .await;
+    h.engine.store.flush().await;
+    let (ja4, ja4t, flags) = h.turn_fp(&"e".repeat(32));
+    assert_eq!(ja4.as_deref(), Some(PYTHON_JA4));
+    assert_eq!(ja4t.as_deref(), Some(SOME_JA4T));
+    assert_eq!(
+        flags.as_deref(),
+        Some("[\"library_ua_on_web\",\"ua_vs_ja4_mismatch\"]")
+    );
+    assert_eq!(h.engine.conns.stats().pending, 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trusted_proxy_ja4_on_the_event_is_kept_and_a_mismatch_flags_at_ingest() {
+    let h = Harness::start().await;
+    let now = now_f64();
+    let t0 = (now * 1000.0) as u64;
+    let mut syn = fp_msg(t0 - 100, 51400);
+    syn["ja4t"] = SOME_JA4T.into();
+    syn["tls"] = true.into();
+    h.fp(syn).await;
+    let mut hello = fp_msg(t0 - 50, 51400);
+    hello["ja4"] = PYTHON_JA4.into();
+    h.fp(hello).await;
+    h.wait_for("tap messages", || h.engine.conns.stats().messages == 2)
+        .await;
+    // The proxy's value is the event's, and wins over the tap's.
+    h.event(&fp_event(
+        now,
+        &"f".repeat(32),
+        51400,
+        Some("t13d0000h2_proxy_value"),
+        "chromium",
+    ))
+    .await;
+    h.settle(1).await;
+    let (ja4, ja4t, flags) = h.turn_fp(&"f".repeat(32));
+    assert_eq!(ja4.as_deref(), Some("t13d0000h2_proxy_value"));
+    assert_eq!(ja4t.as_deref(), Some(SOME_JA4T));
+    assert_eq!(
+        flags.as_deref(),
+        Some("[\"library_ua_on_web\"]"),
+        "an unknown ja4 never flags"
+    );
+    // Same connection, a second request on it (keep-alive): the tap's Python
+    // JA4 under a Chromium UA flags at ingest.
+    h.event(&fp_event(
+        now + 0.5,
+        &"a1".repeat(16),
+        51400,
+        None,
+        "chromium",
+    ))
+    .await;
+    h.settle(2).await;
+    let (ja4, _, flags) = h.turn_fp(&"a1".repeat(16));
+    assert_eq!(ja4.as_deref(), Some(PYTHON_JA4));
+    assert_eq!(
+        flags.as_deref(),
+        Some("[\"library_ua_on_web\",\"ua_vs_ja4_mismatch\"]")
+    );
+    // A bad message counts and changes nothing.
+    h.fp(json!({"v":1,"ts_ms":t0,"ip":"not an ip","port":1}))
+        .await;
+    h.wait_for("bad message", || h.engine.conns.stats().bad_message == 1)
+        .await;
+    h.running.abort();
+    h.engine.shutdown().await;
 }

@@ -25,6 +25,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 # maxminddb: GeoLite2 ASN and country lookups for enrichment at ingest (docs/actors.md); null when the files are absent.
 maxminddb = "0.24"
+# libc: the tap's AF_PACKET socket (docs/tap.md); no libpcap, so no new system package on the box.
+libc = "0.2"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -172,6 +172,14 @@ pub enum StoreOp {
     MergeInsert(MergeRow),
     /// An unconfirmed actor whose last binding expired.
     ActorDelete(String),
+    /// The tap's fingerprints for a turn whose event came first (docs/tap.md);
+    /// fills only null columns, adds the mismatch flag when asked.
+    TurnFingerprint {
+        turn_id: String,
+        ja4: Option<String>,
+        ja4t: Option<String>,
+        mismatch: bool,
+    },
     /// Commit everything queued before this and reply.
     Flush(oneshot::Sender<()>),
     /// Flush, reply, and end the writer loop.

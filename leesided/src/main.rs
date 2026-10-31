@@ -30,12 +30,61 @@ fn main() {
             }
         }
         ["rules", "export"] => run_export(),
+        ["tap", rest @ ..] => run_tap(rest),
         _ => {
             eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export]"
+                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH]]"
             );
             std::process::exit(2);
         }
+    }
+}
+
+/// The passive fingerprint tap (docs/tap.md): its own process, needs
+/// CAP_NET_RAW. Env gives the defaults, flags override.
+fn run_tap(args: &[&str]) {
+    use leesided::tap::capture::{self, TapConfig};
+    let socket_dir = std::env::var("LEESIDED_SOCKET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| Config::default().socket_dir);
+    let mut cfg = TapConfig::from_env(&socket_dir);
+    let mut probe = false;
+    let mut it = args.iter();
+    let ports =
+        |v: &str| -> Vec<u16> { v.split(',').filter_map(|p| p.trim().parse().ok()).collect() };
+    while let Some(a) = it.next() {
+        if *a == "--probe" {
+            probe = true;
+            continue;
+        }
+        let Some(v) = it.next() else {
+            eprintln!("leesided tap: {a} needs a value");
+            std::process::exit(2);
+        };
+        match *a {
+            "--iface" => cfg.iface = Some(v.to_string()),
+            "--ports" => cfg.ports = ports(v),
+            "--tls-ports" => cfg.tls_ports = ports(v),
+            "--sock" => cfg.sock = std::path::PathBuf::from(v),
+            _ => {
+                eprintln!("leesided tap: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if probe {
+        match capture::probe() {
+            Ok(()) => println!("ok: this process may capture"),
+            Err(e) => {
+                eprintln!("cannot capture: {e} (needs CAP_NET_RAW: sudo setcap cap_net_raw+ep <binary>, or root)");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Err(e) = capture::run(cfg) {
+        eprintln!("leesided tap: {e}");
+        std::process::exit(1);
     }
 }
 

@@ -18,6 +18,25 @@ pub fn bind(path: &Path, mode: u32, gid: Option<u32>) -> std::io::Result<UnixDat
     })
 }
 
+/// The tap's socket: one fingerprint message per datagram, no reply.
+pub async fn serve_fp(engine: Arc<Engine>, sock: UnixDatagram) {
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match sock.recv(&mut buf).await {
+            Ok(n) => {
+                if let Err(e) = engine.fingerprint(&buf[..n]) {
+                    engine.conns.bad_message();
+                    tracing::debug!(error = %e, bytes = n, "tap message rejected");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "fp recv failed");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    }
+}
+
 pub async fn serve(engine: Arc<Engine>, sock: UnixDatagram) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {

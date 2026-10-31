@@ -135,6 +135,20 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                             params![kind, value],
                         )?;
                     }
+                    StoreOp::TurnFingerprint {
+                        turn_id,
+                        ja4,
+                        ja4t,
+                        mismatch,
+                    } => {
+                        tx.execute(
+                            "UPDATE turns SET ja4 = coalesce(ja4, ?2), ja4t = coalesce(ja4t, ?3), \
+                             flags = CASE WHEN ?4 AND coalesce(flags, '[]') NOT LIKE '%ua_vs_ja4_mismatch%' \
+                             THEN json_insert(coalesce(flags, '[]'), '$[#]', 'ua_vs_ja4_mismatch') ELSE flags END \
+                             WHERE turn_id = ?1",
+                            params![turn_id, ja4, ja4t, mismatch],
+                        )?;
+                    }
                     StoreOp::ActorDelete(id) => {
                         tx.execute(
                             "DELETE FROM actors WHERE id = ?1 AND merged_into IS NULL",

@@ -697,6 +697,7 @@ dependencies = [
  "axum",
  "criterion",
  "dashmap",
+ "libc",
  "maxminddb",
  "parking_lot",
  "proptest",

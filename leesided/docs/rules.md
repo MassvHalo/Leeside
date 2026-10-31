@@ -719,6 +719,20 @@ pre-Windside vector and is no longer written. `features::NAMES` and
 `features::VERSION` are what a model file must match; `/health` reports
 `features_version`. Windside scoring on the check path is not wired yet.
 
+### Passive tap
+
+`leesided tap` (docs/tap.md) is a second process with `CAP_NET_RAW`: an
+`AF_PACKET` socket on the web ports, JA4T from each SYN, JA4 from each
+ClientHello, one datagram per finding to `fp.sock`. leesided keys a
+connection map by a keyed hash of `ip:port`, joins the event's
+`remote_port` and time to the connection, and fills `ja4` and `ja4t` on the
+turn, at ingest or up to 60 s later when the event's datagram arrived first.
+A trusted-proxy value on the event is never overwritten. A browser
+`ua_class` with a JA4 listed as a library in `data/ja4-classes.json` adds
+`ua_vs_ja4_mismatch` to the turn's flags; unknown fingerprints never flag.
+`/health` reports `tap` counters and `ja4_classes`. The JA4 features wait
+for features v3.
+
 ### Tests and bench
 
 - Model: an unknown field is rejected at every level; exactly one test per

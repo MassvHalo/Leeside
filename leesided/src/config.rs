@@ -24,6 +24,8 @@ pub struct Config {
     /// GeoLite2-ASN.mmdb and GeoLite2-Country.mmdb for enrichment; unset or missing leaves asn and country null.
     pub geoip_asn: Option<PathBuf>,
     pub geoip_country: Option<PathBuf>,
+    /// `data/ja4-classes.json`: JA4 to browser/library, for `ua_vs_ja4_mismatch` (docs/tap.md).
+    pub ja4_classes: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -40,8 +42,24 @@ impl Default for Config {
             hash_key: None,
             geoip_asn: None,
             geoip_country: None,
+            ja4_classes: Some(default_ja4_classes()),
         }
     }
+}
+
+fn default_ja4_classes() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let beside = dir.join("data/ja4-classes.json");
+            if beside.is_file() {
+                return beside;
+            }
+        }
+    }
+    PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/ja4-classes.json"
+    ))
 }
 
 fn default_rules_dir() -> PathBuf {
@@ -107,6 +125,9 @@ impl Config {
                 cfg.geoip_country = Some(PathBuf::from(v));
             }
         }
+        if let Ok(v) = std::env::var("LEESIDED_JA4_CLASSES") {
+            cfg.ja4_classes = (!v.is_empty()).then(|| PathBuf::from(v));
+        }
         cfg
     }
 
@@ -116,5 +137,10 @@ impl Config {
 
     pub fn check_sock(&self) -> PathBuf {
         self.socket_dir.join("check.sock")
+    }
+
+    /// The tap's datagrams (docs/tap.md).
+    pub fn fp_sock(&self) -> PathBuf {
+        self.socket_dir.join("fp.sock")
     }
 }

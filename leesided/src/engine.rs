@@ -15,6 +15,8 @@ use crate::rules::stats::{hour_of, Stats};
 use crate::rules::symbols::Symbols;
 use crate::rules::windows::{id8, is_hex, key16, principal_key, EventKeys, TurnSummary, Windows};
 use crate::store::{self, CheckRecord, FeatureRow, Store, StoreError, StoreOp, TurnRow};
+use crate::tap::classes::{is_browser_ua, Class, Ja4Classes};
+use crate::tap::conns::{Connections, Hit, Pending};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use smallvec::SmallVec;
@@ -50,6 +52,10 @@ pub struct Engine {
     pub resolver: Resolver,
     /// GeoLite2 lookups for `asn` and `country`; empty when the files are absent.
     pub enrich: Enricher,
+    /// The tap's connections and the turns waiting on them (docs/tap.md).
+    pub conns: Connections,
+    /// JA4 to client class, for `ua_vs_ja4_mismatch`.
+    pub ja4_classes: Ja4Classes,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -204,6 +210,7 @@ impl Engine {
         let now_us = store::now_s() * 1_000_000;
         resolver.load(store.load_actors()?, store.load_bindings(now_us)?);
         let enrich = Enricher::open(cfg.geoip_asn.as_deref(), cfg.geoip_country.as_deref());
+        let ja4_classes = Ja4Classes::load(cfg.ja4_classes.as_deref());
         let (actors, strong, weak) = resolver.len();
         tracing::info!(
             mode = mode.as_str(),
@@ -228,6 +235,8 @@ impl Engine {
             hasher,
             resolver,
             enrich,
+            conns: Connections::default(),
+            ja4_classes,
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -634,6 +643,49 @@ impl Engine {
             _ => None,
         };
         let net = net_hash.as_deref().and_then(key16);
+
+        // The tap's fingerprints for this connection (docs/tap.md). The
+        // event's own values, set by a trusted proxy, win when present; a
+        // turn the tap has not reported yet waits for its datagram.
+        let conn_key = match (ev.ip.as_deref(), ev.remote_port) {
+            (Some(ip), Some(port)) if !ip.is_empty() && port <= 65_535 => {
+                Some(self.conn_key(ip, port as u16))
+            }
+            _ => None,
+        };
+        let hit = conn_key.map_or_else(Hit::default, |k| self.conns.lookup(k, summary.ts_ms));
+        let ja4 = ev
+            .ja4
+            .clone()
+            .filter(|j| !j.is_empty())
+            .or_else(|| hit.ja4.as_deref().map(str::to_string));
+        let ja4t = ev
+            .ja4t
+            .clone()
+            .filter(|j| !j.is_empty())
+            .or_else(|| hit.ja4t.as_deref().map(str::to_string));
+        let browser_ua = is_browser_ua(ev.ua_class.as_deref());
+        let mismatch = browser_ua
+            && ja4
+                .as_deref()
+                .is_some_and(|j| self.ja4_classes.classify(j) == Class::Library);
+        if let (Some(k), Some(t)) = (conn_key, turn_id.as_deref()) {
+            let need_ja4 = ja4.is_none() && hit.tls != Some(false);
+            let need_ja4t = ja4t.is_none();
+            if need_ja4 || need_ja4t {
+                self.conns.defer(
+                    k,
+                    Pending {
+                        turn_id: t.to_string(),
+                        ts_ms: summary.ts_ms,
+                        since: wall_ms(),
+                        browser_ua,
+                        need_ja4,
+                        need_ja4t,
+                    },
+                );
+            }
+        }
         let mut idents: SmallVec<[Ident; 8]> = SmallVec::new();
         let mut shape_ident: Option<Ident> = None;
         if let Some(p) = principal {
@@ -653,7 +705,7 @@ impl Engine {
         }
         if let Some(n) = net {
             idents.push(Ident::new(Kind::Net, n));
-            if let Some(ja4) = ev.ja4.as_deref().filter(|j| !j.is_empty()) {
+            if let Some(ja4) = ja4.as_deref() {
                 idents.push(Ident::pair(
                     Kind::Ja4Asn,
                     self.resolver.key("ja4", ja4),
@@ -802,9 +854,9 @@ impl Engine {
             ua_class: ev.ua_class,
             shape_hash: ev.shape_hash,
             shape: ev.shape.map(|s| s.get().to_string()),
-            flags: ev.flags.map(|f| f.get().to_string()),
-            ja4: ev.ja4,
-            ja4t: ev.ja4t,
+            flags: flags_with(ev.flags, mismatch),
+            ja4,
+            ja4t,
             h2_fp: ev.h2_fp,
             remote_port: ev.remote_port.map(|p| p as i64),
             ts_ms: ev.ts_ms,
@@ -813,10 +865,44 @@ impl Engine {
         Ok(())
     }
 
+    /// One datagram from the tap (docs/tap.md). The address is hashed into
+    /// the connection key here and dropped; a turn that was waiting on this
+    /// connection gets its columns filled.
+    pub fn fingerprint(&self, data: &[u8]) -> Result<(), IngestError> {
+        let msg: crate::tap::FpMessage = serde_json::from_slice(data)?;
+        if msg.v != crate::tap::WIRE_VERSION {
+            return Err(IngestError::Version(msg.v));
+        }
+        if msg.ip.parse::<std::net::IpAddr>().is_err() {
+            return Err(IngestError::Field("ip"));
+        }
+        let key = self.conn_key(&msg.ip, msg.port);
+        for fill in self.conns.observe(key, &msg) {
+            let mismatch = fill.browser_ua
+                && fill
+                    .ja4
+                    .as_deref()
+                    .is_some_and(|j| self.ja4_classes.classify(j) == Class::Library);
+            self.store.send(StoreOp::TurnFingerprint {
+                turn_id: fill.turn_id,
+                ja4: fill.ja4.map(|s| s.to_string()),
+                ja4t: fill.ja4t.map(|s| s.to_string()),
+                mismatch,
+            });
+        }
+        Ok(())
+    }
+
+    /// A keyed hash of `ip:port`, so the connection map holds no address.
+    fn conn_key(&self, ip: &str, port: u16) -> u64 {
+        self.resolver.key("conn", &format!("{ip}:{port}"))
+    }
+
     /// The 60 s sweep: expired decisions, idle windows, expired rules.
     pub async fn sweep(&self) {
         let now_s = store::now_s();
         let now_ms = now_s as u64 * 1000;
+        self.conns.sweep(now_ms);
         for (scope, key) in self.decisions.sweep(now_s) {
             self.store.send(StoreOp::DecisionDelete { scope, key });
         }
@@ -856,6 +942,8 @@ impl Engine {
                         "merges": self.resolver.merges_done.load(Ordering::Relaxed),
                         "windows": actor_windows },
             "geoip": !self.enrich.is_empty(),
+            "tap": self.conns.stats(),
+            "ja4_classes": self.ja4_classes.len(),
             "ok": true,
             "uptime_s": self.started.elapsed().as_secs(),
             "mode": self.mode().as_str(),
@@ -897,6 +985,31 @@ impl Engine {
     ) -> Result<u32, StoreError> {
         self.rules.write(rule, state, changed_by, reason).await
     }
+}
+
+/// Host clock in milliseconds, for the deferred-fill deadline.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The package's flags array with `ua_vs_ja4_mismatch` appended when the
+/// turn earned it; an unparsable array is kept as sent.
+fn flags_with(flags: Option<&RawValue>, mismatch: bool) -> Option<String> {
+    let raw = flags.map(|f| f.get().to_string());
+    if !mismatch {
+        return raw;
+    }
+    let mut list: Vec<String> = raw
+        .as_deref()
+        .and_then(|r| serde_json::from_str(r).ok())
+        .unwrap_or_default();
+    if !list.iter().any(|f| f == "ua_vs_ja4_mismatch") {
+        list.push("ua_vs_ja4_mismatch".to_string());
+    }
+    serde_json::to_string(&list).ok().or(raw)
 }
 
 /// The user-agent hash as a window key: 8 hex (v1) or 16 hex (v2), the same
@@ -957,14 +1070,17 @@ pub async fn serve(engine: Arc<Engine>) -> std::io::Result<Running> {
     std::fs::create_dir_all(&cfg.socket_dir)?;
     let check = crate::check::bind(&cfg.check_sock(), cfg.socket_mode, cfg.socket_gid)?;
     let events = crate::ingest::bind(&cfg.events_sock(), cfg.socket_mode, cfg.socket_gid)?;
+    let fp = crate::ingest::bind(&cfg.fp_sock(), cfg.socket_mode, cfg.socket_gid)?;
     let api = tokio::net::TcpListener::bind(cfg.api).await?;
     let api_addr = api.local_addr()?;
     tracing::info!(check = %cfg.check_sock().display(), events = %cfg.events_sock().display(), api = %api_addr, "listening");
 
-    let mut tasks = Vec::new();
-    tasks.push(tokio::spawn(crate::check::serve(engine.clone(), check)));
-    tasks.push(tokio::spawn(crate::ingest::serve(engine.clone(), events)));
-    tasks.push(tokio::spawn(crate::api::serve(engine.clone(), api)));
+    let mut tasks = vec![
+        tokio::spawn(crate::check::serve(engine.clone(), check)),
+        tokio::spawn(crate::ingest::serve(engine.clone(), events)),
+        tokio::spawn(crate::ingest::serve_fp(engine.clone(), fp)),
+        tokio::spawn(crate::api::serve(engine.clone(), api)),
+    ];
     let e = engine.clone();
     tasks.push(tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));

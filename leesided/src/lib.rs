@@ -11,3 +11,4 @@ pub mod hash;
 pub mod ingest;
 pub mod rules;
 pub mod store;
+pub mod tap;

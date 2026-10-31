@@ -18,7 +18,7 @@ if curl -sf "http://$API/health" >/dev/null 2>&1; then
   exit 1
 fi
 
-cleanup() { kill "${PPID_:-}" 2>/dev/null; kill -INT "${LPID:-}" 2>/dev/null; wait "${LPID:-}" 2>/dev/null; }
+cleanup() { kill "${PPID_:-}" "${TPID:-}" "${NGX_PID:-}" "${FPM_PID:-}" 2>/dev/null; kill -INT "${LPID:-}" 2>/dev/null; wait "${LPID:-}" 2>/dev/null; }
 trap cleanup EXIT
 
 LEESIDED_SOCKET_DIR="$WORK/run" LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_API="$API" \
@@ -74,8 +74,82 @@ done
 grep -c "_lsd" "$WORK/jar3.txt" | sed 's/^/  _lsd cookies in the jar: /'
 sleep 1
 sqlite3 "$WORK/leesided.sqlite" "select '  tag_status', coalesce(tag_status,'-'), count(*), count(distinct tag_id) as ids from turns where ua_class='chromium' group by 2;"
+echo "== tap: TLS through a private nginx and php-fpm on 18443, one curl and one python request"
+TAP_BIN="$HERE/target/release/leesided"
+if "$TAP_BIN" tap --probe >/dev/null 2>&1; then
+  FPM_BIN="$(ls /usr/sbin/php-fpm8.* /usr/sbin/php-fpm 2>/dev/null | head -1)"
+  mkdir -p "$WORK/tls/tmp" "$WORK/tls/logs"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout "$WORK/tls/key.pem" -out "$WORK/tls/cert.pem" -subj "/CN=localhost" -days 2 >/dev/null 2>&1
+  cat >"$WORK/tls/php-fpm.conf" <<CONF
+[global]
+pid = $WORK/tls/php-fpm.pid
+error_log = $WORK/tls/logs/php-fpm.log
+daemonize = no
+[www]
+listen = 127.0.0.1:19443
+pm = static
+pm.max_children = 2
+clear_env = no
+CONF
+  cat >"$WORK/tls/nginx.conf" <<CONF
+worker_processes 1;
+pid $WORK/tls/nginx.pid;
+error_log $WORK/tls/logs/nginx-error.log;
+events { worker_connections 64; }
+http {
+    access_log $WORK/tls/logs/nginx-access.log;
+    client_body_temp_path $WORK/tls/tmp/body;
+    proxy_temp_path $WORK/tls/tmp/proxy;
+    fastcgi_temp_path $WORK/tls/tmp/fastcgi;
+    uwsgi_temp_path $WORK/tls/tmp/uwsgi;
+    scgi_temp_path $WORK/tls/tmp/scgi;
+    server {
+        listen 127.0.0.1:18443 ssl;
+        http2 on;
+        ssl_certificate $WORK/tls/cert.pem;
+        ssl_certificate_key $WORK/tls/key.pem;
+        root $SAMPLE/public;
+        index index.php;
+        location / { try_files \$uri /index.php?\$query_string; }
+        location ~ \.php\$ {
+            fastcgi_pass 127.0.0.1:19443;
+            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+            fastcgi_param QUERY_STRING \$query_string;
+            fastcgi_param REQUEST_METHOD \$request_method;
+            fastcgi_param CONTENT_TYPE \$content_type;
+            fastcgi_param CONTENT_LENGTH \$content_length;
+            fastcgi_param SERVER_PROTOCOL \$server_protocol;
+            fastcgi_param REQUEST_URI \$request_uri;
+            fastcgi_param DOCUMENT_ROOT \$document_root;
+            fastcgi_param REMOTE_ADDR \$remote_addr;
+            fastcgi_param REMOTE_PORT \$remote_port;
+            fastcgi_param SERVER_NAME \$server_name;
+            fastcgi_param SERVER_PORT \$server_port;
+            fastcgi_param HTTPS on;
+        }
+    }
+}
+CONF
+  LEESIDE_TRANSPORT=udg LEESIDE_EVENTS_SOCKET="$WORK/run/events.sock" LEESIDE_CHECK_SOCKET="$WORK/run/check.sock" \
+    "$FPM_BIN" -y "$WORK/tls/php-fpm.conf" -F >/dev/null 2>&1 & FPM_PID=$!
+  nginx -c "$WORK/tls/nginx.conf" -p "$WORK/tls" -g 'daemon off;' >/dev/null 2>&1 & NGX_PID=$!
+  LEESIDED_SOCKET_DIR="$WORK/run" "$TAP_BIN" tap --iface lo --ports 18443 --tls-ports 18443 >"$WORK/tap.log" 2>&1 & TPID=$!
+  for _ in $(seq 1 50); do curl -skf -o /dev/null "https://127.0.0.1:18443/" >/dev/null 2>&1 && break; sleep 0.1; done
+  sleep 0.5
+  curl -sk -o /dev/null -w "  curl   GET / -> %{http_code} (%{http_version})\n" "https://127.0.0.1:18443/"
+  python3 -c 'import ssl,urllib.request; c=ssl.create_default_context(); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; r=urllib.request.urlopen("https://127.0.0.1:18443/",context=c,timeout=5); print("  python GET / ->", r.status)'
+  sleep 2
+  sqlite3 "$WORK/leesided.sqlite" "select '  ' || coalesce(ua_class,'-'), coalesce(ja4,'null'), coalesce(ja4t,'null'), coalesce(flags,'[]') from turns where remote_port is not null and ts_ms >= (select max(ts_ms) from turns) - 15000 order by ts_ms;"
+  curl -s "http://$API/health" | python3 -c 'import sys,json; t=json.load(sys.stdin)["tap"]; print("  tap:", "messages", t["messages"], "| matched", t["matched"], "| deferred", t["deferred"], "| filled_late", t["filled_late"], "| unknown", t["unknown"])'
+  kill "$TPID" "$NGX_PID" "$FPM_PID" 2>/dev/null; wait "$TPID" "$NGX_PID" "$FPM_PID" 2>/dev/null
+else
+  echo "  skipped: this binary may not capture. Once: sudo setcap cap_net_raw+ep $TAP_BIN  (redo after each build)"
+fi
 echo "== every turn, by surface, credential status and verdict (events, not probes)"
 sqlite3 "$WORK/leesided.sqlite" "select coalesce(surface,'v1'), coalesce(credential_status,'-'), coalesce(verdict,'no check'), count(*) from turns group by 1,2,3 order by 4 desc;"
 echo "== the decision in SQLite"
 sqlite3 "$WORK/leesided.sqlite" "select scope, action, mode, rule, expires_at - strftime('%s','now') || 's left' from decisions;"
-echo "== logs: $WORK/leesided.log, $WORK/php.log; db: $WORK/leesided.sqlite"
+echo "== totals over every act (the earlier line counted the traffic script only)"
+curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("  checks", h["check"]["total"], "| events", h["ingest"]["total"], "| unjoined", h["check"]["unjoined"], "| bad events", h["ingest"]["bad_event"], "| dropped", h["store"]["dropped"])'
+sqlite3 "$WORK/leesided.sqlite" "select '  turns ' || count(*) || ' | joined to a verdict ' || count(verdict) || ' | with actor ' || count(actor_id) || ' | with cluster ' || count(cluster_key) || ' | with ja4 ' || count(ja4) from turns;"
+echo "== logs: $WORK/leesided.log, $WORK/php.log, $WORK/tap.log; db: $WORK/leesided.sqlite"

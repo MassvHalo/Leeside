@@ -1,0 +1,11 @@
+{
+  "source": "FoxIO ja4plus-mapping.csv (sample mapping, github.com/FoxIO-LLC/ja4), classes assigned by bin/ja4-classes.py; extend from a ja4db export with the same script",
+  "entries": [
+    {"ja4": "t13d1516h2_8daaf6152771_02713d6af862", "class": "browser", "application": "Chromium Browser"},
+    {"ja4": "t13d1517h2_8daaf6152771_b0da82dd1658", "class": "browser", "application": "Chromium Browser"},
+    {"ja4": "t13d1715h2_5b57614c22b0_7121afd63204", "class": "browser", "application": "Mozilla Firefox"},
+    {"ja4": "t13d2014h2_a09f3c656075_14788d8d241b", "class": "browser", "application": "Safari"},
+    {"ja4": "t13d181000_85036bcba153_d41ae481755e", "class": "library", "application": "Python"},
+    {"ja4": "t13d191000_9dc949149365_e7c285222651", "class": "library", "application": "GoLang net package"}
+  ]
+}
