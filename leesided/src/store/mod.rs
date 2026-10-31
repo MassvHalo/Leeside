@@ -26,6 +26,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_v2.sql")),
     (3, include_str!("../../migrations/0003_v2_extra.sql")),
+    (
+        4,
+        include_str!("../../migrations/0004_credential_status.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +76,7 @@ pub struct TurnRow {
     pub is_asset: Option<bool>,
     pub credential_kind: Option<String>,
     pub credential_hash: Option<String>,
+    pub credential_status: Option<String>,
     pub tag_id: Option<String>,
     pub tag_status: Option<String>,
     pub ip_hash: Option<String>,

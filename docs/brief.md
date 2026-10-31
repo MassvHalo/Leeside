@@ -131,6 +131,7 @@ resolves actors from them (`docs/actor-identity.md` section 8).
 | `surface`, `is_asset` | `web`, false | as above |
 | `credential_kind` | `bearer`, `api_key`, `webhook_sig`, null | which machine credential was presented |
 | `credential_hash` | 16 hex or null | HMAC (`credential` namespace) of the token, key, or verified webhook signer id; never the value |
+| `credential_status` | `verified`, `rejected`, `unverified`, null | null without a credential. `verified` when the app had verified it by the time Leeside looked: a resolved principal (auth middleware ran ahead), `leeside.webhook_signer` set by a verifying middleware ahead, or the app's registered `CredentialVerifier` returned true. `rejected` when it was unverified and the response was 401 or 403. Else `unverified`: a header was presented, nothing vouched for it |
 | `tag_id` | 16 hex or null | the id half of the Leeside tag cookie, hex |
 | `tag_status` | `valid`, `absent`, `malformed`, `bad_mac`, `issued` | `issued` when this response set a new tag |
 | `ip` | string or null | the client address as Laravel resolves it with trusted proxies; **socket transport only**: the `log` and `array` transports write null. leesided hashes it on ingest and stores `ip_hash` (16 hex, `ip` namespace), `net_hash` (16 hex of the /24 or /48, `net` namespace) and `asn`; the address is never written |
@@ -184,14 +185,22 @@ never verdicts.
 | `ts_ms` | int | request time in whole milliseconds; `ts` keeps the float with microseconds |
 
 **What leesided does with v2.** `turns` gains the columns above
-(migrations 0002, 0003). The probe gains `surface` so rules can match on
+(migrations 0002 to 0004). The probe gains `surface` so rules can match on
 it. Windows gain a `credential` scope keyed on `credential_hash`. When a
-credential is presented, the credential is the identity: the peer window
-reads as empty for that probe and the sticky lookup skips the peer key, so
-no rule ever rate-limits a partner's address on behalf of one of its users.
-Without a credential the peer applies exactly as on `web`, whatever the
-surface, so an unauthenticated scanner on `api` is still caught per
-address. Actor resolution is a later phase.
+**verified** credential is presented, the credential is the identity: the
+peer window reads as empty for that probe and the sticky lookup skips the
+peer key, so no rule ever rate-limits a partner's address on behalf of one
+of its users. A presented but unverified credential suppresses nothing: a
+bare `Authorization: Bearer x` is just a header, and a key brute-force from
+one address must still read as one peer. Without a credential the peer
+applies exactly as on `web`, whatever the surface, so an unauthenticated
+scanner on `api` is still caught per address.
+
+Rules see credentials through the turn filter field `credential_status`
+and `distinct.field: credential`, with an optional `distinct.where` filter,
+so credential stuffing is one rule: peer scope, `distinct` credentials
+`where credential_status: [rejected]`, `gte` 10. Actor resolution is a
+later phase.
 
 An intended consequence: a peer blocked for `web` abuse is **not** blocked
 when the same address arrives on `api` with a valid credential. The
@@ -256,14 +265,23 @@ Probe:
  "session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon"}
 ```
 
-A v2 probe adds `surface` and, when present, `credential_hash`, so rules can
+A v2 probe adds `surface` and, when a credential was presented,
+`credential_hash` and `credential_status` (`verified` or `unverified` at
+this point; `rejected` is only known after the response), so rules can
 match on the surface and count per credential:
 
 ```json
 {"v":2,"ts":1761600000.123,"verb":"POST","route":"portal.login","surface":"web",
  "session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon",
- "credential_hash":null}
+ "credential_hash":null,"credential_status":null}
 ```
+
+For a credential to count as verified at probe time, whatever verifies it
+must run ahead of `GateTurn`: auth middleware, a webhook-signature
+middleware in the `webhook` group (which is in `gate_groups`, so the gate
+is appended after it), or the app's `CredentialVerifier` binding, which the
+package calls itself while building the probe. A verifier in the controller
+is too late for the probe and only reaches the event.
 
 Verdict:
 

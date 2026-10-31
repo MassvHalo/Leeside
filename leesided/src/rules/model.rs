@@ -252,6 +252,43 @@ pub enum OriginKind {
 pub enum DistinctField {
     BoundId,
     Route,
+    /// Distinct `credential_hash` values; pair with `where: {credential_status: [rejected]}` for stuffing.
+    Credential,
+}
+
+/// Whether a presented credential was vouched for when the turn ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStatus {
+    Unverified,
+    Rejected,
+    Verified,
+}
+
+impl CredentialStatus {
+    /// 1..=3 as stored on a turn; 0 means no credential.
+    #[inline]
+    pub fn code(self) -> u8 {
+        match self {
+            CredentialStatus::Unverified => 1,
+            CredentialStatus::Rejected => 2,
+            CredentialStatus::Verified => 3,
+        }
+    }
+
+    #[inline]
+    pub fn bit(self) -> u8 {
+        1 << self.code()
+    }
+
+    pub fn parse(s: &str) -> Option<CredentialStatus> {
+        match s {
+            "unverified" => Some(CredentialStatus::Unverified),
+            "rejected" => Some(CredentialStatus::Rejected),
+            "verified" => Some(CredentialStatus::Verified),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -369,6 +406,9 @@ pub struct Distinct {
     /// Narrows `bound_id` to one model basename.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Only turns matching this filter contribute values.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub filter: Option<TurnFilter>,
 }
 
 /// Every field optional; OR inside a list, AND across fields. An empty
@@ -392,6 +432,8 @@ pub struct TurnFilter {
     pub req_shape: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_model: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_status: Option<Vec<CredentialStatus>>,
 }
 
 /// A status code 0..=599 or a class.
@@ -640,6 +682,9 @@ impl Condition {
             if self.lte.is_some() {
                 e.push(format!("{path}.lte"), "not allowed with distinct");
             }
+            if let Some(f) = &d.filter {
+                f.validate(&format!("{path}.distinct.where"), e);
+            }
             if let Some(m) = &d.model {
                 if d.field != DistinctField::BoundId {
                     e.push(format!("{path}.distinct.model"), "only with field bound_id");
@@ -714,6 +759,14 @@ impl TurnFilter {
                         e.push(format!("{path}.status[{i}]"), "must be 0 to 599");
                     }
                 }
+            }
+        }
+        if let Some(s) = &self.credential_status {
+            if s.is_empty() || s.len() > 3 {
+                e.push(
+                    format!("{path}.credential_status"),
+                    "must have 1 to 3 entries",
+                );
             }
         }
         match &self.validation_failed {

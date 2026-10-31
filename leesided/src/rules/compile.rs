@@ -119,6 +119,8 @@ pub struct CFilter {
     pub auth: Option<SymSet>,
     pub shapes: Option<SymSet>,
     pub bound_models: Option<SymSet>,
+    /// Bitmask over `CredentialStatus::bit()`; never matches a turn without a credential.
+    pub credential_status: Option<u8>,
 }
 
 impl CFilter {
@@ -144,6 +146,10 @@ impl CFilter {
             auth: set(&f.auth_event),
             shapes: set(&f.req_shape),
             bound_models: set(&f.bound_model),
+            credential_status: f
+                .credential_status
+                .as_ref()
+                .map(|l| l.iter().fold(0u8, |m, s| m | s.bit())),
         }
     }
 
@@ -170,6 +176,9 @@ impl CFilter {
                 .bound_models
                 .as_ref()
                 .is_none_or(|s| t.bound.iter().any(|(m, _)| s.contains(*m)))
+            && self
+                .credential_status
+                .is_none_or(|m| t.credential_status != 0 && m & (1u8 << t.credential_status) != 0)
     }
 }
 
@@ -187,6 +196,7 @@ pub enum CTest {
         field: DistinctField,
         model: Option<Sym>,
         gte: u32,
+        filter: Option<CFilter>,
     },
     /// Ends with the route the probe must carry.
     Sequence(SmallVec<[Sym; 8]>),
@@ -219,6 +229,7 @@ impl CCond {
                     field: d.field,
                     model: d.model.as_deref().map(|m| syms.intern(m)),
                     gte: c.gte.unwrap_or(1),
+                    filter: d.filter.as_ref().map(|f| CFilter::compile(f, syms)),
                 },
             }
         } else {

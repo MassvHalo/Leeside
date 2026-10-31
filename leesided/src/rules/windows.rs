@@ -39,6 +39,10 @@ pub struct TurnSummary {
     pub latency_ms: f32,
     /// The 8-hex hashed user agent, for hijack features.
     pub ua_hash: u32,
+    /// The presented `credential_hash`, when any.
+    pub credential: Option<u64>,
+    /// `CredentialStatus::code()`; 0 without a credential.
+    pub credential_status: u8,
 }
 
 /// A ring of the newest `WINDOW_TURNS` turns plus the running totals the
@@ -332,6 +336,8 @@ pub(crate) fn turn(ts_ms: u64, route: Sym, status: u16) -> TurnSummary {
         bytes_out: 0,
         latency_ms: 0.0,
         ua_hash: 0,
+        credential: None,
+        credential_status: 0,
     }
 }
 

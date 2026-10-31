@@ -62,7 +62,7 @@ A condition. Exactly one of `count`, `distinct`, `sequence`:
 | `window_s` | int, optional | 1..=86400; turns older than `probe.ts - window_s` are ignored; absent means the whole held window (64 turns) |
 | `count` | turn filter | number of earlier turns in the window matching the filter |
 | `gte`, `lte` | int | only with `count`, at least one of them; `lte: 0` means "no such turn" |
-| `distinct` | `{ "field": "bound_id" \| "route", "model"? }` | number of distinct values across the window; `model` narrows `bound_id` to one model basename; takes `gte` only, 1..=64 (the window size); without `model`, two models sharing an id hash count as two values |
+| `distinct` | `{ "field": "bound_id" \| "route" \| "credential", "model"?, "where"? }` | number of distinct values across the window; `model` narrows `bound_id` to one model basename; `where` is a turn filter only matching turns contribute (`{"credential_status": ["rejected"]}` counts rejected keys); takes `gte` only, 1..=64 (the window size); without `model`, two models sharing an id hash count as two values |
 | `sequence` | list of 2..=8 route templates | the probe's route is the last entry and the newest k-1 turns in the session match the rest, in order; rejects `scope` and `window_s` |
 
 A turn filter. Every field optional, OR inside a list, AND across fields:
@@ -77,6 +77,7 @@ A turn filter. Every field optional, OR inside a list, AND across fields:
 | `auth_event` | list of auth event names |
 | `req_shape` | list of exact shape strings |
 | `bound_model` | list of model basenames |
+| `credential_status` | list of `verified` `rejected` `unverified`; never matches a turn without a credential |
 
 ### What a rule can see
 
@@ -463,11 +464,13 @@ accepts `v: 1` and `v: 2` on both sockets; `/health` lists
 v1 probe is `web` with no credential. Rules gain `match.surface` and the
 `credential` scope; `Windows` gains a `credentials` map keyed on the
 16-hex `credential_hash`, swept like peers. When a probe presents a
-credential the peer window reads as empty in eval and the sticky lookup
+**verified** credential (`credential_status: verified`) the peer window reads as empty in eval and the sticky lookup
 skips the peer key, on any surface: the credential is the identity, and
 nothing rate-limits a partner's address on behalf of one of its users.
-Without a credential the peer applies as on web, so an unauthenticated
-scanner on api is still caught per address. A sticky decision on a
+Without a credential, or with an unverified one, the peer applies as on
+web, so an unauthenticated scanner or a key brute-force on api is still
+caught per address; `distinct.field: credential` with
+`where: {credential_status: [rejected]}` counts the keys it tried. A sticky decision on a
 credential key answers on any surface. By design, a peer blocked for web
 abuse is not blocked when it arrives on api with a valid credential.
 The install set is unchanged: with no `surface` listed the three rules

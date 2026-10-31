@@ -55,6 +55,8 @@ curl -s -i -c "$WORK/jar2.txt" -b "$WORK/jar2.txt" -A leeside-traffic/1.0 -d "ph
 curl -s -o /dev/null -c "$WORK/jar2.txt" -b "$WORK/jar2.txt" -A leeside-traffic/1.0 -w "  same session GET / -> %{http_code} (sticky)\n" "http://127.0.0.1:$PORT/"
 curl -s -o /dev/null -A leeside-traffic/1.0 -w "  no cookie  GET / -> %{http_code} (untouched)\n" "http://127.0.0.1:$PORT/"
 
+echo "== every turn, by surface, credential status and verdict (events, not probes)"
+sqlite3 "$WORK/leesided.sqlite" "select coalesce(surface,'v1'), coalesce(credential_status,'-'), coalesce(verdict,'no check'), count(*) from turns group by 1,2,3 order by 4 desc;"
 echo "== the decision in SQLite"
 sqlite3 "$WORK/leesided.sqlite" "select scope, action, mode, rule, expires_at - strftime('%s','now') || 's left' from decisions;"
 echo "== logs: $WORK/leesided.log, $WORK/php.log; db: $WORK/leesided.sqlite"

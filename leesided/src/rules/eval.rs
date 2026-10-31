@@ -25,6 +25,8 @@ pub struct Probe<'a> {
     pub surface: Surface,
     /// The 16-hex `credential_hash` on a v2 probe, when a credential was presented.
     pub credential: Option<u64>,
+    /// Only a verified credential stands in for the peer.
+    pub credential_verified: bool,
 }
 
 /// One rule whose conditions held.
@@ -125,7 +127,8 @@ impl<'a> Fetched<'a> {
         // many users, so the peer window reads as empty and no rule can
         // rate-limit a partner's IP. Without a credential (an unauthenticated
         // scanner on api, say) the peer applies exactly as on web.
-        let peer = probe.credential.is_none().then_some(probe.peer_key);
+        let peer =
+            (!(probe.credential.is_some() && probe.credential_verified)).then_some(probe.peer_key);
         Fetched {
             windows,
             keys: [
@@ -270,15 +273,28 @@ fn holds(cond: &CCond, route_sym: Option<Sym>, probe: &Probe, f: &mut Fetched) -
             }
             gte.is_none_or(|g| n >= g) && lte.is_none_or(|l| n <= l)
         }
-        CTest::Distinct { field, model, gte } => {
+        CTest::Distinct {
+            field,
+            model,
+            gte,
+            filter,
+        } => {
             let mut seen: SmallVec<[u64; WINDOW_TURNS]> = SmallVec::new();
             if let Some(w) = w {
                 'turns: for t in w.newest() {
                     if t.ts_ms < oldest_ok {
                         break;
                     }
+                    if filter.as_ref().is_some_and(|f| !f.matches(t)) {
+                        continue;
+                    }
                     match field {
                         DistinctField::Route => push_if_absent(&mut seen, t.route.0 as u64),
+                        DistinctField::Credential => {
+                            if let Some(c) = t.credential {
+                                push_if_absent(&mut seen, c);
+                            }
+                        }
                         DistinctField::BoundId => {
                             for (m, id) in &t.bound {
                                 if model.is_some_and(|only| only != *m) {
@@ -386,6 +402,7 @@ mod tests {
                 ts_ms: NOW_MS,
                 surface: Surface::Web,
                 credential: None,
+                credential_verified: false,
             }
         }
 

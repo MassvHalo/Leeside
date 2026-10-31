@@ -134,6 +134,8 @@ fn turn(rng: &mut Rng, syms: &Symbols, ts_ms: u64) -> TurnSummary {
         bytes_out: 1024,
         latency_ms: 10.0,
         ua_hash: 0,
+        credential: None,
+        credential_status: 0,
     }
 }
 
@@ -217,6 +219,7 @@ fn run_one(f: &Fixture, p: &(Verb, String, u64, u64, Option<u64>, u64)) -> usize
         ts_ms: p.5,
         surface: Surface::Web,
         credential: None,
+        credential_verified: false,
     };
     eval(&f.rs, &f.syms, &f.windows, &probe, Mode::Enforce, NOW_S)
         .hits

@@ -706,6 +706,7 @@ fn v2_event(
         "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,
         "surface":surface,"is_asset":false,
         "credential_kind": credential.map(|_| "bearer"),"credential_hash":credential,
+        "credential_status": credential.map(|_| "verified"),
         "tag_id":"0123456789abcdef","tag_status":"valid",
         "ip":"203.0.113.7","ip_trust":"direct","ua_class":"library",
         "shape_hash":"aaaaaaaaaaaaaaaa",
@@ -724,7 +725,8 @@ fn v2_probe(
     credential: Option<&str>,
 ) -> String {
     json!({"v":2,"ts":ts,"verb":"POST","route":route,"surface":surface,"session_key":session,
-        "peer_key":PEER,"principal":"anon","credential_hash":credential})
+        "peer_key":PEER,"principal":"anon","credential_hash":credential,
+        "credential_status":credential.map(|_| "verified")})
     .to_string()
 }
 
@@ -986,6 +988,114 @@ async fn unauthenticated_api_burst_trips_peer_rule_but_a_credentialed_one_does_n
         v["action"], "block",
         "the SESSION decision still applies: {v}"
     );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+fn v2_probe_status(
+    ts: f64,
+    route: &str,
+    session: &str,
+    surface: &str,
+    credential: &str,
+    status: &str,
+) -> String {
+    json!({"v":2,"ts":ts,"verb":"POST","route":route,"surface":surface,"session_key":session,
+        "peer_key":PEER,"principal":"anon","credential_hash":credential,"credential_status":status})
+    .to_string()
+}
+
+fn rejected_key_event(ts: f64, session: &str, credential: &str) -> String {
+    json!({"v":2,"ts":ts,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"POST",
+        "route":"api.ping","status":401,"latency_ms":1.0,"bytes_in":0,"bytes_out":20,
+        "req_shape":"[]","resp_shape":"{message:str:12}","bound":[],
+        "validation_failed":null,"exception":null,"auth_event":null,"gate":null,
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,
+        "surface":"api","is_asset":false,"credential_kind":"api_key","credential_hash":credential,
+        "credential_status":"rejected","ip":"203.0.113.9","ip_trust":"direct","ua_class":"library"})
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn garbage_credential_burst_is_one_peer_not_many_credentials() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let stuffing: Rule = serde_json::from_value(json!({
+        "id": "api-key-stuffing", "note": "ten rejected keys from one address", "mode": "enforce", "action": "block",
+        "match": {"route": ["api.ping"], "verb": ["POST"], "principal": "any", "surface": ["api"]},
+        "when": {"scope": "peer", "window_s": 600,
+                 "distinct": {"field": "credential", "where": {"credential_status": ["rejected"]}}, "gte": 10},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(stuffing, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_f64();
+    for i in 0..10u64 {
+        // Each attempt a new session (no cookie jar) and a new key.
+        h.event(&rejected_key_event(
+            now - 30.0 + i as f64,
+            &format!("{:016x}", 0x1000 + i),
+            &format!("{:016x}", 0xabc00 + i),
+        ))
+        .await;
+    }
+    h.wait_for("10 peer turns", || {
+        h.engine
+            .windows
+            .peer(0x0f1e2d3c4b5a6978)
+            .is_some_and(|w| w.len() == 10)
+    })
+    .await;
+    {
+        let w = h.engine.windows.peer(0x0f1e2d3c4b5a6978).unwrap();
+        let mut creds: Vec<u64> = w.newest().filter_map(|t| t.credential).collect();
+        creds.sort();
+        creds.dedup();
+        assert_eq!(creds.len(), 10, "ten rejected credentials on one peer");
+        assert!(w.newest().all(|t| t.credential_status == 2));
+    }
+    // The eleventh key, unverified at probe time: the peer window is live, the rule fires.
+    let v = h
+        .probe(&v2_probe_status(
+            now,
+            "api.ping",
+            "0000000000002000",
+            "api",
+            "0000000000abcff",
+            "unverified",
+        ))
+        .await;
+    assert_eq!(
+        v["action"], "allow",
+        "a 15-hex hash is a bad probe and answers allow: {v}"
+    );
+    let v = h
+        .probe(&v2_probe_status(
+            now,
+            "api.ping",
+            "0000000000002000",
+            "api",
+            "00000000000abcff",
+            "unverified",
+        ))
+        .await;
+    assert_eq!(v["action"], "block", "{v}");
+    assert_eq!(v["rule"], "api-key-stuffing");
+    // A verified credential from the same address is a different identity: nothing fires.
+    let v = h
+        .probe(&v2_probe_status(
+            now,
+            "api.ping",
+            "0000000000002001",
+            "api",
+            "00000000000abd00",
+            "verified",
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
     h.running.abort();
     h.engine.shutdown().await;
 }

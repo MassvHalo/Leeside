@@ -162,6 +162,7 @@ fn filter() -> impl Strategy<Value = TurnFilter> {
                     auth_event: strs(auth_event),
                     req_shape: strs(req_shape),
                     bound_model: strs(bound_model),
+                    credential_status: None,
                 }
             },
         )
@@ -203,6 +204,7 @@ fn condition(match_routes: Vec<String>) -> impl Strategy<Value = Condition> {
                 } else {
                     None
                 },
+                filter: None,
             }),
             gte: Some(gte),
             ..Default::default()
@@ -355,8 +357,12 @@ fn naive(
                         let d = c.distinct.as_ref().unwrap();
                         let mut seen: Vec<String> = Vec::new();
                         for e in in_window {
+                            if d.filter.as_ref().is_some_and(|f| !naive_matches(f, e)) {
+                                continue;
+                            }
                             match d.field {
                                 DistinctField::Route => seen.push(e.route.to_string()),
+                                DistinctField::Credential => {}
                                 DistinctField::BoundId => {
                                     for (m, id) in &e.bound {
                                         if d.model.as_deref().is_none_or(|only| only == *m) {
@@ -415,6 +421,7 @@ fn naive_matches(f: &TurnFilter, e: &Event) -> bool {
         && f.bound_model
             .as_ref()
             .is_none_or(|l| e.bound.iter().any(|(m, _)| l.iter().any(|y| y == m)))
+        && f.credential_status.is_none()
 }
 
 fn summary(e: &Event, ts_ms: u64, syms: &Symbols) -> TurnSummary {
@@ -435,6 +442,8 @@ fn summary(e: &Event, ts_ms: u64, syms: &Symbols) -> TurnSummary {
         bytes_out: 0,
         latency_ms: 0.0,
         ua_hash: 0,
+        credential: None,
+        credential_status: 0,
     }
 }
 
@@ -471,7 +480,8 @@ proptest! {
         let rs = RuleSet::compile(entries, &syms, 1);
         let p = Probe { verb, route, session_key: session, peer_key: peer, principal, ts_ms,
             surface: Surface::Web,
-            credential: None };
+            credential: None,
+            credential_verified: false };
         let got = eval(&rs, &syms, &windows, &p, global, NOW_S);
         let (want_hits, want_winner) = naive(&rules, &events, verb, route, session, peer, principal, ts_ms, global);
 

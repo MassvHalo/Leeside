@@ -7,7 +7,7 @@ use crate::rules::compile::State;
 use crate::rules::decisions::{Decision, Decisions};
 use crate::rules::eval::{eval, Probe, Verdict};
 use crate::rules::features;
-use crate::rules::model::{Action, Mode, Scope, Surface, Verb};
+use crate::rules::model::{Action, CredentialStatus, Mode, Scope, Surface, Verb};
 use crate::rules::service::RulesService;
 use crate::rules::stats::{hour_of, Stats};
 use crate::rules::symbols::Symbols;
@@ -79,6 +79,10 @@ struct ProbeWire<'a> {
     surface: Option<Cow<'a, str>>,
     #[serde(borrow, default)]
     credential_hash: Option<Cow<'a, str>>,
+    /// `verified` or `unverified` at probe time; only a verified credential
+    /// is an identity that stands in for the peer.
+    #[serde(borrow, default)]
+    credential_status: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +118,9 @@ struct EventWire<'a> {
     credential_kind: Option<String>,
     #[serde(default)]
     credential_hash: Option<String>,
+    /// `verified`, `rejected`, `unverified`, or absent without a credential.
+    #[serde(default)]
+    credential_status: Option<String>,
     #[serde(default)]
     tag_id: Option<String>,
     #[serde(default)]
@@ -252,16 +259,18 @@ impl Engine {
                 None => return self.bad_probe(&rs, global),
             },
         };
+        let credential_verified =
+            credential.is_some() && probe.credential_status.as_deref() == Some("verified");
         let ts_us = store::ts_us(probe.ts);
         let ts_ms = (probe.ts * 1000.0) as u64;
         let hour = hour_of(now_s);
 
-        // Sticky first: session, then peer (skipped when a credential is
-        // presented: the credential is the identity there), then principal,
-        // then credential.
+        // Sticky first: session, then peer (skipped when a verified
+        // credential is presented: the credential is the identity there),
+        // then principal, then credential.
         let keys: SmallVec<[(Scope, u64); 4]> = [
             Some((Scope::Session, session)),
-            credential.is_none().then_some((Scope::Peer, peer)),
+            (!credential_verified).then_some((Scope::Peer, peer)),
             principal.map(|p| (Scope::Principal, p)),
             credential.map(|c| (Scope::Credential, c)),
         ]
@@ -316,6 +325,7 @@ impl Engine {
             ts_ms,
             surface,
             credential,
+            credential_verified,
         };
         let out = eval(&rs, &self.symbols, &self.windows, &p, global, now_s);
 
@@ -450,6 +460,12 @@ impl Engine {
             bytes_out: ev.bytes_out,
             latency_ms: ev.latency_ms as f32,
             ua_hash: id8(&ev.ua_hash).unwrap_or(0),
+            credential,
+            credential_status: ev
+                .credential_status
+                .as_deref()
+                .and_then(CredentialStatus::parse)
+                .map_or(0, |s| s.code()),
         };
         let keys = EventKeys {
             session,
@@ -501,6 +517,7 @@ impl Engine {
             is_asset: ev.is_asset,
             credential_kind: ev.credential_kind,
             credential_hash: ev.credential_hash.filter(|h| !h.is_empty()),
+            credential_status: ev.credential_status,
             tag_id: ev.tag_id.filter(|t| !t.is_empty()),
             tag_status: ev.tag_status,
             ip_hash,
