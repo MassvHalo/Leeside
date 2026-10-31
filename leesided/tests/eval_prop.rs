@@ -446,6 +446,9 @@ fn summary(e: &Event, ts_ms: u64, syms: &Symbols) -> TurnSummary {
         ua_hash: 0,
         credential: None,
         credential_status: 0,
+        surface: 0,
+        tag_status: 0,
+        net: None,
     }
 }
 

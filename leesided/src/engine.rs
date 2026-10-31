@@ -273,15 +273,16 @@ impl Engine {
                     .collect(),
                 bytes_out: r.bytes_out,
                 latency_ms: r.latency_ms as f32,
-                ua_hash: id8(&r.ua_hash)
-                    .or_else(|| key16(&r.ua_hash).map(|k| k as u32))
-                    .unwrap_or(0),
+                ua_hash: ua_code(&r.ua_hash),
                 credential,
                 credential_status: r
                     .credential_status
                     .as_deref()
                     .and_then(CredentialStatus::parse)
                     .map_or(0, |s| s.code()),
+                surface: surface_code(r.surface.as_deref().and_then(Surface::parse)),
+                tag_status: tag_code(r.tag_status.as_deref()),
+                net: r.net_hash.as_deref().and_then(key16),
             };
             self.windows.record(
                 &EventKeys {
@@ -600,13 +601,16 @@ impl Engine {
                 .collect(),
             bytes_out: ev.bytes_out,
             latency_ms: ev.latency_ms as f32,
-            ua_hash: id8(&ev.ua_hash).unwrap_or(0),
+            ua_hash: ua_code(&ev.ua_hash),
             credential,
             credential_status: ev
                 .credential_status
                 .as_deref()
                 .and_then(CredentialStatus::parse)
                 .map_or(0, |s| s.code()),
+            surface: surface_code(surface),
+            tag_status: tag_code(ev.tag_status.as_deref()),
+            net: net_hash.as_deref().and_then(key16),
         };
         let ts_us = store::ts_us(ev.ts);
         let turn_id = match ev.turn_id.as_deref() {
@@ -631,6 +635,7 @@ impl Engine {
         };
         let net = net_hash.as_deref().and_then(key16);
         let mut idents: SmallVec<[Ident; 8]> = SmallVec::new();
+        let mut shape_ident: Option<Ident> = None;
         if let Some(p) = principal {
             idents.push(Ident::new(Kind::Principal, p));
         }
@@ -656,6 +661,7 @@ impl Engine {
                 ));
             }
             if let Some(shape) = ev.shape_hash.as_deref().and_then(key16) {
+                shape_ident = Some(Ident::pair(Kind::ShapeNet, shape, n));
                 idents.push(Ident::pair(Kind::ShapeNet, shape, n));
             }
             if let Some(ua) = key16(&ev.ua_hash) {
@@ -701,17 +707,58 @@ impl Engine {
         let ts_ms = summary.ts_ms;
         self.windows.record(&keys, summary);
 
-        if let Some(s) = self.windows.session(session) {
-            let p = self.windows.peer(peer);
-            let values = features::extract(&s, p.as_deref(), ts_ms, principal.is_none(), syms);
-            drop(p);
-            drop(s);
-            self.store.send(StoreOp::Feature(FeatureRow {
-                session_key: ev.session_key.clone(),
-                ts_us,
-                version: features::VERSION,
-                values: values.to_vec(),
-            }));
+        // Feature rows (features.rs v2): one per confirmed actor window, one
+        // per cluster window. A provisional actor holds one turn and is noise.
+        let net_ident = net.map(|n| Ident::new(Kind::Net, n));
+        let context = |around: u64| features::Context {
+            cluster_actors_net: net_ident
+                .map_or(0, |i| self.resolver.cluster_size(i, around, ts_us)),
+            shape_cluster_size: shape_ident
+                .map_or(0, |i| self.resolver.cluster_size(i, around, ts_us)),
+        };
+        if let Some(a) = actor.filter(|a| self.resolver.actor(*a).is_some_and(|x| x.confirmed)) {
+            if let Some(w) = self.windows.actor(a) {
+                let p = self.windows.peer(peer);
+                let values = features::extract(
+                    &w,
+                    p.as_deref(),
+                    ts_ms,
+                    principal.is_none(),
+                    syms,
+                    context(a),
+                );
+                drop(p);
+                drop(w);
+                self.store.send(StoreOp::Feature(FeatureRow {
+                    scope: "actor",
+                    key: format!("{a:016x}"),
+                    ts_us,
+                    version: features::VERSION,
+                    values: values.to_vec(),
+                }));
+            }
+        }
+        if let Some(c) = cluster {
+            if let Some(w) = self.windows.cluster(c) {
+                let p = self.windows.peer(peer);
+                let values = features::extract(
+                    &w,
+                    p.as_deref(),
+                    ts_ms,
+                    principal.is_none(),
+                    syms,
+                    context(actor.unwrap_or(0)),
+                );
+                drop(p);
+                drop(w);
+                self.store.send(StoreOp::Feature(FeatureRow {
+                    scope: "cluster",
+                    key: format!("{c:016x}"),
+                    ts_us,
+                    version: features::VERSION,
+                    values: values.to_vec(),
+                }));
+            }
         }
 
         self.store.send(StoreOp::Turn(TurnRow {
@@ -819,6 +866,7 @@ impl Engine {
                          "credentials": credentials, "clusters": clusters,
                          "dropped_for_cap": self.windows.dropped_for_cap() },
             "schema_versions": SCHEMA_VERSIONS,
+            "features_version": features::VERSION,
             "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),
             "symbols": { "count": self.symbols.len(), "overflowed": self.symbols.overflowed() },
@@ -848,6 +896,37 @@ impl Engine {
         reason: Option<String>,
     ) -> Result<u32, StoreError> {
         self.rules.write(rule, state, changed_by, reason).await
+    }
+}
+
+/// The user-agent hash as a window key: 8 hex (v1) or 16 hex (v2), the same
+/// recipe at ingest and at replay so a rebuilt window matches a live one.
+fn ua_code(hex: &str) -> u32 {
+    id8(hex)
+        .or_else(|| key16(hex).map(|k| k as u32))
+        .unwrap_or(0)
+}
+
+/// `features::SURFACE_*` for a turn summary.
+fn surface_code(s: Option<Surface>) -> u8 {
+    match s {
+        Some(Surface::Web) => features::SURFACE_WEB,
+        Some(Surface::Api) => features::SURFACE_API,
+        Some(Surface::Webhook) => features::SURFACE_WEBHOOK,
+        Some(Surface::Honeypot) => features::SURFACE_HONEYPOT,
+        None => 0,
+    }
+}
+
+/// `features::TAG_*` for a turn summary.
+fn tag_code(s: Option<&str>) -> u8 {
+    match s {
+        Some("absent") => features::TAG_ABSENT,
+        Some("issued") => features::TAG_ISSUED,
+        Some("valid") => features::TAG_VALID,
+        Some("malformed") => features::TAG_MALFORMED,
+        Some("bad_mac") => features::TAG_BAD_MAC,
+        _ => 0,
     }
 }
 

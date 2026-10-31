@@ -205,7 +205,8 @@ async fn contract_probe_and_event_from_the_brief() {
     let (matched, _, hash) = h.engine.store.turn_verdict(SESSION, key).unwrap().unwrap();
     assert_eq!(matched.unwrap(), "[]");
     assert_eq!(hash.unwrap().len(), 32);
-    assert_eq!(h.engine.store.count("features").unwrap(), 1);
+    // A v1 event opens a provisional actor and names no cluster: no feature row yet.
+    assert_eq!(h.engine.store.count("feature_vectors").unwrap(), 0);
     assert_eq!(h.engine.store.unjoined(), 0);
     h.running.abort();
     h.engine.shutdown().await;
@@ -1542,4 +1543,213 @@ async fn a_cookie_less_scanner_leaves_one_cluster_window_and_no_actors() {
     assert_eq!(with_actor, 100, "turns keep the id they were ingested with");
     h.running.abort();
     h.engine.shutdown().await;
+}
+
+fn feature_rows(h: &Harness, scope: &str) -> Vec<(String, i64, String)> {
+    h.engine
+        .store
+        .with_reader(|c| {
+            let mut st = c.prepare(
+                "SELECT key, ts_us, vector FROM feature_vectors WHERE scope = ?1 ORDER BY ts_us",
+            )?;
+            let rows = st.query_map(rusqlite::params![scope], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect()
+        })
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
+    use leesided::rules::features::{NAMES, VERSION};
+    let h = Harness::start().await;
+    let now = now_f64();
+    // A cookie-less scanner: 100 fresh sessions, no tag ever returned.
+    for i in 0..100u64 {
+        h.event(&tagless_event(
+            now - 300.0 + i as f64,
+            &format!("{i:032x}"),
+            &format!("{:016x}", 0x5000 + i),
+        ))
+        .await;
+    }
+    h.wait_for("100 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 100
+    })
+    .await;
+    h.engine.store.flush().await;
+    assert!(
+        feature_rows(&h, "actor").is_empty(),
+        "provisional actors emit no rows"
+    );
+    let clusters = feature_rows(&h, "cluster");
+    assert_eq!(clusters.len(), 100, "every turn scores through its cluster");
+    assert_eq!(
+        clusters
+            .iter()
+            .map(|(k, _, _)| k.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        1,
+        "one cluster"
+    );
+    let last: Vec<f32> = serde_json::from_str(&clusters.last().unwrap().2).unwrap();
+    assert_eq!(last.len(), NAMES.len());
+    let at = |v: &[f32], name: &str| v[NAMES.iter().position(|n| *n == name).unwrap()];
+    assert_eq!(at(&last, "turns_held"), 64.0);
+    assert_eq!(at(&last, "turns_total"), 100.0);
+    assert_eq!(at(&last, "surface_web"), 1.0);
+    assert!(
+        at(&last, "tag_dropped") == 0.0,
+        "issued every time, never returned, never absent after an issue on this cluster"
+    );
+
+    // A browser: issued, then valid. One actor row, at the confirming turn, covering both.
+    let t1 = tagged_event(
+        now - 20.0,
+        &"a".repeat(32),
+        "1111111111111111",
+        "anon",
+        TAG,
+        "home",
+    )
+    .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\"");
+    let t2 = tagged_event(
+        now - 10.0,
+        &"b".repeat(32),
+        "1111111111111111",
+        "anon",
+        TAG,
+        "venues.show",
+    );
+    h.event(&t1).await;
+    h.event(&t2).await;
+    h.wait_for("102 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 102
+    })
+    .await;
+    h.engine.store.flush().await;
+    let actors = feature_rows(&h, "actor");
+    assert_eq!(actors.len(), 1, "{actors:?}");
+    let v: Vec<f32> = serde_json::from_str(&actors[0].2).unwrap();
+    assert_eq!(
+        at(&v, "turns_held"),
+        2.0,
+        "the first window already covers the provisional turn"
+    );
+    assert_eq!(at(&v, "distinct_routes"), 2.0);
+    assert_eq!(actors[0].1, ts_us(now - 10.0));
+    let version: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row("SELECT DISTINCT version FROM feature_vectors", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(version as u32, VERSION);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
+    let now = now_f64();
+    let script = |now: f64| {
+        vec![
+            tagged_event(
+                now - 50.0,
+                &"1".repeat(32),
+                "1111111111111111",
+                "anon",
+                TAG,
+                "home",
+            )
+            .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\""),
+            tagged_event(
+                now - 40.0,
+                &"2".repeat(32),
+                "1111111111111111",
+                "anon",
+                TAG,
+                "venues.show",
+            ),
+            tagged_event(
+                now - 30.0,
+                &"3".repeat(32),
+                "2222222222222222",
+                "0f0f0f0f0f0f0f0f",
+                TAG,
+                "portal.login",
+            ),
+            tagged_event(
+                now - 20.0,
+                &"4".repeat(32),
+                "2222222222222222",
+                "0f0f0f0f0f0f0f0f",
+                TAG,
+                "home",
+            ),
+        ]
+    };
+    let fifth = |now: f64| {
+        tagged_event(
+            now - 10.0,
+            &"5".repeat(32),
+            "2222222222222222",
+            "0f0f0f0f0f0f0f0f",
+            TAG,
+            "api.venues.index",
+        )
+    };
+
+    let h = Harness::start().await;
+    for e in script(now) {
+        h.event(&e).await;
+    }
+    h.wait_for("4 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 4
+    })
+    .await;
+    h.engine.store.flush().await;
+    let before = feature_rows(&h, "actor");
+    assert_eq!(
+        before.len(),
+        3,
+        "rows from the confirming turn on: {before:?}"
+    );
+    // Restart: windows rebuilt from turns, bindings reloaded; one more turn.
+    let h = h.restart().await;
+    h.event(&fifth(now)).await;
+    h.wait_for("5th event", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    h.engine.store.flush().await;
+    let after = feature_rows(&h, "actor");
+    assert_eq!(after.len(), 4);
+    h.running.abort();
+    h.engine.shutdown().await;
+
+    // The same five turns straight into a fresh store give the same five... four rows, byte for byte.
+    let h2 = Harness::start().await;
+    for e in script(now) {
+        h2.event(&e).await;
+    }
+    h2.event(&fifth(now)).await;
+    h2.wait_for("5 events", || {
+        h2.engine.counters.events.load(Ordering::Relaxed) == 5
+    })
+    .await;
+    h2.engine.store.flush().await;
+    let fresh = feature_rows(&h2, "actor");
+    assert_eq!(fresh, after, "same turns, same vectors, restart or not");
+    h2.running.abort();
+    h2.engine.shutdown().await;
 }

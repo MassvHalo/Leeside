@@ -35,6 +35,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         include_str!("../../migrations/0006_cluster_and_provisional.sql"),
     ),
+    (7, include_str!("../../migrations/0007_feature_vectors.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -130,9 +131,11 @@ pub struct StatRow {
     pub acted: u64,
 }
 
+/// One features-v2 row: a vector over an actor or cluster window.
 #[derive(Debug, Clone)]
 pub struct FeatureRow {
-    pub session_key: String,
+    pub scope: &'static str,
+    pub key: String,
     pub ts_us: i64,
     pub version: u32,
     pub values: Vec<f32>,
@@ -256,6 +259,9 @@ pub struct ReplayRow {
     pub latency_ms: f64,
     pub ua_hash: String,
     pub cluster_key: Option<String>,
+    pub surface: Option<String>,
+    pub tag_status: Option<String>,
+    pub net_hash: Option<String>,
 }
 
 /// A `rules` row as stored.
@@ -670,7 +676,7 @@ impl Store {
             let mut stmt = c.prepare(
                 "SELECT session_key, peer_key, principal, credential_hash, credential_status, actor_id, ts_us, \
                  route, verb, status, validation_failed, exception, auth_event, req_shape, bound, bytes_out, \
-                 latency_ms, ua_hash, cluster_key FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
+                 latency_ms, ua_hash, cluster_key, surface, tag_status, net_hash FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
             )?;
             let rows = stmt.query_map(params![since_us], |r| {
                 Ok(ReplayRow {
@@ -693,6 +699,9 @@ impl Store {
                     latency_ms: r.get(16)?,
                     ua_hash: r.get(17)?,
                     cluster_key: r.get(18)?,
+                    surface: r.get(19)?,
+                    tag_status: r.get(20)?,
+                    net_hash: r.get(21)?,
                 })
             })?;
             rows.collect()

@@ -94,8 +94,14 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                     }
                     StoreOp::Feature(f) => {
                         tx.execute(
-                            "INSERT OR REPLACE INTO features (session_key, ts_us, version, vector) VALUES (?1, ?2, ?3, ?4)",
-                            params![f.session_key, f.ts_us, f.version, serde_json::to_string(&f.values)?],
+                            "INSERT OR REPLACE INTO feature_vectors (scope, key, ts_us, version, vector) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![
+                                f.scope,
+                                f.key,
+                                f.ts_us,
+                                f.version,
+                                serde_json::to_string(&f.values)?
+                            ],
                         )?;
                     }
                     StoreOp::RuleWrite {

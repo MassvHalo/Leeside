@@ -162,15 +162,22 @@ They are bound like any identifier (so the UI can show "other actors on
 this network") and they feed two things only:
 
 - Cluster features on the actor window, for Windside: `cluster_actors_net`
-  (distinct actors sharing the actor's current `net_hash` within the TTL),
-  `cluster_actors_ja4_asn`, `ja4_asn_agreement` (does this actor's TLS stack
-  match the others on its network), `shape_cluster_size`.
+  (distinct actors sharing the actor's current `net_hash` within the TTL)
+  and `shape_cluster_size` (actors sharing its shape on that network).
+  `cluster_actors_ja4_asn` and `ja4_asn_agreement` wait for the trusted
+  proxy to pass `ja4`; they are not in v2.
 - The cross-request signals from the brief that need a cluster:
-  `tag_dropped` (an actor got `issued` and a later turn from the same weak
-  cluster arrives `absent`), `credential_moved` (one credential seen from a
-  new `ja4` or `asn`, or two ASNs inside an hour).
+  `tag_dropped` (a tag was `issued` on this window and a later turn on the
+  same window arrived `absent`), `credential_moved` (one credential seen
+  from two networks inside the window).
 
-A weak cluster is a query over bindings, not an entity.
+A weak cluster is a query over bindings, not an entity. Features v2 writes
+one `feature_vectors` row per **confirmed** actor and one per cluster
+(`cluster_key = hash(net_hash || shape_hash)`) at every turn that touched
+them: a provisional actor is one turn and noise, while a cookie-less
+scanner's hundred sessions score as one cluster window. Rule outcomes and
+raw identifiers are never features; `features::DENYLIST` and the
+`names_pass_the_denylist` test hold the names to that.
 
 ## What the rules and the check path see
 
@@ -190,8 +197,9 @@ A weak cluster is a query over bindings, not an entity.
   it sits below session and principal. A probe whose identifiers have no
   live binding has no actor window (empty, like an anonymous principal
   scope); the event that follows resolves fully and may open the actor.
-- `features.rs` moves to v2: the v1 vector plus the cluster features above,
-  computed on the actor window; `surface` enters as four indicators.
+- `features.rs` is at v2: the v1 vector plus the cluster features above,
+  computed on the actor or cluster window; `surface` enters as four
+  indicators of the newest turn. `/health` reports `features_version`.
 
 ## Rebuild on start
 

@@ -705,13 +705,19 @@ an operator promotes it with `PUT /rules/{id}`.
 
 ### Windside groundwork
 
-`features.rs` is the v1 extractor: 30 named `f32`s per turn over the
-session window (volume, pacing, error ratios, auth, breadth, payload,
-navigation, user-agent changes) plus two over the peer window and
-`is_anon`. Ingest writes one `features` row per event, so the training
-corpus accumulates from the first deploy. `features::NAMES` and
-`features::VERSION` are what a model file must match. Windside scoring on
-the check path is not wired yet; the extractor cost is paid on ingest only.
+`features.rs` is at v2: the 30 v1 names (volume, pacing, error ratios,
+auth, breadth, payload, navigation, user-agent changes, two over the peer
+window, `is_anon`) plus `cluster_actors_net`, `shape_cluster_size`,
+`tag_dropped`, `credential_moved` and four surface indicators. Ingest
+writes one `feature_vectors` row per **confirmed** actor window and one per
+cluster window at every turn that touched them (a provisional actor is one
+turn and noise; cookie-less traffic scores through its cluster). Two rules
+hold for every name: rule outcomes are never features, raw identifiers are
+never features (counts of distinct hashes are); `names_pass_the_denylist`
+enforces both. The repo's v1, per session into the `features` table, was the
+pre-Windside vector and is no longer written. `features::NAMES` and
+`features::VERSION` are what a model file must match; `/health` reports
+`features_version`. Windside scoring on the check path is not wired yet.
 
 ### Tests and bench
 

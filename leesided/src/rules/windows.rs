@@ -43,6 +43,12 @@ pub struct TurnSummary {
     pub credential: Option<u64>,
     /// `CredentialStatus::code()`; 0 without a credential.
     pub credential_status: u8,
+    /// `features::SURFACE_*`; 0 for a v1 event.
+    pub surface: u8,
+    /// `features::TAG_*`; 0 when the tag middleware did not run.
+    pub tag_status: u8,
+    /// `net_hash` as a key, for `credential_moved`.
+    pub net: Option<u64>,
 }
 
 /// A ring of the newest `WINDOW_TURNS` turns plus the running totals the
@@ -378,6 +384,9 @@ pub(crate) fn turn(ts_ms: u64, route: Sym, status: u16) -> TurnSummary {
         ua_hash: 0,
         credential: None,
         credential_status: 0,
+        surface: 0,
+        tag_status: 0,
+        net: None,
     }
 }
 

@@ -136,6 +136,9 @@ fn turn(rng: &mut Rng, syms: &Symbols, ts_ms: u64) -> TurnSummary {
         ua_hash: 0,
         credential: None,
         credential_status: 0,
+        surface: 0,
+        tag_status: 0,
+        net: None,
     }
 }
 

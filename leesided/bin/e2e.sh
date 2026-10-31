@@ -50,7 +50,7 @@ done
 sleep 11   # one stats flush
 echo "== what leesided saw"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("checks", h["check"]["total"], "| events", h["ingest"]["total"], "| sessions", h["windows"]["sessions"], "| unjoined", h["check"]["unjoined"], "| dropped", h["store"]["dropped"])'
-sqlite3 "$WORK/leesided.sqlite" "select 'turns', count(*) from turns union all select 'joined to a verdict', count(*) from turns where verdict is not null union all select 'feature rows', count(*) from features;"
+sqlite3 "$WORK/leesided.sqlite" "select 'turns', count(*) from turns union all select 'joined to a verdict', count(*) from turns where verdict is not null union all select 'feature rows (actor)', count(*) from feature_vectors where scope='actor' union all select 'feature rows (cluster)', count(*) from feature_vectors where scope='cluster';"
 
 echo "== promote: global enforce, portal-otp-burst to enforce"
 curl -s -X PUT "http://$API/mode" -H 'content-type: application/json' -d '{"mode":"enforce"}'; echo
