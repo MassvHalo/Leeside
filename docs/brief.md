@@ -172,7 +172,16 @@ headers only, nginx-added `X-Forwarded-*` and `X-Real-IP` excluded),
 `header_names_hash` (lowercased names in received order), `cookie_names_hash`
 (sorted names), `order_reliable` (false when header order was found not to
 survive FastCGI, in which case `header_names_hash` is over sorted names).
-`shape_hash` is the hash of those joined with `_`.
+`shape_hash` is the hash of those joined with `_`. All three hashes use the
+`shape` namespace.
+
+Measured 2026-10-31 with `leeside-sample/deploy/header-order-check.sh` on
+nginx 1.28 and php-fpm 8.5: the order reaches PHP **exactly reversed**,
+deterministically, because php-fpm prepends FastCGI params into `$_SERVER`.
+The information survives but not as received order, so by this rule the
+host is `order_reliable = false`: `LEESIDE_HEADER_ORDER_RELIABLE=false` and
+names are hashed sorted. A "reversed" recipe that recovers the order is a
+later option; it would be a new `shape` version, not a silent change.
 
 **Flags**, each from the current request alone: `ua_chromium_no_ch`,
 `browser_no_sec_fetch`, `browser_no_accept_language`,
@@ -282,6 +291,16 @@ middleware in the `webhook` group (which is in `gate_groups`, so the gate
 is appended after it), or the app's `CredentialVerifier` binding, which the
 package calls itself while building the probe. A verifier in the controller
 is too late for the probe and only reaches the event.
+
+A forgery must reach leesided. The webhook verifier therefore never aborts:
+it sets `leeside.webhook_signer` on success or `leeside.webhook_rejected`
+(the claimed signer, else a constant) on failure, the gate probes with
+`credential_status: unverified` so the peer applies, and the package's
+`RequireWebhookSigner`, appended to the group after the gate, answers 401
+before the controller. The event then carries `rejected` through the 401
+rule, and a forged burst from one address is rejected credentials on one
+peer. The `CredentialVerifier` runs on the probe path and must be cheap;
+the package adds no database round trip of its own.
 
 Verdict:
 

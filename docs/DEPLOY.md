@@ -58,8 +58,12 @@ php artisan migrate --seed
 php -r 'echo base64_encode(random_bytes(32)), PHP_EOL;'
 ```
 
-Put the generated value in `.env` as `LEESIDE_HASH_KEY`. The other two
-Leeside additions are already in `.env.example` and work as-is:
+Put the generated value in `.env` as `LEESIDE_HASH_KEY`, and a second one as
+`LEESIDE_TAG_SECRET`: it signs the tag cookie, and left unset it falls back to
+`APP_KEY`, so a key rotation would invalidate every issued tag at once and
+read as a wave of `bad_mac`. `LEESIDE_HEADER_ORDER_RELIABLE` stays `false`
+unless `deploy/header-order-check.sh` says otherwise on your host. The socket
+additions are already in `.env.example` and work as-is:
 
 ```bash
 LEESIDE_EVENTS_SOCKET=storage/leeside/events.sock

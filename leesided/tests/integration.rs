@@ -1099,3 +1099,76 @@ async fn garbage_credential_burst_is_one_peer_not_many_credentials() {
     h.running.abort();
     h.engine.shutdown().await;
 }
+
+fn forged_webhook_event(ts: f64, session: &str, claimed: &str) -> String {
+    json!({"v":2,"ts":ts,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"POST",
+        "route":"webhooks.demo","status":401,"latency_ms":1.0,"bytes_in":12,"bytes_out":26,
+        "req_shape":"{order:int}","resp_shape":"{message:str:12}","bound":[],
+        "validation_failed":null,"exception":null,"auth_event":null,
+        "gate":{"action":"allow","mode":"monitor","rule":null,"applied":false},
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,
+        "surface":"webhook","is_asset":false,"credential_kind":"webhook_sig","credential_hash":claimed,
+        "credential_status":"rejected","ip":"203.0.113.9","ip_trust":"direct","ua_class":"library"})
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forged_webhook_burst_trips_a_peer_rule_and_a_signed_one_does_not() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let forgeries: Rule = serde_json::from_value(json!({
+        "id": "webhook-forgeries", "note": "three rejected signatures from one address", "mode": "enforce",
+        "action": "rate_limit", "retry_after_s": 60,
+        "match": {"route": ["webhooks.demo"], "verb": ["POST"], "principal": "any", "surface": ["webhook"]},
+        "when": {"scope": "peer", "window_s": 600, "count": {"credential_status": ["rejected"]}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(forgeries, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_f64();
+    for i in 0..3u64 {
+        h.event(&forged_webhook_event(
+            now - 20.0 + i as f64,
+            &format!("{:016x}", 0x7000 + i),
+            &format!("{:016x}", 0xbad000 + i),
+        ))
+        .await;
+    }
+    h.wait_for("3 forgeries on the peer", || {
+        h.engine
+            .windows
+            .peer(0x0f1e2d3c4b5a6978)
+            .is_some_and(|w| w.len() == 3)
+    })
+    .await;
+    // The next forgery: unverified at probe time, so the peer window is read and the rule fires.
+    let v = h
+        .probe(&v2_probe_status(
+            now,
+            "webhooks.demo",
+            "0000000000007003",
+            "webhook",
+            "0000000000bad003",
+            "unverified",
+        ))
+        .await;
+    assert_eq!(v["action"], "rate_limit", "{v}");
+    assert_eq!(v["rule"], "webhook-forgeries");
+    // A correctly signed webhook from the same address is its signer's identity: nothing fires.
+    let v = h
+        .probe(&v2_probe_status(
+            now,
+            "webhooks.demo",
+            "0000000000007004",
+            "webhook",
+            "00000000000acc01",
+            "verified",
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
