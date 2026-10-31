@@ -180,11 +180,23 @@ survive FastCGI, in which case `header_names_hash` is over sorted names).
 Definitions in `docs/actor-identity.md` section 5. Flags are features,
 never verdicts.
 
-**What leesided does with v2.** `turns` gains the columns above (migration
-0002). The probe gains `surface` so rules can match on it. Windows gain a
-`credential` scope keyed on `credential_hash`, and rate is never computed
-per peer on `api` or `webhook`: a peer-scope condition on those surfaces
-evaluates as empty. Actor resolution is a later phase.
+| `remote_port` | int or null | the client source port, to tell users apart behind one NAT address |
+| `ts_ms` | int | request time in whole milliseconds; `ts` keeps the float with microseconds |
+
+**What leesided does with v2.** `turns` gains the columns above
+(migrations 0002, 0003). The probe gains `surface` so rules can match on
+it. Windows gain a `credential` scope keyed on `credential_hash`. When a
+credential is presented, the credential is the identity: the peer window
+reads as empty for that probe and the sticky lookup skips the peer key, so
+no rule ever rate-limits a partner's address on behalf of one of its users.
+Without a credential the peer applies exactly as on `web`, whatever the
+surface, so an unauthenticated scanner on `api` is still caught per
+address. Actor resolution is a later phase.
+
+An intended consequence: a peer blocked for `web` abuse is **not** blocked
+when the same address arrives on `api` with a valid credential. The
+credential's own window and decisions govern there. This is by design, not
+a gap to close.
 
 ### Shape notation
 

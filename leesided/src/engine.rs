@@ -137,6 +137,12 @@ struct EventWire<'a> {
     ja4t: Option<String>,
     #[serde(default)]
     h2_fp: Option<String>,
+    /// Client source port, for telling apart users behind one NAT address.
+    #[serde(default)]
+    remote_port: Option<u32>,
+    /// Request time in whole milliseconds, as the package stamps it.
+    #[serde(default)]
+    ts_ms: Option<i64>,
 }
 
 /// Schema versions this build ingests. v2 is a superset of v1.
@@ -250,11 +256,12 @@ impl Engine {
         let ts_ms = (probe.ts * 1000.0) as u64;
         let hour = hour_of(now_s);
 
-        // Sticky first: session, then peer (never on a machine surface),
-        // then principal, then credential.
+        // Sticky first: session, then peer (skipped when a credential is
+        // presented: the credential is the identity there), then principal,
+        // then credential.
         let keys: SmallVec<[(Scope, u64); 4]> = [
             Some((Scope::Session, session)),
-            (!surface.is_machine()).then_some((Scope::Peer, peer)),
+            credential.is_none().then_some((Scope::Peer, peer)),
             principal.map(|p| (Scope::Principal, p)),
             credential.map(|c| (Scope::Credential, c)),
         ]
@@ -507,6 +514,8 @@ impl Engine {
             ja4: ev.ja4,
             ja4t: ev.ja4t,
             h2_fp: ev.h2_fp,
+            remote_port: ev.remote_port.map(|p| p as i64),
+            ts_ms: ev.ts_ms,
         }));
         self.counters.events.fetch_add(1, Ordering::Relaxed);
         Ok(())

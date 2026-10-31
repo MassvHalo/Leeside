@@ -121,9 +121,11 @@ struct Fetched<'a> {
 
 impl<'a> Fetched<'a> {
     fn new(windows: &'a Windows, probe: &Probe) -> Self {
-        // On api and webhook one address is many users: the peer window
-        // reads as empty there, so no rule can rate-limit a partner's IP.
-        let peer = (!probe.surface.is_machine()).then_some(probe.peer_key);
+        // A presented credential is the identity: behind it one address is
+        // many users, so the peer window reads as empty and no rule can
+        // rate-limit a partner's IP. Without a credential (an unauthenticated
+        // scanner on api, say) the peer applies exactly as on web.
+        let peer = probe.credential.is_none().then_some(probe.peer_key);
         Fetched {
             windows,
             keys: [

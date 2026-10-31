@@ -1,5 +1,5 @@
 //! SQLite behind one writer thread. Everything that writes sends a
-//! `StoreOp` over a bounded channel; a full channel drops and counts rather
+//! `StoreOp` over a bounded hannel; a full channel drops and counts rather
 //! than blocking the check path. A second connection serves reads.
 
 mod writer;
@@ -25,6 +25,7 @@ pub type TurnVerdict = (Option<String>, Option<String>, Option<Vec<u8>>);
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../migrations/0001_init.sql")),
     (2, include_str!("../../migrations/0002_v2.sql")),
+    (3, include_str!("../../migrations/0003_v2_extra.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +85,8 @@ pub struct TurnRow {
     pub ja4: Option<String>,
     pub ja4t: Option<String>,
     pub h2_fp: Option<String>,
+    pub remote_port: Option<i64>,
+    pub ts_ms: Option<i64>,
 }
 
 /// What the check answered, to be joined onto the turn row once it lands.
@@ -119,6 +122,9 @@ pub struct FeatureRow {
     pub values: Vec<f32>,
 }
 
+// `Turn` carries the whole row by value: one hop through the channel per
+// event, where a box would be an allocation per event for no gain.
+#[allow(clippy::large_enum_variant)]
 pub enum StoreOp {
     Turn(TurnRow),
     ConversationClose(Closed),
@@ -513,4 +519,52 @@ pub fn now_s() -> i64 {
 /// probe and its turn.
 pub fn ts_us(ts: f64) -> i64 {
     (ts * 1_000_000.0).round() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database left at schema 1 with a live decision comes through the
+    /// 0002 rebuild of `decisions` with the row intact.
+    #[test]
+    fn decisions_survive_the_0002_rebuild() {
+        let dir = std::env::temp_dir().join(format!("leesided-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v1.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+                .unwrap();
+            conn.execute_batch(MIGRATIONS[0].1).unwrap();
+            conn.execute("INSERT INTO schema_version (version) VALUES (1)", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) \
+                 VALUES ('session', 'a1b2c3d4e5f60718', 'block', 'enforce', 'r', 1, 0, 4102444800)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .with_reader(|c| {
+                c.query_row("SELECT max(version) FROM schema_version", [], |r| r.get(0))
+            })
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.last().unwrap().0);
+        let decisions = store.load_decisions(now_s()).unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].key, 0xa1b2c3d4e5f60718);
+        assert_eq!(decisions[0].scope, crate::rules::model::Scope::Session);
+        // The rebuilt table takes the new scope.
+        store
+            .with_reader(|c| {
+                c.execute_batch("")?;
+                Ok(())
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

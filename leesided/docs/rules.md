@@ -58,7 +58,7 @@ A condition. Exactly one of `count`, `distinct`, `sequence`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `scope` | `session` (default) \| `peer` \| `principal` \| `credential` | which window to look at; `principal` on an `anon` probe and `credential` without a presented credential read as empty; on the `api` and `webhook` surfaces `peer` reads as empty too (one address is many users) |
+| `scope` | `session` (default) \| `peer` \| `principal` \| `credential` | which window to look at; `principal` on an `anon` probe and `credential` without a presented credential read as empty; when a credential is presented `peer` reads as empty too (the credential is the identity; one address is many users), on any surface |
 | `window_s` | int, optional | 1..=86400; turns older than `probe.ts - window_s` are ignored; absent means the whole held window (64 turns) |
 | `count` | turn filter | number of earlier turns in the window matching the filter |
 | `gte`, `lte` | int | only with `count`, at least one of them; `lte: 0` means "no such turn" |
@@ -462,14 +462,19 @@ accepts `v: 1` and `v: 2` on both sockets; `/health` lists
 `schema_versions`. A v2 probe carries `surface` and `credential_hash`; a
 v1 probe is `web` with no credential. Rules gain `match.surface` and the
 `credential` scope; `Windows` gains a `credentials` map keyed on the
-16-hex `credential_hash`, swept like peers. On `api` and `webhook` the
-peer window reads as empty in eval and the sticky lookup skips the peer
-key, so nothing ever rate-limits a partner's address. A sticky decision on
-a credential key answers on any surface, since the key is the identity.
+16-hex `credential_hash`, swept like peers. When a probe presents a
+credential the peer window reads as empty in eval and the sticky lookup
+skips the peer key, on any surface: the credential is the identity, and
+nothing rate-limits a partner's address on behalf of one of its users.
+Without a credential the peer applies as on web, so an unauthenticated
+scanner on api is still caught per address. A sticky decision on a
+credential key answers on any surface. By design, a peer blocked for web
+abuse is not blocked when it arrives on api with a valid credential.
 The install set is unchanged: with no `surface` listed the three rules
 apply everywhere.
 
-Ingest stores the v2 columns from migration `0002_v2.sql` as sent, with
+Ingest stores the v2 columns from migrations `0002_v2.sql` and
+`0003_v2_extra.sql` (`remote_port`, `ts_ms`) as sent, with
 two exceptions. `ip` is hashed with the package's recipe (`src/hash.rs`:
 `HMAC-SHA256(key, namespace || "\0" || value)` to 16 hex, key from
 `LEESIDED_HASH_KEY`, the same value as the package's `LEESIDE_HASH_KEY`)

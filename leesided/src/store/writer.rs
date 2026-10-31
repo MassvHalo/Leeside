@@ -162,9 +162,9 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
          latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, validation_failed, exception, \
          auth_event, gate, ua_hash, dropped_since_last, surface, is_asset, credential_kind, \
          credential_hash, tag_id, tag_status, ip_hash, net_hash, asn, ip_trust, ua_class, shape_hash, \
-         shape, flags, ja4, ja4t, h2_fp) \
+         shape, flags, ja4, ja4t, h2_fp, remote_port, ts_ms) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, \
-         ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)",
+         ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)",
         params![
             r.session_key,
             r.ts_us,
@@ -203,6 +203,8 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
             r.ja4,
             r.ja4t,
             r.h2_fp,
+            r.remote_port,
+            r.ts_ms,
         ],
     )?;
     Ok(())

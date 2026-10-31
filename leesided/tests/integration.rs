@@ -919,3 +919,73 @@ async fn surface_match_and_credential_scope_with_no_peer_rate_on_api() {
     h.running.abort();
     h.engine.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthenticated_api_burst_trips_peer_rule_but_a_credentialed_one_does_not() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let per_peer: Rule = serde_json::from_value(json!({
+        "id": "api-peer-burst", "note": "t", "mode": "enforce", "action": "block",
+        "match": {"route": ["api.ping"], "verb": ["POST"], "principal": "any", "surface": ["api"]},
+        "when": {"scope": "peer", "window_s": 60, "count": {}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(per_peer, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_f64();
+    for i in 0..3 {
+        h.event(&v2_event(
+            now - 10.0 + i as f64,
+            "1111111111111111",
+            "api.ping",
+            "api",
+            None,
+        ))
+        .await;
+    }
+    h.wait_for("3 peer turns", || {
+        h.engine
+            .windows
+            .peer(0x0f1e2d3c4b5a6978)
+            .is_some_and(|w| w.len() == 3)
+    })
+    .await;
+    // No credential: the peer window is live on api, the scanner is blocked.
+    let v = h
+        .probe(&v2_probe(now, "api.ping", "1111111111111111", "api", None))
+        .await;
+    assert_eq!(v["action"], "block", "{v}");
+    assert_eq!(v["rule"], "api-peer-burst");
+    // The same address with a credential: the credential is the identity,
+    // the peer window reads as empty, the session's block does not apply.
+    let v = h
+        .probe(&v2_probe(
+            now,
+            "api.ping",
+            "2222222222222222",
+            "api",
+            Some("feedfacefeedface"),
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
+    // ... and the per-peer block that stuck to the first session is not
+    // consulted for a credentialed probe either (sticky skips the peer key).
+    let v = h
+        .probe(&v2_probe(
+            now,
+            "api.ping",
+            "1111111111111111",
+            "api",
+            Some("feedfacefeedface"),
+        ))
+        .await;
+    assert_eq!(
+        v["action"], "block",
+        "the SESSION decision still applies: {v}"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}

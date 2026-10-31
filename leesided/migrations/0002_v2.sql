@@ -24,7 +24,11 @@ CREATE INDEX turns_credential ON turns (credential_hash, ts_us);
 CREATE INDEX turns_tag ON turns (tag_id, ts_us);
 
 -- decisions gains the credential scope; SQLite cannot alter a CHECK, so
--- the table is rebuilt in place.
+-- the table is rebuilt in place. Deploy note: live decisions SURVIVE this
+-- rebuild (the INSERT ... SELECT copies every row before the old table is
+-- dropped) and are reloaded into the mirror at the next start; the test
+-- store::tests::decisions_survive_the_0002_rebuild holds the migration to
+-- that.
 CREATE TABLE decisions_v2 (
   scope        TEXT NOT NULL CHECK (scope IN ('session', 'peer', 'principal', 'credential')),
   key          TEXT NOT NULL,

@@ -111,7 +111,7 @@ Flags are features for Windside, never verdicts. Nothing in the package blocks o
 | Primary identity | `auth_id` > `session_hash` > `tag_id` | `credential_hash` > `auth_id` | `credential_hash` (verified signer) > `ip` range | `tag_id` > shape + ip |
 | Rate and cadence computed per | actor | credential | signer | actor |
 
-Never compute rate per IP on `api` or `webhook`. One partner server is many users behind one address. In leesided this is a `credential` window scope, and a `peer` scope condition on those surfaces evaluates as empty.
+Never compute rate per IP on `api` or `webhook`. One partner server is many users behind one address. In leesided this is a `credential` window scope; when a credential is presented, a `peer` scope condition evaluates as empty and the sticky peer lookup is skipped, on any surface. Without a credential the peer applies as on web, so unauthenticated scanners on `api` are still caught per address. Consequence, by design: a peer blocked for `web` abuse is not blocked on `api` with a valid credential.
 
 ## 7. Proxy-provided fingerprints (contract only, for now)
 
