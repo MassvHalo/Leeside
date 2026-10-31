@@ -51,14 +51,21 @@ class SurfacesTest extends TestCase
         $this->assertStringNotContainsString('acct_42', json_encode($this->transport->events));
     }
 
-    public function test_unsigned_webhook_is_refused_before_the_gate(): void
+    public function test_forged_webhook_is_probed_then_refused(): void
     {
-        $this->postJson('/webhooks/demo', ['order' => 42])->assertStatus(401);
+        $this->postJson('/webhooks/demo', ['order' => 42], ['X-Signature' => str_repeat('0', 64), 'X-Signer' => 'acct_evil'])
+            ->assertStatus(401)->assertJson(['message' => 'Unauthorized']);
 
-        $this->assertCount(0, $this->rules->probes);
+        $this->assertCount(1, $this->rules->probes, 'the forgery reaches leesided');
+        $this->assertSame('unverified', $this->rules->probes[0]['credential_status']);
         $event = end($this->transport->events);
         $this->assertSame('webhook', $event['surface']);
-        $this->assertNull($event['credential_status']);
+        $this->assertSame('webhook_sig', $event['credential_kind']);
+        $this->assertSame('rejected', $event['credential_status']);
+        $this->assertStringNotContainsString('acct_evil', json_encode($this->transport->events));
+
+        $this->postJson('/webhooks/demo', ['order' => 42])->assertStatus(401);
+        $this->assertSame('rejected', end($this->transport->events)['credential_status']);
     }
 
     public function test_api_ping_with_the_demo_key_is_verified_and_without_it_rejected(): void

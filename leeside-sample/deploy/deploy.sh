@@ -48,6 +48,11 @@ if [ \"\$FIRST_RUN\" -eq 1 ]; then
         HASH_KEY=\$(php -r 'echo base64_encode(random_bytes(32)), PHP_EOL;')
         sed -i \"s|^LEESIDE_HASH_KEY=\$|LEESIDE_HASH_KEY=\$HASH_KEY|\" .env
     fi
+    # Its own secret, so an APP_KEY rotation does not invalidate every tag at once.
+    if grep -q '^LEESIDE_TAG_SECRET=\$' .env; then
+        TAG_SECRET=\$(php -r 'echo base64_encode(random_bytes(32)), PHP_EOL;')
+        sed -i \"s|^LEESIDE_TAG_SECRET=\$|LEESIDE_TAG_SECRET=\$TAG_SECRET|\" .env
+    fi
     php artisan key:generate --force
 fi
 
