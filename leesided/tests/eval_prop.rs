@@ -255,7 +255,7 @@ fn rule(i: usize) -> impl Strategy<Value = (Rule, bool)> {
                     action,
                     retry_after_s: (action == Action::RateLimit).then_some(30),
                     block_min: None,
-                    matcher: Match { route: routes.clone(), verb, principal },
+                    matcher: Match { route: routes.clone(), verb, principal, surface: vec![] },
                     when,
                     expires_at,
                     origin: Origin { kind: OriginKind::Operator, incident: None, model: None },
@@ -298,6 +298,8 @@ fn naive(
                 Scope::Session => e.session == session,
                 Scope::Peer => e.peer == peer,
                 Scope::Principal => principal.is_some() && e.principal == principal,
+                // The generator never presents a credential, so that window is empty.
+                Scope::Credential => false,
             })
             .collect();
         let start = all.len().saturating_sub(WINDOW_TURNS);
@@ -455,7 +457,7 @@ proptest! {
         let windows = Windows::default();
         for (i, e) in events.iter().enumerate() {
             windows.record(
-                &EventKeys { session: e.session, peer: e.peer, principal: e.principal },
+                &EventKeys { session: e.session, peer: e.peer, principal: e.principal, credential: None },
                 summary(e, BASE_MS + i as u64 * 1000, &syms),
             );
         }
@@ -467,7 +469,9 @@ proptest! {
             })
         }).collect();
         let rs = RuleSet::compile(entries, &syms, 1);
-        let p = Probe { verb, route, session_key: session, peer_key: peer, principal, ts_ms };
+        let p = Probe { verb, route, session_key: session, peer_key: peer, principal, ts_ms,
+            surface: Surface::Web,
+            credential: None };
         let got = eval(&rs, &syms, &windows, &p, global, NOW_S);
         let (want_hits, want_winner) = naive(&rules, &events, verb, route, session, peer, principal, ts_ms, global);
 

@@ -4,7 +4,7 @@
 
 use super::model::{
     Action, Condition, DistinctField, Mode, Origin, PrincipalKind, Rule, Scope, StatusClass,
-    StatusSel, TurnFilter, ValidationSel, Verb,
+    StatusSel, Surface, TurnFilter, ValidationSel, Verb,
 };
 use super::symbols::{Sym, Symbols};
 use super::windows::TurnSummary;
@@ -237,6 +237,8 @@ pub struct Compiled {
     /// Index into `RuleSet.rules` and `.meta`.
     pub ix: u32,
     pub verbs: u8,
+    /// Bitmask over `Surface`; `match.surface` empty compiles to all four.
+    pub surfaces: u8,
     pub principal: PrincipalKind,
     pub conds: SmallVec<[CCond; 3]>,
     pub action: Action,
@@ -306,6 +308,7 @@ impl RuleSet {
             rules.push(Compiled {
                 ix,
                 verbs: rule.matcher.verb.iter().fold(0u8, |acc, v| acc | v.bit()),
+                surfaces: Surface::mask(&rule.matcher.surface),
                 principal: rule.matcher.principal,
                 sticky_scope: conds.first().map_or(Scope::Session, |c| c.scope),
                 conds,

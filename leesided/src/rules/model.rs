@@ -126,14 +126,95 @@ pub enum Scope {
     Session,
     Peer,
     Principal,
+    /// Keyed on `credential_hash`; the rate scope for `api` and `webhook`.
+    Credential,
 }
 
 impl Scope {
+    pub const ALL: [Scope; 4] = [
+        Scope::Session,
+        Scope::Peer,
+        Scope::Principal,
+        Scope::Credential,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::Session => "session",
             Scope::Peer => "peer",
             Scope::Principal => "principal",
+            Scope::Credential => "credential",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Scope> {
+        match s {
+            "session" => Some(Scope::Session),
+            "peer" => Some(Scope::Peer),
+            "principal" => Some(Scope::Principal),
+            "credential" => Some(Scope::Credential),
+            _ => None,
+        }
+    }
+}
+
+/// Which kind of client a request belongs to, classified by the package
+/// (brief, schema v2). Expectations depend on it: no peer-scope rate on
+/// the machine surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Surface {
+    Honeypot,
+    Webhook,
+    Api,
+    Web,
+}
+
+impl Surface {
+    pub const ALL: [Surface; 4] = [
+        Surface::Honeypot,
+        Surface::Webhook,
+        Surface::Api,
+        Surface::Web,
+    ];
+
+    #[inline]
+    pub fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+
+    /// Empty list = any surface.
+    pub fn mask(list: &[Surface]) -> u8 {
+        if list.is_empty() {
+            0b1111
+        } else {
+            list.iter().fold(0u8, |m, s| m | s.bit())
+        }
+    }
+
+    /// `api` and `webhook`: one address is many users, so per-peer counts
+    /// are meaningless there.
+    #[inline]
+    pub fn is_machine(self) -> bool {
+        matches!(self, Surface::Api | Surface::Webhook)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Surface::Honeypot => "honeypot",
+            Surface::Webhook => "webhook",
+            Surface::Api => "api",
+            Surface::Web => "web",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Surface> {
+        match s {
+            "honeypot" => Some(Surface::Honeypot),
+            "webhook" => Some(Surface::Webhook),
+            "api" => Some(Surface::Api),
+            "web" => Some(Surface::Web),
+            _ => None,
         }
     }
 }
@@ -210,6 +291,9 @@ pub struct Match {
     /// 1..=8 verbs.
     pub verb: Vec<Verb>,
     pub principal: PrincipalKind,
+    /// 0..=4 surfaces; absent or empty means any. A v1 probe is `web`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface: Vec<Surface>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -503,6 +587,19 @@ impl Match {
                 e.push(format!("match.verb[{i}]"), "duplicate verb");
             }
             seen |= v.bit();
+        }
+        if self.surface.len() > Surface::ALL.len() {
+            e.push(
+                "match.surface",
+                format!("must have at most {} entries", Surface::ALL.len()),
+            );
+        }
+        let mut seen = 0u8;
+        for (i, s) in self.surface.iter().enumerate() {
+            if seen & s.bit() != 0 {
+                e.push(format!("match.surface[{i}]"), "duplicate surface");
+            }
+            seen |= s.bit();
         }
     }
 }

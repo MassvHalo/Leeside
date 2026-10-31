@@ -124,6 +124,8 @@ pub struct EventKeys {
     pub peer: u64,
     /// `None` for `anon`.
     pub principal: Option<u64>,
+    /// `credential_hash` on `api`/`webhook` turns; `None` otherwise (v1 events always).
+    pub credential: Option<u64>,
 }
 
 /// The conversation-close summary, emitted by the sweep.
@@ -145,6 +147,7 @@ pub struct Windows {
     sessions: DashMap<u64, Window>,
     peers: DashMap<u64, Window>,
     principals: DashMap<u64, Window>,
+    credentials: DashMap<u64, Window>,
     cap: usize,
     /// Turns not indexed because the map was full even after making room.
     dropped_for_cap: AtomicU64,
@@ -162,6 +165,7 @@ impl Windows {
             sessions: DashMap::new(),
             peers: DashMap::new(),
             principals: DashMap::new(),
+            credentials: DashMap::new(),
             cap,
             dropped_for_cap: AtomicU64::new(0),
         }
@@ -173,6 +177,9 @@ impl Windows {
         self.push_into(&self.peers, keys.peer, keys, &t, now_ms);
         if let Some(p) = keys.principal {
             self.push_into(&self.principals, p, keys, &t, now_ms);
+        }
+        if let Some(c) = keys.credential {
+            self.push_into(&self.credentials, c, keys, &t, now_ms);
         }
         self.push_into(&self.sessions, keys.session, keys, &t, now_ms);
     }
@@ -216,6 +223,11 @@ impl Windows {
         self.principals.get(&key)
     }
 
+    #[inline]
+    pub fn credential(&self, key: u64) -> Option<Ref<'_, u64, Window>> {
+        self.credentials.get(&key)
+    }
+
     pub fn set_flag(&self, session: u64, flag: u8) {
         if let Some(mut w) = self.sessions.get_mut(&session) {
             w.flags |= flag;
@@ -256,11 +268,19 @@ impl Windows {
             .retain(|_, w| now_ms.saturating_sub(w.last_ms) <= PEER_IDLE_MS);
         self.principals
             .retain(|_, w| now_ms.saturating_sub(w.last_ms) <= PEER_IDLE_MS);
+        self.credentials
+            .retain(|_, w| now_ms.saturating_sub(w.last_ms) <= PEER_IDLE_MS);
         closed
     }
 
-    pub fn counts(&self) -> (usize, usize, usize) {
-        (self.sessions.len(), self.peers.len(), self.principals.len())
+    /// (sessions, peers, principals, credentials)
+    pub fn counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.sessions.len(),
+            self.peers.len(),
+            self.principals.len(),
+            self.credentials.len(),
+        )
     }
 
     pub fn dropped_for_cap(&self) -> u64 {
@@ -323,6 +343,7 @@ mod tests {
         session: 1,
         peer: 2,
         principal: None,
+        credential: None,
     };
 
     #[test]
@@ -355,7 +376,7 @@ mod tests {
         assert_eq!(s.errors_4xx, 7);
         assert_eq!(s.opened_ms, 1000);
         assert_eq!(s.last_ms, 1069);
-        assert_eq!(w.counts(), (1, 1, 0));
+        assert_eq!(w.counts(), (1, 1, 0, 0));
     }
 
     #[test]
@@ -369,7 +390,7 @@ mod tests {
             },
             turn(2, Sym(0), 200),
         );
-        assert_eq!(w.counts(), (1, 1, 1));
+        assert_eq!(w.counts(), (1, 1, 1, 0));
         assert_eq!(w.session(1).unwrap().principal, Some(9));
         assert!(w.principal(9).is_some());
     }
@@ -414,9 +435,9 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(w.counts(), (0, 1, 0));
+        assert_eq!(w.counts(), (0, 1, 0, 0));
         w.sweep(2_001 + PEER_IDLE_MS);
-        assert_eq!(w.counts(), (0, 0, 0));
+        assert_eq!(w.counts(), (0, 0, 0, 0));
     }
 
     #[test]

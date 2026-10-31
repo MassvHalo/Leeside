@@ -22,7 +22,10 @@ pub const CHANNEL_CAPACITY: usize = 10_000;
 /// The check columns of a turn row: `rules_matched`, `verdict`, `ruleset_hash`.
 pub type TurnVerdict = (Option<String>, Option<String>, Option<Vec<u8>>);
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../migrations/0001_init.sql")),
+    (2, include_str!("../../migrations/0002_v2.sql")),
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -63,6 +66,24 @@ pub struct TurnRow {
     pub gate: Option<String>,
     pub ua_hash: String,
     pub dropped_since_last: i64,
+    // v2, all null on a v1 event
+    pub surface: Option<String>,
+    pub is_asset: Option<bool>,
+    pub credential_kind: Option<String>,
+    pub credential_hash: Option<String>,
+    pub tag_id: Option<String>,
+    pub tag_status: Option<String>,
+    pub ip_hash: Option<String>,
+    pub net_hash: Option<String>,
+    pub asn: Option<i64>,
+    pub ip_trust: Option<String>,
+    pub ua_class: Option<String>,
+    pub shape_hash: Option<String>,
+    pub shape: Option<String>,
+    pub flags: Option<String>,
+    pub ja4: Option<String>,
+    pub ja4t: Option<String>,
+    pub h2_fp: Option<String>,
 }
 
 /// What the check answered, to be joined onto the turn row once it lands.

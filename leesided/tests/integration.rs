@@ -47,6 +47,7 @@ impl Harness {
             socket_mode: 0o600,
             socket_gid: None,
             api_token: api_token.map(String::from),
+            hash_key: Some("test-key".into()),
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -568,6 +569,7 @@ async fn api_validate_schema_export_and_pinned_mode() {
         socket_mode: 0o600,
         socket_gid: None,
         api_token: None,
+        hash_key: None,
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -685,6 +687,235 @@ async fn uds_round_trip_p99_under_one_millisecond() {
     if !cfg!(debug_assertions) {
         assert!(at(0.99) < Duration::from_millis(1), "p99 {:?}", at(0.99));
     }
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+fn v2_event(
+    ts: f64,
+    session: &str,
+    route: &str,
+    surface: &str,
+    credential: Option<&str>,
+) -> String {
+    json!({"v":2,"ts":ts,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"POST",
+        "route":route,"status":200,"latency_ms":3.1,"bytes_in":12,"bytes_out":16,
+        "req_shape":"{}","resp_shape":"{ok:bool}","bound":[],
+        "validation_failed":null,"exception":null,"auth_event":null,
+        "gate":{"action":"allow","mode":"monitor","rule":null,"applied":false},
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,
+        "surface":surface,"is_asset":false,
+        "credential_kind": credential.map(|_| "bearer"),"credential_hash":credential,
+        "tag_id":"0123456789abcdef","tag_status":"valid",
+        "ip":"203.0.113.7","ip_trust":"direct","ua_class":"library",
+        "shape_hash":"aaaaaaaaaaaaaaaa",
+        "shape":{"method":"POST","http_version":"HTTP/1.1","has_cookie":false,"has_referer":false,
+                 "header_count":5,"accept_language":"0000","header_names_hash":"bbbbbbbbbbbbbbbb",
+                 "cookie_names_hash":"cccccccccccccccc","order_reliable":true},
+        "flags":["library_ua_on_web"],"ja4":null,"ja4t":null,"h2_fp":null})
+    .to_string()
+}
+
+fn v2_probe(
+    ts: f64,
+    route: &str,
+    session: &str,
+    surface: &str,
+    credential: Option<&str>,
+) -> String {
+    json!({"v":2,"ts":ts,"verb":"POST","route":route,"surface":surface,"session_key":session,
+        "peer_key":PEER,"principal":"anon","credential_hash":credential})
+    .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
+    let h = Harness::start().await;
+    let now = now_f64();
+    h.event(&v2_event(
+        now,
+        SESSION,
+        "api.ping",
+        "api",
+        Some("feedfacefeedface"),
+    ))
+    .await;
+    h.event(&login_failed_event(now + 1.0, SESSION)).await;
+    h.wait_for("two turns", || {
+        h.engine
+            .windows
+            .session(0xa1b2c3d4e5f60718)
+            .is_some_and(|w| w.len() == 2)
+    })
+    .await;
+    assert_eq!(h.engine.counters.bad_event.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        h.engine.windows.counts().3,
+        1,
+        "a credential window was opened"
+    );
+    h.engine.store.flush().await;
+    let row = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT surface, credential_kind, credential_hash, tag_id, ip_hash, net_hash, ua_class, flags, ja4 \
+                 FROM turns WHERE session_key = ?1 AND ts_us = ?2",
+                rusqlite::params![SESSION, ts_us(now)],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(row.0.as_deref(), Some("api"));
+    assert_eq!(row.1.as_deref(), Some("bearer"));
+    assert_eq!(row.2.as_deref(), Some("feedfacefeedface"));
+    assert_eq!(row.3.as_deref(), Some("0123456789abcdef"));
+    let hasher = leesided::hash::Hasher::new("test-key");
+    assert_eq!(row.4, Some(hasher.hex16("ip", "203.0.113.7")));
+    assert_eq!(row.5, Some(hasher.hex16("net", "203.0.113.0/24")));
+    assert_eq!(row.6.as_deref(), Some("library"));
+    assert_eq!(row.7.as_deref(), Some(r#"["library_ua_on_web"]"#));
+    assert_eq!(row.8, None);
+    let raw_ip: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT count(*) FROM turns WHERE ip_hash = '203.0.113.7' OR net_hash LIKE '203.%'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(raw_ip, 0, "the address is never stored");
+    let v1: Option<String> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT surface FROM turns WHERE ts_us = ?1",
+                rusqlite::params![ts_us(now + 1.0)],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(v1, None, "a v1 event leaves the v2 columns null");
+    h.event(r#"{"v":3,"ts":1.0}"#).await;
+    h.wait_for("v3 rejected", || {
+        h.engine.counters.bad_event.load(Ordering::Relaxed) == 1
+    })
+    .await;
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surface_match_and_credential_scope_with_no_peer_rate_on_api() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    // Three failed pings per credential within a minute, api only.
+    let per_cred: Rule = serde_json::from_value(json!({
+        "id": "api-cred-burst", "note": "t", "mode": "enforce", "action": "rate_limit", "retry_after_s": 7,
+        "match": {"route": ["api.ping"], "verb": ["POST"], "principal": "any", "surface": ["api"]},
+        "when": {"scope": "credential", "window_s": 60, "count": {}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    // A peer-scope rule that would fire on anything: must stay silent on api.
+    let per_peer: Rule = serde_json::from_value(json!({
+        "id": "peer-anything", "note": "t", "mode": "enforce", "action": "block",
+        "match": {"route": ["*"], "verb": ["POST"], "principal": "any"},
+        "when": {"scope": "peer", "count": {}, "gte": 1},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(per_cred, State::Active, "operator", None)
+        .await
+        .unwrap();
+    h.engine
+        .write_rule(per_peer, State::Active, "operator", None)
+        .await
+        .unwrap();
+
+    let now = now_f64();
+    let cred = "feedfacefeedface";
+    for i in 0..3 {
+        h.event(&v2_event(
+            now - 10.0 + i as f64,
+            SESSION,
+            "api.ping",
+            "api",
+            Some(cred),
+        ))
+        .await;
+    }
+    h.wait_for("3 cred turns", || {
+        h.engine
+            .windows
+            .credential(0xfeedfacefeedface)
+            .is_some_and(|w| w.len() == 3)
+    })
+    .await;
+
+    // Same peer, api surface: the peer rule reads an empty window, the credential rule fires.
+    let v = h
+        .probe(&v2_probe(now, "api.ping", SESSION, "api", Some(cred)))
+        .await;
+    assert_eq!(v["action"], "rate_limit", "{v}");
+    assert_eq!(v["rule"], "api-cred-burst");
+    assert_eq!(v["retry_after"], 7);
+    // A different credential from the same peer is untouched.
+    let v = h
+        .probe(&v2_probe(
+            now,
+            "api.ping",
+            "cb56f9bedebf3ec6",
+            "api",
+            Some("0123456789abcdef"),
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
+    // The same credential on a web probe is still rate limited: the decision
+    // sticks to the credential key whatever the surface.
+    let v = h
+        .probe(&v2_probe(
+            now,
+            "api.ping",
+            "cb56f9bedebf3ec6",
+            "web",
+            Some(cred),
+        ))
+        .await;
+    assert_eq!(v["rule"], "api-cred-burst", "{v}");
+    // Without the credential, the api rule is gated off by surface and the
+    // peer window is live again.
+    let v = h
+        .probe(&v2_probe(now, "api.ping", "cb56f9bedebf3ec6", "web", None))
+        .await;
+    assert_eq!(
+        v["rule"], "peer-anything",
+        "on web the peer window is live and the api rule is gated off: {v}"
+    );
+    assert_eq!(v["action"], "block");
+    // A v1 probe is web.
+    let v = h
+        .probe(&probe_json(now, "POST", "home", "1111111111111111"))
+        .await;
+    assert_eq!(v["action"], "block", "{v}");
     h.running.abort();
     h.engine.shutdown().await;
 }

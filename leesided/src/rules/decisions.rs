@@ -37,12 +37,7 @@ impl Decision {
         created_at: i64,
         expires_at: i64,
     ) -> Option<Decision> {
-        let scope = match scope {
-            "session" => Scope::Session,
-            "peer" => Scope::Peer,
-            "principal" => Scope::Principal,
-            _ => return None,
-        };
+        let scope = Scope::parse(scope)?;
         let action = match action {
             "rate_limit" => Action::RateLimit,
             "block" => Action::Block,

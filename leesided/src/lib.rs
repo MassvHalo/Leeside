@@ -5,6 +5,7 @@ pub mod api;
 pub mod check;
 pub mod config;
 pub mod engine;
+pub mod hash;
 pub mod ingest;
 pub mod rules;
 pub mod store;

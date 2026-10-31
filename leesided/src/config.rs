@@ -19,6 +19,8 @@ pub struct Config {
     pub socket_gid: Option<u32>,
     /// When set, every API route but `/health` needs `Authorization: Bearer <token>`.
     pub api_token: Option<String>,
+    /// The package's `LEESIDE_HASH_KEY`, so `ip_hash`/`net_hash` join with its values.
+    pub hash_key: Option<String>,
 }
 
 impl Default for Config {
@@ -32,6 +34,7 @@ impl Default for Config {
             socket_mode: 0o660,
             socket_gid: None,
             api_token: None,
+            hash_key: None,
         }
     }
 }
@@ -82,6 +85,11 @@ impl Config {
         if let Ok(v) = std::env::var("LEESIDED_API_TOKEN") {
             if !v.is_empty() {
                 cfg.api_token = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_HASH_KEY") {
+            if !v.is_empty() {
+                cfg.hash_key = Some(v);
             }
         }
         cfg

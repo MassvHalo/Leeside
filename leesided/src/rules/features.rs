@@ -220,6 +220,7 @@ mod tests {
             session: 1,
             peer: 2,
             principal: None,
+            credential: None,
         };
         let login = syms.intern("portal.login");
         let home = syms.intern("home");

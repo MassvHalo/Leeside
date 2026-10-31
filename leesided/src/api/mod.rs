@@ -281,12 +281,8 @@ async fn unblock(
     AxState(e): AxState<Arc<Engine>>,
     Path((scope, key)): Path<(String, String)>,
 ) -> ApiResult {
-    let scope = match scope.as_str() {
-        "session" => Scope::Session,
-        "peer" => Scope::Peer,
-        "principal" => Scope::Principal,
-        _ => return Err(bad_request("scope must be session, peer or principal")),
-    };
+    let scope = Scope::parse(&scope)
+        .ok_or_else(|| bad_request("scope must be session, peer, principal or credential"))?;
     let key = key16(&key).ok_or_else(|| bad_request("key must be 16 hex"))?;
     if !e.decisions.remove(scope, key) {
         return Err(StoreError::NotFound.into());

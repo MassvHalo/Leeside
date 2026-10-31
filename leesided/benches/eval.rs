@@ -5,7 +5,7 @@
 use criterion::{black_box, Criterion};
 use leesided::rules::compile::{RuleMeta, RuleSet, State};
 use leesided::rules::eval::{eval, Probe};
-use leesided::rules::model::{Mode, Rule, Verb};
+use leesided::rules::model::{Mode, Rule, Surface, Verb};
 use leesided::rules::symbols::Symbols;
 use leesided::rules::windows::{EventKeys, TurnSummary, Windows};
 use smallvec::SmallVec;
@@ -174,6 +174,7 @@ fn fixture() -> Fixture {
             session,
             peer: session % PEERS,
             principal: session.is_multiple_of(3).then_some(session),
+            credential: None,
         };
         for _ in 0..64 {
             ts += 100;
@@ -214,6 +215,8 @@ fn run_one(f: &Fixture, p: &(Verb, String, u64, u64, Option<u64>, u64)) -> usize
         peer_key: p.3,
         principal: p.4,
         ts_ms: p.5,
+        surface: Surface::Web,
+        credential: None,
     };
     eval(&f.rs, &f.syms, &f.windows, &probe, Mode::Enforce, NOW_S)
         .hits

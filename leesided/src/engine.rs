@@ -7,7 +7,7 @@ use crate::rules::compile::State;
 use crate::rules::decisions::{Decision, Decisions};
 use crate::rules::eval::{eval, Probe, Verdict};
 use crate::rules::features;
-use crate::rules::model::{Action, Mode, Scope, Verb};
+use crate::rules::model::{Action, Mode, Scope, Surface, Verb};
 use crate::rules::service::RulesService;
 use crate::rules::stats::{hour_of, Stats};
 use crate::rules::symbols::Symbols;
@@ -41,6 +41,9 @@ pub struct Engine {
     mode: AtomicU8,
     pub counters: Counters,
     pub started: Instant,
+    /// The package's `LEESIDE_HASH_KEY`, for `ip_hash` and `net_hash`;
+    /// `None` leaves those columns null.
+    pub hasher: Option<crate::hash::Hasher>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +74,11 @@ struct ProbeWire<'a> {
     peer_key: Cow<'a, str>,
     #[serde(borrow)]
     principal: Cow<'a, str>,
+    // v2
+    #[serde(borrow, default)]
+    surface: Option<Cow<'a, str>>,
+    #[serde(borrow, default)]
+    credential_hash: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
@@ -97,7 +105,42 @@ struct EventWire<'a> {
     gate: Option<&'a RawValue>,
     ua_hash: String,
     dropped_since_last: i64,
+    // v2: every field optional so a v1 event still parses.
+    #[serde(default)]
+    surface: Option<String>,
+    #[serde(default)]
+    is_asset: Option<bool>,
+    #[serde(default)]
+    credential_kind: Option<String>,
+    #[serde(default)]
+    credential_hash: Option<String>,
+    #[serde(default)]
+    tag_id: Option<String>,
+    #[serde(default)]
+    tag_status: Option<String>,
+    /// Hashed on ingest, never stored.
+    #[serde(default)]
+    ip: Option<String>,
+    #[serde(default)]
+    ip_trust: Option<String>,
+    #[serde(default)]
+    ua_class: Option<String>,
+    #[serde(default)]
+    shape_hash: Option<String>,
+    #[serde(borrow, default)]
+    shape: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    flags: Option<&'a RawValue>,
+    #[serde(default)]
+    ja4: Option<String>,
+    #[serde(default)]
+    ja4t: Option<String>,
+    #[serde(default)]
+    h2_fp: Option<String>,
 }
+
+/// Schema versions this build ingests. v2 is a superset of v1.
+const SCHEMA_VERSIONS: [u8; 2] = [1, 2];
 
 #[derive(Deserialize)]
 struct BoundWire {
@@ -121,9 +164,14 @@ impl Engine {
         if !cfg.enforce && mode == Mode::Enforce {
             mode = Mode::Monitor;
         }
+        let hasher = cfg.hash_key.as_deref().map(crate::hash::Hasher::new);
+        if hasher.is_none() {
+            tracing::warn!("LEESIDED_HASH_KEY unset: ip_hash and net_hash stay null");
+        }
         tracing::info!(
             mode = mode.as_str(),
             decisions = decisions.len(),
+            ip_hashing = hasher.is_some(),
             "engine open"
         );
         Ok(Arc::new(Engine {
@@ -137,6 +185,7 @@ impl Engine {
             mode: AtomicU8::new(mode as u8),
             counters: Counters::default(),
             started: Instant::now(),
+            hasher,
         }))
     }
 
@@ -177,18 +226,37 @@ impl Engine {
             key16(&probe.peer_key),
             principal_key(&probe.principal),
         ) {
-            (Some(v), Some(s), Some(p), Ok(pr)) if probe.v == 1 => (v, s, p, pr),
+            (Some(v), Some(s), Some(p), Ok(pr)) if SCHEMA_VERSIONS.contains(&probe.v) => {
+                (v, s, p, pr)
+            }
             _ => return self.bad_probe(&rs, global),
+        };
+        // v1 has no surface and is always the web group; a v2 probe names it.
+        let surface = match probe.surface.as_deref() {
+            None => Surface::Web,
+            Some(s) => match Surface::parse(s) {
+                Some(s) => s,
+                None => return self.bad_probe(&rs, global),
+            },
+        };
+        let credential = match probe.credential_hash.as_deref() {
+            None | Some("") => None,
+            Some(h) => match key16(h) {
+                Some(k) => Some(k),
+                None => return self.bad_probe(&rs, global),
+            },
         };
         let ts_us = store::ts_us(probe.ts);
         let ts_ms = (probe.ts * 1000.0) as u64;
         let hour = hour_of(now_s);
 
-        // Sticky first: session, then peer, then principal.
-        let keys: SmallVec<[(Scope, u64); 3]> = [
+        // Sticky first: session, then peer (never on a machine surface),
+        // then principal, then credential.
+        let keys: SmallVec<[(Scope, u64); 4]> = [
             Some((Scope::Session, session)),
-            Some((Scope::Peer, peer)),
+            (!surface.is_machine()).then_some((Scope::Peer, peer)),
             principal.map(|p| (Scope::Principal, p)),
+            credential.map(|c| (Scope::Credential, c)),
         ]
         .into_iter()
         .flatten()
@@ -239,6 +307,8 @@ impl Engine {
             peer_key: peer,
             principal,
             ts_ms,
+            surface,
+            credential,
         };
         let out = eval(&rs, &self.symbols, &self.windows, &p, global, now_s);
 
@@ -309,7 +379,7 @@ impl Engine {
     /// its feature row. Rejected events are counted, never logged in full.
     pub fn ingest(&self, data: &[u8]) -> Result<(), IngestError> {
         let ev: EventWire = serde_json::from_slice(data)?;
-        if ev.v != 1 {
+        if !SCHEMA_VERSIONS.contains(&ev.v) {
             return Err(IngestError::Version(ev.v));
         }
         let session = key16(&ev.session_key).ok_or(IngestError::Field("session_key"))?;
@@ -323,6 +393,29 @@ impl Engine {
         if !ev.ts.is_finite() || ev.ts <= 0.0 {
             return Err(IngestError::Field("ts"));
         }
+        // v2 identifiers: validated where they key a window, else carried.
+        let surface = match ev.surface.as_deref() {
+            None => None,
+            Some(s) => Some(Surface::parse(s).ok_or(IngestError::Field("surface"))?),
+        };
+        let credential = match ev.credential_hash.as_deref() {
+            None | Some("") => None,
+            Some(h) => Some(key16(h).ok_or(IngestError::Field("credential_hash"))?),
+        };
+        if let Some(t) = ev.tag_id.as_deref() {
+            if !t.is_empty() && key16(t).is_none() {
+                return Err(IngestError::Field("tag_id"));
+            }
+        }
+        // The address is hashed here and dropped; without a shared key the
+        // columns stay null rather than carrying an unkeyed hash.
+        let (ip_hash, net_hash) = match (&self.hasher, ev.ip.as_deref()) {
+            (Some(h), Some(ip)) if !ip.is_empty() => {
+                let net = crate::hash::net_prefix(ip);
+                (Some(h.hex16("ip", ip)), net.map(|n| h.hex16("net", &n)))
+            }
+            _ => (None, None),
+        };
         let bound: Vec<BoundWire> = serde_json::from_str(ev.bound.get())?;
         let syms = &self.symbols;
         let summary = TurnSummary {
@@ -355,6 +448,7 @@ impl Engine {
             session,
             peer,
             principal,
+            credential,
         };
         let ts_ms = summary.ts_ms;
         self.windows.record(&keys, summary);
@@ -396,6 +490,23 @@ impl Engine {
             gate: ev.gate.map(|g| g.get().to_string()),
             ua_hash: ev.ua_hash,
             dropped_since_last: ev.dropped_since_last,
+            surface: surface.map(|s| s.as_str().to_string()),
+            is_asset: ev.is_asset,
+            credential_kind: ev.credential_kind,
+            credential_hash: ev.credential_hash.filter(|h| !h.is_empty()),
+            tag_id: ev.tag_id.filter(|t| !t.is_empty()),
+            tag_status: ev.tag_status,
+            ip_hash,
+            net_hash,
+            asn: None,
+            ip_trust: ev.ip_trust,
+            ua_class: ev.ua_class,
+            shape_hash: ev.shape_hash,
+            shape: ev.shape.map(|s| s.get().to_string()),
+            flags: ev.flags.map(|f| f.get().to_string()),
+            ja4: ev.ja4,
+            ja4t: ev.ja4t,
+            h2_fp: ev.h2_fp,
         }));
         self.counters.events.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -425,7 +536,7 @@ impl Engine {
 
     pub fn health(&self) -> serde_json::Value {
         let rs = self.rules.current();
-        let (sessions, peers, principals) = self.windows.counts();
+        let (sessions, peers, principals, credentials) = self.windows.counts();
         serde_json::json!({
             "ok": true,
             "uptime_s": self.started.elapsed().as_secs(),
@@ -434,7 +545,10 @@ impl Engine {
             "rules": { "loaded": rs.len(), "generation": rs.generation, "hash": &*rs.hash_hex,
                        "invalid": self.rules.invalid().len() },
             "windows": { "sessions": sessions, "peers": peers, "principals": principals,
+                         "credentials": credentials,
                          "dropped_for_cap": self.windows.dropped_for_cap() },
+            "schema_versions": SCHEMA_VERSIONS,
+            "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),
             "symbols": { "count": self.symbols.len(), "overflowed": self.symbols.overflowed() },
             "check": { "total": self.counters.checks.load(Ordering::Relaxed),

@@ -3,7 +3,7 @@
 //! `hash` are `Arc` clones.
 
 use super::compile::{CCond, CTest, RuleSet};
-use super::model::{Action, DistinctField, Mode, Scope, Verb};
+use super::model::{Action, DistinctField, Mode, Scope, Surface, Verb};
 use super::symbols::{Sym, Symbols};
 use super::windows::{Window, Windows, WINDOW_TURNS};
 use dashmap::mapref::one::Ref;
@@ -21,6 +21,10 @@ pub struct Probe<'a> {
     /// `None` for `anon`.
     pub principal: Option<u64>,
     pub ts_ms: u64,
+    /// `web` for a v1 probe.
+    pub surface: Surface,
+    /// The 16-hex `credential_hash` on a v2 probe, when a credential was presented.
+    pub credential: Option<u64>,
 }
 
 /// One rule whose conditions held.
@@ -111,20 +115,24 @@ pub struct Outcome {
 /// Each scope's window, fetched at most once per probe.
 struct Fetched<'a> {
     windows: &'a Windows,
-    keys: [Option<u64>; 3],
-    refs: [Option<Option<Ref<'a, u64, Window>>>; 3],
+    keys: [Option<u64>; 4],
+    refs: [Option<Option<Ref<'a, u64, Window>>>; 4],
 }
 
 impl<'a> Fetched<'a> {
     fn new(windows: &'a Windows, probe: &Probe) -> Self {
+        // On api and webhook one address is many users: the peer window
+        // reads as empty there, so no rule can rate-limit a partner's IP.
+        let peer = (!probe.surface.is_machine()).then_some(probe.peer_key);
         Fetched {
             windows,
             keys: [
                 Some(probe.session_key),
-                Some(probe.peer_key),
+                peer,
                 probe.principal,
+                probe.credential,
             ],
-            refs: [None, None, None],
+            refs: [None, None, None, None],
         }
     }
 
@@ -142,6 +150,7 @@ impl<'a> Fetched<'a> {
                 (Scope::Session, Some(k)) => self.windows.session(k),
                 (Scope::Peer, Some(k)) => self.windows.peer(k),
                 (Scope::Principal, Some(k)) => self.windows.principal(k),
+                (Scope::Credential, Some(k)) => self.windows.credential(k),
             };
             self.refs[i] = Some(fetched);
         }
@@ -166,7 +175,10 @@ pub fn eval(
 
     for &ix in by_route.iter().chain(rs.wildcard.iter()) {
         let c = &rs.rules[ix as usize];
-        if c.verbs & probe.verb.bit() == 0 || !c.principal.accepts(probe.principal) {
+        if c.verbs & probe.verb.bit() == 0
+            || c.surfaces & probe.surface.bit() == 0
+            || !c.principal.accepts(probe.principal)
+        {
             continue;
         }
         let mut mode = global.min(c.mode);
@@ -356,6 +368,7 @@ mod tests {
                     session,
                     peer: PEER,
                     principal: None,
+                    credential: None,
                 },
                 t,
             );
@@ -369,6 +382,8 @@ mod tests {
                 peer_key: PEER,
                 principal: None,
                 ts_ms: NOW_MS,
+                surface: Surface::Web,
+                credential: None,
             }
         }
 

@@ -52,12 +52,13 @@ dumps. Unknown fields are rejected at every level.
 | `route` | list of route templates | 1..=16 entries, exact match on the probe's `route`; `"*"` means any route and is allowed only alone |
 | `verb` | list of `GET` `POST` `PUT` `PATCH` `DELETE` `HEAD` `OPTIONS` | 1..=8 entries |
 | `principal` | `any` \| `anon` \| `authenticated` | the probe's `principal` is `anon` or a 16-hex hash |
+| `surface` | list of `honeypot` `webhook` `api` `web`, optional | 0..=4 entries, no duplicates; absent or empty means any; a v1 probe is `web` |
 
 A condition. Exactly one of `count`, `distinct`, `sequence`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
-| `scope` | `session` (default) \| `peer` \| `principal` | which window to look at; `principal` on an `anon` probe never matches |
+| `scope` | `session` (default) \| `peer` \| `principal` \| `credential` | which window to look at; `principal` on an `anon` probe and `credential` without a presented credential read as empty; on the `api` and `webhook` surfaces `peer` reads as empty too (one address is many users) |
 | `window_s` | int, optional | 1..=86400; turns older than `probe.ts - window_s` are ignored; absent means the whole held window (64 turns) |
 | `count` | turn filter | number of earlier turns in the window matching the filter |
 | `gte`, `lte` | int | only with `count`, at least one of them; `lte: 0` means "no such turn" |
@@ -177,7 +178,7 @@ CREATE TABLE rule_versions (
 
 -- sticky verdicts: a block on a session, a rate_limit on the condition's scope key
 CREATE TABLE decisions (
-  scope        TEXT NOT NULL CHECK (scope IN ('session', 'peer', 'principal')),
+  scope        TEXT NOT NULL CHECK (scope IN ('session', 'peer', 'principal', 'credential')),   -- credential since migration 0002
   key          TEXT NOT NULL,           -- the 16-hex hash
   action       TEXT NOT NULL,           -- rate_limit | block
   mode         TEXT NOT NULL,           -- effective mode when decided
@@ -342,11 +343,12 @@ pub struct Rule {
     #[serde(default)] pub expires_at: Option<i64>,      // unix seconds
     pub origin: Origin,                                 // { kind, incident?, model? }
 }
-pub struct Match { pub route: Vec<String>, pub verb: Vec<Verb>, pub principal: PrincipalKind }
+pub struct Match { pub route: Vec<String>, pub verb: Vec<Verb>, pub principal: PrincipalKind,
+                   #[serde(default)] pub surface: Vec<Surface> }   // empty = any
 #[serde(untagged)]
 pub enum When { One(Condition), All { all: Vec<Condition> } }   // all: 1..=3
 pub struct Condition {
-    #[serde(default)] pub scope: Scope,                 // session (default) | peer | principal
+    #[serde(default)] pub scope: Scope,                 // session (default) | peer | principal | credential
     #[serde(default)] pub window_s: Option<u32>,        // 1..=86400; None = whole conversation
     #[serde(default)] pub count: Option<TurnFilter>,
     #[serde(default)] pub gte: Option<u32>,
@@ -401,6 +403,7 @@ Compile turns a `Rule` into fixed-size pieces, allocated once:
 struct Compiled {
     ix: u32,                        // index into RuleSet.rules and .meta
     verbs: u8,                      // bitmask over Verb
+    surfaces: u8,                   // bitmask over Surface; empty match.surface compiles to all four
     principal: PrincipalKind,
     conds: SmallVec<[CCond; 3]>,
     action: Action, mode: Mode, retry_after_s: u32,
@@ -451,6 +454,30 @@ hours since Spark wrote it, which is the evidence acceptance should rest on.
 `install`, so they are git-tracked. SQLite remains the runtime truth;
 `leesided rules export` dumps the active set as JSON for moving between
 hosts.
+
+### Schema v2 on this side
+
+As of 2026-10-31 (`../docs/brief.md`, "The event, schema v2"). leesided
+accepts `v: 1` and `v: 2` on both sockets; `/health` lists
+`schema_versions`. A v2 probe carries `surface` and `credential_hash`; a
+v1 probe is `web` with no credential. Rules gain `match.surface` and the
+`credential` scope; `Windows` gains a `credentials` map keyed on the
+16-hex `credential_hash`, swept like peers. On `api` and `webhook` the
+peer window reads as empty in eval and the sticky lookup skips the peer
+key, so nothing ever rate-limits a partner's address. A sticky decision on
+a credential key answers on any surface, since the key is the identity.
+The install set is unchanged: with no `surface` listed the three rules
+apply everywhere.
+
+Ingest stores the v2 columns from migration `0002_v2.sql` as sent, with
+two exceptions. `ip` is hashed with the package's recipe (`src/hash.rs`:
+`HMAC-SHA256(key, namespace || "\0" || value)` to 16 hex, key from
+`LEESIDED_HASH_KEY`, the same value as the package's `LEESIDE_HASH_KEY`)
+into `ip_hash` and `net_hash` (over `a.b.c.0/24` or `x:y:z::/48`), and the
+address is dropped; with no key configured both stay null and the start-up
+log says so. `asn` is null until GeoLite2 is wired. A v1 event leaves every
+v2 column null. `features.rs` is unchanged (the v1 vector); `surface`
+enters the vector with the next feature version.
 
 ### Conversation windows
 
@@ -638,6 +665,7 @@ Environment variables, read once at start; no config file in v1.
 | `LEESIDED_RULES_DIR` | `rules/install` next to the binary, else the repo path | the install set |
 | `LEESIDED_SOCKET_MODE` | `660` (octal) | permission bits on both sockets |
 | `LEESIDED_SOCKET_GID` | unset | numeric group to chown the sockets to (www-data's gid on the sample host); numeric so the daemon never reads `/etc/group` |
+| `LEESIDED_HASH_KEY` | unset | the package's `LEESIDE_HASH_KEY`; enables `ip_hash`/`net_hash` on ingest |
 
 Socket paths count against the 108-byte `sun_path` limit; keep
 `LEESIDED_SOCKET_DIR` short.

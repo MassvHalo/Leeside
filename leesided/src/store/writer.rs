@@ -160,8 +160,11 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
     tx.execute(
         "INSERT OR REPLACE INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
          latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, validation_failed, exception, \
-         auth_event, gate, ua_hash, dropped_since_last) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+         auth_event, gate, ua_hash, dropped_since_last, surface, is_asset, credential_kind, \
+         credential_hash, tag_id, tag_status, ip_hash, net_hash, asn, ip_trust, ua_class, shape_hash, \
+         shape, flags, ja4, ja4t, h2_fp) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, \
+         ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)",
         params![
             r.session_key,
             r.ts_us,
@@ -183,6 +186,23 @@ fn insert_turn(tx: &Transaction, r: &TurnRow) -> Result<(), StoreError> {
             r.gate,
             r.ua_hash,
             r.dropped_since_last,
+            r.surface,
+            r.is_asset,
+            r.credential_kind,
+            r.credential_hash,
+            r.tag_id,
+            r.tag_status,
+            r.ip_hash,
+            r.net_hash,
+            r.asn,
+            r.ip_trust,
+            r.ua_class,
+            r.shape_hash,
+            r.shape,
+            r.flags,
+            r.ja4,
+            r.ja4t,
+            r.h2_fp,
         ],
     )?;
     Ok(())
