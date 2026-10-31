@@ -119,15 +119,26 @@ class CredentialStatusTest extends SampleAppTestCase
         $this->assertStringNotContainsString('acct_42', $this->eventsJson());
     }
 
-    public function test_unsigned_webhook_is_refused_before_the_gate_and_has_no_credential(): void
+    public function test_forged_webhook_is_probed_unverified_then_refused_after_the_gate(): void
     {
-        $this->postJson('/webhooks/signed', ['x' => 1])->assertStatus(401);
+        $response = $this->postJson('/webhooks/signed', ['x' => 1], ['X-Signer' => 'acct_42']);
+        $response->assertStatus(401)->assertJson(['message' => 'Unauthorized']);
+        $this->assertNull($response->json('ok'), 'the controller never ran');
 
-        $this->assertCount(0, $this->rules->probes, 'the verifier answered before the gate ran');
+        $this->assertCount(1, $this->rules->probes, 'the forgery reached the gate');
+        $probe = $this->rules->probes[0];
+        $this->assertSame('webhook', $probe['surface']);
+        $this->assertSame($this->hasher()->credentialHash('acct_42'), $probe['credential_hash'], 'the claimed signer, hashed');
+        $this->assertSame('unverified', $probe['credential_status'], 'so the peer still applies');
+
         $event = $this->lastEvent();
-        $this->assertSame('webhook', $event['surface']);
-        $this->assertNull($event['credential_kind']);
-        $this->assertNull($event['credential_status']);
+        $this->assertSame('webhook_sig', $event['credential_kind']);
+        $this->assertSame('rejected', $event['credential_status']);
+        $this->assertStringNotContainsString('acct_42', $this->eventsJson());
+
+        $this->postJson('/webhooks/signed', ['x' => 1])->assertStatus(401);
+        $this->assertSame($this->hasher()->credentialHash('forged'), $this->lastEvent()['credential_hash'], 'no claimed signer: a constant');
+        $this->assertSame('rejected', $this->lastEvent()['credential_status']);
     }
 
     public function test_resolved_principal_verifies_a_presented_credential(): void
@@ -148,11 +159,11 @@ class VerifySignatureDemo
 {
     public function handle(Request $request, Closure $next): mixed
     {
-        if ($request->header('X-Signature') !== 'good') {
-            return new JsonResponse(['message' => 'bad signature'], 401);
+        if ($request->header('X-Signature') === 'good') {
+            $request->attributes->set(SurfaceClassifier::WEBHOOK_SIGNER_ATTRIBUTE, 'acct_42');
+        } else {
+            $request->attributes->set(SurfaceClassifier::WEBHOOK_REJECTED_ATTRIBUTE, (string) $request->header('X-Signer', 'forged'));
         }
-
-        $request->attributes->set(SurfaceClassifier::WEBHOOK_SIGNER_ATTRIBUTE, 'acct_42');
 
         return $next($request);
     }

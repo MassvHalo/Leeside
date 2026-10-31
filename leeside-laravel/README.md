@@ -41,17 +41,21 @@ Without this the cookie arrives encrypted, every request reads
 
 ### 2. Verify webhook signatures ahead of the gate
 
-A webhook's identity is its verified signer. The verifying middleware must
-run before Leeside's `GateTurn` so the signer is on the probe, which means
-a middleware in the `webhook` group, not a check in the controller:
+A webhook's identity is its verified signer, and a forgery must still
+reach leesided. So the verifying middleware runs first in the `webhook`
+group and **never aborts**: it names the signer on success or marks the
+request rejected on failure, Leeside's gate probes either way (unverified
+on failure, so the peer applies), and the package's `RequireWebhookSigner`,
+appended after the gate, answers the 401 before the controller:
 
 ```php
 // bootstrap/app.php
 $middleware->group('webhook', [\App\Http\Middleware\VerifyWebhookSignature::class]);
 $middleware->validateCsrfTokens(except: ['webhooks/*']);
 
-// the middleware, after the HMAC check passes
-$request->attributes->set(\Leeside\Laravel\Surface\SurfaceClassifier::WEBHOOK_SIGNER_ATTRIBUTE, $signerId);
+// the middleware: set one of the two attributes, then always $next($request)
+$request->attributes->set(SurfaceClassifier::WEBHOOK_SIGNER_ATTRIBUTE, $signerId);      // verified
+$request->attributes->set(SurfaceClassifier::WEBHOOK_REJECTED_ATTRIBUTE, $claimedSigner); // rejected
 ```
 
 ```php
@@ -59,9 +63,11 @@ $request->attributes->set(\Leeside\Laravel\Surface\SurfaceClassifier::WEBHOOK_SI
 Route::post('/webhooks/demo', ...)->middleware('webhook');
 ```
 
-`webhook` is in `leeside.gate_groups`, so the gate is appended after the
-verifier. The signer id is hashed into `credential_hash`; the value itself
-never leaves the app.
+`webhook` is in `leeside.gate_groups`, so the order is verifier, gate,
+`RequireWebhookSigner`, controller. The signer (or the claimed one) is
+hashed into `credential_hash`; the value itself never leaves the app. A
+forged burst from one address shows up in leesided as rejected credentials
+on one peer.
 
 ### 3. Vouch for API keys you recognise
 
@@ -84,8 +90,12 @@ final class ApiKeyVerifier implements CredentialVerifier
 }
 ```
 
-Keep it cheap and never let it throw. A user resolved by auth middleware
-ahead of the gate also verifies whatever credential the request carried.
+**It runs on the probe path**, inside the sub-millisecond budget: keep it
+cheap, cache the key lookup (a config value, an in-memory map, a cache
+store hit), and never let it throw. The package itself adds no database
+round trip, and a verifier should not either. A user resolved by auth
+middleware ahead of the gate also verifies whatever credential the request
+carried.
 An unverified credential the app answers 401 or 403 is recorded as
 `rejected`, which is what a credential-stuffing rule counts.
 

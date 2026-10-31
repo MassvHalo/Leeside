@@ -45,6 +45,12 @@ class Hasher
         return $this->truncate($this->hmac('ua', $userAgent), 16);
     }
 
+    /** 16 hex, over request-shape components: header names, cookie names, the composite. */
+    public function shapeHash(string $input): string
+    {
+        return $this->truncate($this->hmac('shape', $input), 16);
+    }
+
     /** 16 hex, of the tag cookie's random id; the id itself is never written. */
     public function tagHash(string $tagId): string
     {

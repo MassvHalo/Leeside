@@ -24,6 +24,9 @@ class SurfaceClassifier
     /** Request attribute an app's webhook verifier sets to the signer id it verified. */
     public const WEBHOOK_SIGNER_ATTRIBUTE = 'leeside.webhook_signer';
 
+    /** Set by the app's verifier when the signature failed, to the claimed signer or the bare signature; never abort. */
+    public const WEBHOOK_REJECTED_ATTRIBUTE = 'leeside.webhook_rejected';
+
     private const DEFAULTS = [
         'honeypot_group' => 'honeypot',
         'webhook' => ['/webhooks/'],
@@ -90,6 +93,11 @@ class SurfaceClassifier
         $signer = $request->attributes->get(self::WEBHOOK_SIGNER_ATTRIBUTE);
         if (is_string($signer) && $signer !== '') {
             return ['kind' => 'webhook_sig', 'value' => $signer];
+        }
+
+        $rejected = $request->attributes->get(self::WEBHOOK_REJECTED_ATTRIBUTE);
+        if ($rejected !== null && $rejected !== false && $rejected !== '') {
+            return ['kind' => 'webhook_sig', 'value' => is_string($rejected) ? $rejected : 'rejected'];
         }
 
         $authorization = (string) $request->headers->get('Authorization', '');

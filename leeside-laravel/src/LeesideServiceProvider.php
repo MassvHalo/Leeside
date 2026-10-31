@@ -24,6 +24,7 @@ use Leeside\Laravel\Event\TurnEventFactory;
 use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Middleware\CaptureTurn;
 use Leeside\Laravel\Middleware\GateTurn;
+use Leeside\Laravel\Middleware\RequireWebhookSigner;
 use Leeside\Laravel\Middleware\TagTurn;
 use Leeside\Laravel\Reduce\ShapeReducer;
 use Leeside\Laravel\Surface\CredentialVerifier;
@@ -70,9 +71,12 @@ class LeesideServiceProvider extends ServiceProvider
                 'sample_rate' => (float) $app['config']->get('leeside.sample_rate', 1.0),
                 'guards' => array_keys((array) $app['config']->get('auth.guards', ['web' => []])),
                 'max_response_bytes' => (int) $app['config']->get('leeside.shape.max_response_bytes', 65536),
+                'session_cookie' => (string) $app['config']->get('session.cookie', 'laravel_session'),
+                'tag_cookie' => (string) ($app['config']->get('leeside.tag.cookie') ?: '_lsd'),
             ],
             $app[SurfaceClassifier::class],
-            $app->bound(CredentialVerifier::class) ? $app[CredentialVerifier::class] : null
+            $app->bound(CredentialVerifier::class) ? $app[CredentialVerifier::class] : null,
+            $app['config']
         ));
 
         $this->app->singleton(Transport::class, function ($app) {
@@ -183,6 +187,11 @@ class LeesideServiceProvider extends ServiceProvider
             $router->pushMiddlewareToGroup('web', TagTurn::class);
             foreach ($groups as $group) {
                 $router->pushMiddlewareToGroup($group, GateTurn::class);
+            }
+            // The app's webhook verifier never aborts; the 401 comes after the
+            // gate, so a forgery is probed and recorded as rejected.
+            if (in_array('webhook', $groups, true)) {
+                $router->pushMiddlewareToGroup('webhook', RequireWebhookSigner::class);
             }
         };
 

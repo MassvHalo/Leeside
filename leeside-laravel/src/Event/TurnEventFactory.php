@@ -4,10 +4,13 @@ namespace Leeside\Laravel\Event;
 
 use BackedEnum;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
+use Illuminate\Contracts\Config\Repository as Config;
 use Illuminate\Contracts\Routing\UrlRoutable;
 use Illuminate\Http\Request;
 use Leeside\Laravel\Hash\Hasher;
 use Leeside\Laravel\Reduce\ShapeReducer;
+use Leeside\Laravel\Shape\Flags;
+use Leeside\Laravel\Shape\RequestShape;
 use Leeside\Laravel\Stats;
 use Leeside\Laravel\Surface\CredentialVerifier;
 use Leeside\Laravel\Surface\SurfaceClassifier;
@@ -28,6 +31,9 @@ class TurnEventFactory
     private readonly int $maxResponseBytes;
     private readonly SurfaceClassifier $surface;
     private readonly ?CredentialVerifier $verifier;
+    private readonly ?Config $config;
+    private readonly string $sessionCookie;
+    private readonly string $tagCookie;
 
     /**
      * @param  array{sample_rate?: float, guards?: string[], max_response_bytes?: int}  $options
@@ -40,9 +46,13 @@ class TurnEventFactory
         array $options = [],
         ?SurfaceClassifier $surface = null,
         ?CredentialVerifier $verifier = null,
+        ?Config $config = null,
     ) {
         $this->surface = $surface ?? new SurfaceClassifier;
         $this->verifier = $verifier;
+        $this->config = $config;
+        $this->sessionCookie = (string) ($options['session_cookie'] ?? 'laravel_session');
+        $this->tagCookie = (string) ($options['tag_cookie'] ?? '_lsd');
         $this->sampleRate = $options['sample_rate'] ?? 1.0;
         $this->guards = $options['guards'] ?? ['web'];
         $this->maxResponseBytes = $options['max_response_bytes'] ?? 65536;
@@ -83,6 +93,10 @@ class TurnEventFactory
             return null;
         }
 
+        $uaClass = UserAgentClass::classify($request->userAgent());
+        $shape = RequestShape::build($request, $this->hasher, $this->headerOrderReliable());
+        $fingerprints = $this->proxyFingerprints($request);
+
         return [
             'v' => $probe['v'],
             'ts' => $probe['ts'],
@@ -112,10 +126,25 @@ class TurnEventFactory
             'credential_status' => $this->eventCredentialStatus($probe['credential_status'], $response->getStatusCode()),
             'tag_id' => $context->tagId,
             'tag_status' => $context->tagStatus,
+            'shape_hash' => $shape['shape_hash'],
+            'shape' => $shape['shape'],
+            'flags' => Flags::compute(
+                $request,
+                $probe['surface'],
+                $uaClass,
+                $context->tagStatus,
+                RequestShape::cookieNames($request),
+                $this->sessionCookie,
+                $this->tagCookie,
+                $fingerprints['untrusted']
+            ),
+            'ja4' => $fingerprints['ja4'],
+            'ja4t' => $fingerprints['ja4t'],
+            'h2_fp' => $fingerprints['h2_fp'],
             // Socket transport only: log and array transports null this out.
             'ip' => $request->ip(),
             'ip_trust' => $this->ipTrust($request),
-            'ua_class' => UserAgentClass::classify($request->userAgent()),
+            'ua_class' => $uaClass,
             'remote_port' => $this->remotePort($request),
             'ts_ms' => (int) floor($probe['ts'] * 1000),
         ];
@@ -134,8 +163,16 @@ class TurnEventFactory
             return null;
         }
 
-        if ($principal !== 'anon' || $kind === 'webhook_sig') {
+        if ($principal !== 'anon') {
             return 'verified';
+        }
+
+        if ($kind === 'webhook_sig') {
+            // A verifying middleware ahead of the gate named the signer; a
+            // rejected signature carries the same kind but no signer.
+            $signer = $request->attributes->get(SurfaceClassifier::WEBHOOK_SIGNER_ATTRIBUTE);
+
+            return is_string($signer) && $signer !== '' ? 'verified' : 'unverified';
         }
 
         if ($this->verifier !== null) {
@@ -161,11 +198,50 @@ class TurnEventFactory
         return $probeStatus;
     }
 
-    /** `forwarded` only when a trusted proxy resolved the client address. */
+    /** Whether header order survives this host's FastCGI path; set from deploy/header-order-check.sh. */
+    private function headerOrderReliable(): bool
+    {
+        return (bool) ($this->config?->get('leeside.fingerprint.header_order_reliable') ?? false);
+    }
+
+    /**
+     * TLS/TCP/H2 fingerprints a trusted proxy may add. From any other hop
+     * they are dropped and flagged, so a client cannot inject them.
+     *
+     * @return array{ja4: ?string, ja4t: ?string, h2_fp: ?string, untrusted: bool}
+     */
+    private function proxyFingerprints(Request $request): array
+    {
+        $headers = $this->config?->get('leeside.fingerprint.proxy_headers')
+            ?? ['ja4' => 'X-Leeside-JA4', 'ja4t' => 'X-Leeside-JA4T', 'h2_fp' => 'X-Leeside-H2'];
+        $trusted = $request->isFromTrustedProxy();
+        $out = ['ja4' => null, 'ja4t' => null, 'h2_fp' => null, 'untrusted' => false];
+
+        foreach (['ja4', 'ja4t', 'h2_fp'] as $field) {
+            $value = $request->headers->get((string) ($headers[$field] ?? ''));
+            if (! is_string($value) || $value === '') {
+                continue;
+            }
+            if ($trusted) {
+                $out[$field] = substr($value, 0, 128);
+            } else {
+                $out['untrusted'] = true;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * `forwarded` only when a trusted proxy resolved the client address: the
+     * address Laravel reports then differs from the one that connected.
+     */
     private function ipTrust(Request $request): string
     {
         try {
-            return count($request->getClientIps()) > 1 ? 'forwarded' : 'direct';
+            $direct = (string) $request->server->get('REMOTE_ADDR', '');
+
+            return $request->ip() !== null && $request->ip() !== $direct ? 'forwarded' : 'direct';
         } catch (Throwable) {
             return 'direct';
         }

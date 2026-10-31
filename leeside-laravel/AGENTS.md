@@ -28,8 +28,11 @@ acts only when the verdict says enforce. Read ../docs/brief.md first.
 - `encryptCookies(except: ['_lsd'])` so the tag cookie is readable and
   writable in clear.
 - Webhook signature verification runs as middleware in the `webhook`
-  group, ahead of Leeside's gate, and sets `leeside.webhook_signer`; in the
-  controller it is too late for the probe.
+  group, ahead of Leeside's gate, sets `leeside.webhook_signer` on success
+  or `leeside.webhook_rejected` on failure, and never aborts; the package's
+  `RequireWebhookSigner`, appended after the gate, answers the 401. A check
+  in the controller is too late for the probe; a verifier that aborts hides
+  forgeries from leesided.
 - API keys the app recognises are vouched for by binding
   `Leeside\Laravel\Surface\CredentialVerifier`; an unverified header is
   recorded but exempts nothing.
