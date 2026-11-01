@@ -1,8 +1,8 @@
 [Unit]
 Description=Leeside passive fingerprint tap (JA4 and JA4T to leesided)
 # leesided/docs/tap.md. Needs CAP_NET_RAW; nothing else in leesided does, so
-# it is its own process. Not leeside-tap.service, which was the package's
-# stand-in for leesided and is gone.
+# it is its own process. Not leeside-artisan-tap.service, which is the
+# package's `artisan leeside:tap` stand-in for leesided.
 After=leesided.service
 Wants=leesided.service
 

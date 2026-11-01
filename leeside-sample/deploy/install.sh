@@ -90,9 +90,12 @@ certbot renew --dry-run
 cp "$SCRIPT_DIR/logrotate/leeside" /etc/logrotate.d/leeside
 
 # leesided owns /run/leeside; the tap stand-in would hold events.sock.
-if [ -f /etc/systemd/system/leeside-tap.service ]; then
-    systemctl disable --now leeside-tap || true
-fi
+# Both names: leeside-tap.service was the stand-in's name before the rename.
+for unit in leeside-tap leeside-artisan-tap; do
+    if [ -f /etc/systemd/system/$unit.service ]; then
+        systemctl disable --now $unit || true
+    fi
+done
 cp "$SCRIPT_DIR/systemd/leesided.service" /etc/systemd/system/leesided.service
 cp "$SCRIPT_DIR/systemd/leesided-tap.service" /etc/systemd/system/leesided-tap.service
 systemctl daemon-reload

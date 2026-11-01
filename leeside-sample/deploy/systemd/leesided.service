@@ -2,7 +2,7 @@
 Description=Leeside daemon (rules, check and event sockets)
 After=network.target
 Wants=network.target
-Conflicts=leeside-tap.service
+Conflicts=leeside-artisan-tap.service
 Before=php8.5-fpm.service
 
 [Service]
