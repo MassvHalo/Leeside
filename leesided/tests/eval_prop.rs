@@ -486,7 +486,7 @@ proptest! {
         let p = Probe { verb, route, session_key: session, peer_key: peer, principal, ts_ms,
             surface: Surface::Web,
             credential: None,
-            credential_verified: false, actor: None };
+            credential_verified: false, actor: None, actor_score: None };
         let got = eval(&rs, &syms, &windows, &p, global, NOW_S);
         let (want_hits, want_winner) = naive(&rules, &events, verb, route, session, peer, principal, ts_ms, global);
 

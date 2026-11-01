@@ -370,7 +370,28 @@ impl When {
     }
 }
 
-/// Exactly one of `count`, `distinct`, `sequence`.
+/// A 0-to-1 score threshold. Bitwise equality keeps the `Eq` derives
+/// honest; validation rejects NaN and out-of-range values.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ScoreGte(pub f32);
+
+impl PartialEq for ScoreGte {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for ScoreGte {}
+
+/// `actor.score >= gte`, actor scope only (docs/windside.md section 6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreCond {
+    pub gte: ScoreGte,
+}
+
+/// Exactly one of `count`, `distinct`, `sequence`, `score`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Condition {
@@ -395,6 +416,10 @@ pub struct Condition {
     /// newest k-1 turns in the session match the rest, in order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<Vec<String>>,
+    /// The actor's Windside score; actor scope only, and it holds only
+    /// while Windside is active (shadow scores never fire).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<ScoreCond>,
 }
 
 impl Condition {
@@ -655,9 +680,10 @@ impl Condition {
     fn validate(&self, path: &str, matcher: &Match, e: &mut Errs) {
         let kinds = self.count.is_some() as u8
             + self.distinct.is_some() as u8
-            + self.sequence.is_some() as u8;
+            + self.sequence.is_some() as u8
+            + self.score.is_some() as u8;
         if kinds != 1 {
-            e.push(path, "exactly one of count, distinct, sequence");
+            e.push(path, "exactly one of count, distinct, sequence, score");
         }
         if let Some(w) = self.window_s {
             if !(1..=MAX_WINDOW_S).contains(&w) {
@@ -725,6 +751,20 @@ impl Condition {
                 if !matcher.is_wildcard() && !matcher.route.iter().any(|r| r == last) {
                     e.push(&p, "must end with a route listed in match.route");
                 }
+            }
+        }
+        if let Some(s) = &self.score {
+            if self.scope != Some(Scope::Actor) {
+                e.push(format!("{path}.scope"), "score needs scope actor");
+            }
+            if self.window_s.is_some() {
+                e.push(format!("{path}.window_s"), "not allowed with score");
+            }
+            if self.gte.is_some() || self.lte.is_some() {
+                e.push(path, "gte and lte are not allowed with score");
+            }
+            if !(0.0..=1.0).contains(&s.gte.0) {
+                e.push(format!("{path}.score.gte"), "must be 0 to 1");
             }
         }
     }

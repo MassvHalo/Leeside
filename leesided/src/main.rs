@@ -33,9 +33,10 @@ fn main() {
         ["tap", rest @ ..] => run_tap(rest),
         ["label-import", path] => run_label_import(path),
         ["export", rest @ ..] => run_export_data(rest),
+        ["report", "shadow", rest @ ..] => run_report_shadow(rest),
         _ => {
             eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv>]"
+                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s>]"
             );
             std::process::exit(2);
         }
@@ -186,6 +187,37 @@ fn run_export_data(args: &[&str]) {
         ),
         Err(e) => {
             eprintln!("leesided export: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_report_shadow(args: &[&str]) {
+    let mut since_s: i64 = 0;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--since" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided report: --since needs a value");
+                    std::process::exit(2);
+                };
+                since_s = v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided report: --since is unix seconds, not {v}");
+                    std::process::exit(2);
+                });
+            }
+            _ => {
+                eprintln!("leesided report: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let cfg = Config::from_env();
+    match leesided::report::shadow(&cfg.db, cfg.windside_model.as_deref(), since_s) {
+        Ok(r) => println!("{r}"),
+        Err(e) => {
+            eprintln!("leesided report: {e}");
             std::process::exit(1);
         }
     }

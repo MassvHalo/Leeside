@@ -170,12 +170,22 @@ pub struct Swept {
     pub actors: Vec<u64>,
 }
 
+/// An actor's latest Windside score (docs/windside.md section 6).
+#[derive(Debug, Clone)]
+pub struct ActorScore {
+    pub score: f32,
+    pub ts_us: i64,
+    pub top3: String,
+}
+
 pub struct Resolver {
     hasher: Hasher,
     strong: DashMap<Ident, Binding>,
     /// Weak values map to the actors recently seen with them, newest first.
     weak: DashMap<Ident, SmallVec<[(u64, i64); WEAK_FANOUT]>>,
     actors: DashMap<u64, Actor>,
+    /// Latest score per canonical actor id; written through to the store.
+    scores: DashMap<u64, ActorScore>,
     pub merges_done: AtomicU64,
 }
 
@@ -186,6 +196,7 @@ impl Resolver {
             strong: DashMap::new(),
             weak: DashMap::new(),
             actors: DashMap::new(),
+            scores: DashMap::new(),
             merges_done: AtomicU64::new(0),
         }
     }
@@ -240,6 +251,22 @@ impl Resolver {
 
     pub fn actor(&self, id: u64) -> Option<Actor> {
         self.actors.get(&id).map(|a| a.clone())
+    }
+
+    /// The actor's latest score, if any row cleared the floor yet.
+    pub fn score(&self, id: u64) -> Option<f32> {
+        self.scores.get(&id).map(|s| s.score)
+    }
+
+    pub fn set_score(&self, id: u64, score: ActorScore) {
+        self.scores.insert(id, score);
+    }
+
+    /// Restore latest scores from the store at start.
+    pub fn load_scores(&self, scores: impl IntoIterator<Item = (u64, ActorScore)>) {
+        for (id, s) in scores {
+            self.scores.insert(id, s);
+        }
     }
 
     /// (actors, strong bindings, weak values)

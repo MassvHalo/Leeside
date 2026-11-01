@@ -173,6 +173,23 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                             params![m.merged_id, m.into_id, m.at_us, m.via_kind],
                         )?;
                     }
+                    StoreOp::Score(s) => {
+                        tx.execute(
+                            "INSERT INTO scores (actor_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![s.actor_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
+                        )?;
+                    }
+                    StoreOp::ActorScore {
+                        id,
+                        score,
+                        ts_us,
+                        top3,
+                    } => {
+                        tx.execute(
+                            "UPDATE actors SET score = ?2, score_ts = ?3, score_top3 = ?4 WHERE id = ?1",
+                            params![id, score, ts_us, top3],
+                        )?;
+                    }
                     StoreOp::Label(l) => {
                         tx.execute(
                             "INSERT OR IGNORE INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \

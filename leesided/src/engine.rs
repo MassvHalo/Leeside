@@ -2,8 +2,8 @@
 //! entry points: `check()` for a probe line and `ingest()` for an event
 //! datagram. The servers are thin loops around these.
 
-use crate::actors::{Ident, Kind, Resolver};
-use crate::config::Config;
+use crate::actors::{ActorScore, Ident, Kind, Resolver};
+use crate::config::{Config, WindsideMode};
 use crate::enrich::Enricher;
 use crate::rules::compile::State;
 use crate::rules::decisions::{Decision, Decisions};
@@ -14,7 +14,7 @@ use crate::rules::service::RulesService;
 use crate::rules::stats::{hour_of, Stats};
 use crate::rules::symbols::Symbols;
 use crate::rules::windows::{id8, is_hex, key16, principal_key, EventKeys, TurnSummary, Windows};
-use crate::store::{self, CheckRecord, FeatureRow, Store, StoreError, StoreOp, TurnRow};
+use crate::store::{self, CheckRecord, FeatureRow, ScoreRow, Store, StoreError, StoreOp, TurnRow};
 use crate::tap::classes::{is_browser_ua, Class, Ja4Classes};
 use crate::tap::conns::{Connections, Hit, Pending};
 use parking_lot::Mutex;
@@ -66,6 +66,54 @@ pub struct Engine {
     /// the `honeytoken_hits` table, so the hour survives a restart but a
     /// burst of turns for one actor never waits on the writer.
     honey_cache: Mutex<HashMap<u64, (i64, i64)>>,
+    /// The Windside scorer (docs/windside.md section 6): loaded once at
+    /// start, read-only after.
+    pub windside: WindsideState,
+}
+
+/// What `WINDSIDE_MODEL` gave: the loaded model, or the refusal reason
+/// (`/health` carries it; the daemon still serves).
+pub struct WindsideState {
+    pub mode: WindsideMode,
+    pub loaded: Option<crate::windside::Loaded>,
+    pub error: Option<String>,
+}
+
+impl WindsideState {
+    fn open(cfg: &Config) -> WindsideState {
+        let mut st = WindsideState {
+            mode: cfg.windside_mode,
+            loaded: None,
+            error: None,
+        };
+        let Some(dir) = cfg.windside_model.as_deref() else {
+            return st;
+        };
+        match crate::windside::load(dir) {
+            Ok(l) => {
+                tracing::info!(
+                    model = l.manifest.model_version,
+                    features = l.manifest.features_version,
+                    "windside model loaded"
+                );
+                st.loaded = Some(l);
+            }
+            Err(e) => {
+                tracing::warn!("windside model refused: {e}");
+                st.error = Some(e.to_string());
+            }
+        }
+        st
+    }
+
+    /// Score one actor feature row, or `None` when off, unloaded, or
+    /// below the cold-start floor.
+    fn score_actor(&self, values: &[f32]) -> Option<(f64, String)> {
+        if self.mode == WindsideMode::Off {
+            return None;
+        }
+        self.loaded.as_ref().and_then(|l| l.score_row(values))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,10 +130,51 @@ pub enum IngestError {
 #[error("enforce is pinned off by config")]
 pub struct ModePinned;
 
+/// Wire `ts`: integer microseconds on v2, float seconds on v1. The
+/// float hop is not bitwise-transparent (serde_json's parser can return
+/// the 1-ulp neighbor), which is why v2 carries an integer.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+enum TsWire {
+    Micros(i64),
+    Seconds(f64),
+}
+
+impl TsWire {
+    /// Integer microseconds. v1 keeps its float path, so v1 clients and
+    /// their `(peer_key, ts_us)` join behave exactly as before; v2 must
+    /// carry integer microseconds, and anything else is a bad line.
+    fn ts_us(self, v: u8) -> Result<i64, IngestError> {
+        match (v, self) {
+            (1, TsWire::Seconds(f)) if f.is_finite() && f > 0.0 => Ok(store::ts_us(f)),
+            (2, TsWire::Micros(u)) if u > 0 => Ok(u),
+            _ => Err(IngestError::Field("ts")),
+        }
+    }
+
+    /// Window milliseconds, computed the way each version always did:
+    /// v1 floors the float, v2 divides the integer.
+    fn ts_ms(self) -> u64 {
+        match self {
+            TsWire::Micros(u) => u.max(0) as u64 / 1000,
+            TsWire::Seconds(f) => (f * 1000.0) as u64,
+        }
+    }
+
+    /// Echo for the display-only `turns.ts` column: the v1 float as
+    /// sent, the v2 integer exactly.
+    fn echo(self) -> f64 {
+        match self {
+            TsWire::Micros(u) => u as f64,
+            TsWire::Seconds(f) => f,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct ProbeWire<'a> {
     v: u8,
-    ts: f64,
+    ts: TsWire,
     #[serde(borrow)]
     verb: Cow<'a, str>,
     #[serde(borrow)]
@@ -116,7 +205,7 @@ struct ProbeWire<'a> {
 #[derive(Deserialize)]
 struct EventWire<'a> {
     v: u8,
-    ts: f64,
+    ts: TsWire,
     session_key: String,
     peer_key: String,
     principal: String,
@@ -219,6 +308,8 @@ impl Engine {
         ));
         let now_us = store::now_s() * 1_000_000;
         resolver.load(store.load_actors()?, store.load_bindings(now_us)?);
+        resolver.load_scores(store.load_scores()?);
+        let windside = WindsideState::open(&cfg);
         let enrich = Enricher::open(cfg.geoip_asn.as_deref(), cfg.geoip_country.as_deref());
         let ja4_classes = Ja4Classes::load(cfg.ja4_classes.as_deref());
         let (actors, strong, weak) = resolver.len();
@@ -248,6 +339,7 @@ impl Engine {
             conns: Connections::default(),
             ja4_classes,
             honey_cache: Mutex::new(HashMap::new()),
+            windside,
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -391,8 +483,11 @@ impl Engine {
             .as_deref()
             .filter(|t| is_hex(t, 32))
             .map(str::to_string);
-        let ts_us = store::ts_us(probe.ts);
-        let ts_ms = (probe.ts * 1000.0) as u64;
+        let ts_us = match probe.ts.ts_us(probe.v) {
+            Ok(u) => u,
+            Err(_) => return self.bad_probe(&rs, global),
+        };
+        let ts_ms = probe.ts.ts_ms();
         let hour = hour_of(now_s);
 
         // The actor, by the highest-precedence identifier present with a live
@@ -468,6 +563,11 @@ impl Engine {
             }
         }
 
+        // The score rides the probe only while Windside is active: in
+        // shadow (or off, or unscored) score rules can never fire.
+        let actor_score = (self.windside.mode == WindsideMode::Active)
+            .then(|| actor.and_then(|a| self.resolver.score(a)))
+            .flatten();
         let p = Probe {
             verb,
             route: &probe.route,
@@ -479,6 +579,7 @@ impl Engine {
             credential,
             credential_verified,
             actor,
+            actor_score,
         };
         let out = eval(&rs, &self.symbols, &self.windows, &p, global, now_s);
 
@@ -586,9 +687,7 @@ impl Engine {
         if ev.status > 599 {
             return Err(IngestError::Field("status"));
         }
-        if !ev.ts.is_finite() || ev.ts <= 0.0 {
-            return Err(IngestError::Field("ts"));
-        }
+        let ts_us = ev.ts.ts_us(ev.v)?;
         // v2 identifiers: validated where they key a window, else carried.
         let surface = match ev.surface.as_deref() {
             None => None,
@@ -615,7 +714,7 @@ impl Engine {
         let bound: Vec<BoundWire> = serde_json::from_str(ev.bound.get())?;
         let syms = &self.symbols;
         let summary = TurnSummary {
-            ts_ms: (ev.ts * 1000.0) as u64,
+            ts_ms: ev.ts.ts_ms(),
             route: syms.intern(&ev.route),
             verb,
             status: ev.status,
@@ -649,7 +748,6 @@ impl Engine {
             tag_status: tag_code(ev.tag_status.as_deref()),
             net: net_hash.as_deref().and_then(key16),
         };
-        let ts_us = store::ts_us(ev.ts);
         let turn_id = match ev.turn_id.as_deref() {
             None | Some("") => None,
             Some(t) if is_hex(t, 32) => Some(t.to_string()),
@@ -822,6 +920,39 @@ impl Engine {
                     surface: surface.map(|s| s.as_str().to_string()),
                     clock_anomalies,
                 }));
+                // Shadow and active score the actor row; cluster rows stay
+                // unscored until a rule can read them.
+                if let Some((p, top3)) = self.windside.score_actor(&values) {
+                    let id_hex = format!("{a:016x}");
+                    self.resolver.set_score(
+                        a,
+                        ActorScore {
+                            score: p as f32,
+                            ts_us,
+                            top3: top3.clone(),
+                        },
+                    );
+                    let version = self
+                        .windside
+                        .loaded
+                        .as_ref()
+                        .map(|l| l.manifest.model_version.clone())
+                        .unwrap_or_default();
+                    self.store.send(StoreOp::Score(ScoreRow {
+                        actor_id: id_hex.clone(),
+                        surface: surface.map(|s| s.as_str().to_string()),
+                        ts_us,
+                        score: p,
+                        model_version: version,
+                        top3: top3.clone(),
+                    }));
+                    self.store.send(StoreOp::ActorScore {
+                        id: id_hex,
+                        score: p,
+                        ts_us,
+                        top3,
+                    });
+                }
             }
         }
         if let Some(c) = cluster {
@@ -913,7 +1044,7 @@ impl Engine {
         self.store.send(StoreOp::Turn(TurnRow {
             session_key: ev.session_key,
             ts_us,
-            ts: ev.ts,
+            ts: ev.ts.echo(),
             peer_key: ev.peer_key,
             principal: ev.principal,
             verb: ev.verb,
@@ -1052,6 +1183,12 @@ impl Engine {
                          "dropped_for_cap": self.windows.dropped_for_cap() },
             "schema_versions": SCHEMA_VERSIONS,
             "features_version": features::VERSION,
+            "windside": {
+                "mode": self.windside.mode.as_str(),
+                "model_version": self.windside.loaded.as_ref().map(|l| l.manifest.model_version.clone()),
+                "features_version": self.windside.loaded.as_ref().map(|l| l.manifest.features_version),
+                "error": self.windside.error.clone(),
+            },
             "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),
             "symbols": { "count": self.symbols.len(), "overflowed": self.symbols.overflowed() },

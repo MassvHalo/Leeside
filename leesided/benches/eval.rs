@@ -226,6 +226,7 @@ fn run_one(f: &Fixture, p: &(Verb, String, u64, u64, Option<u64>, u64)) -> usize
         credential: None,
         credential_verified: false,
         actor: None,
+        actor_score: None,
     };
     eval(&f.rs, &f.syms, &f.windows, &probe, Mode::Enforce, NOW_S)
         .hits

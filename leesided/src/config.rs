@@ -33,6 +33,40 @@ pub struct Config {
     /// with a verified credential and a sub-400 status they label the
     /// actor's window benign (`verified_business`).
     pub business_routes: Vec<String>,
+    /// Model directory (`manifest.json` + `model.txt`): scored at
+    /// start-up when set, refused when its `features_version` differs.
+    pub windside_model: Option<PathBuf>,
+    /// `off`, `shadow` or `active` (docs/windside.md section 6).
+    pub windside_mode: WindsideMode,
+}
+
+/// What the loaded model may do. Shadow writes scores and changes no
+/// decision; only active lets score rules fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindsideMode {
+    #[default]
+    Off,
+    Shadow,
+    Active,
+}
+
+impl WindsideMode {
+    pub fn parse(s: &str) -> Option<WindsideMode> {
+        match s {
+            "off" => Some(WindsideMode::Off),
+            "shadow" => Some(WindsideMode::Shadow),
+            "active" => Some(WindsideMode::Active),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WindsideMode::Off => "off",
+            WindsideMode::Shadow => "shadow",
+            WindsideMode::Active => "active",
+        }
+    }
 }
 
 impl Default for Config {
@@ -52,6 +86,8 @@ impl Default for Config {
             ja4_classes: Some(default_ja4_classes()),
             honeytoken_routes: Vec::new(),
             business_routes: Vec::new(),
+            windside_model: None,
+            windside_mode: WindsideMode::Off,
         }
     }
 }
@@ -142,6 +178,16 @@ impl Config {
         }
         if let Ok(v) = std::env::var("LEESIDED_BUSINESS_ROUTES") {
             cfg.business_routes = split_routes(&v);
+        }
+        if let Ok(v) = std::env::var("LEESIDED_WINDSIDE_MODEL") {
+            if !v.is_empty() {
+                cfg.windside_model = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_WINDSIDE_MODE") {
+            cfg.windside_mode = WindsideMode::parse(&v).unwrap_or_else(|| {
+                panic!("LEESIDED_WINDSIDE_MODE: off, shadow or active, not {v}")
+            });
         }
         cfg
     }

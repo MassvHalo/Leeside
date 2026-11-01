@@ -42,6 +42,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         10,
         include_str!("../../migrations/0010_clock_hardening.sql"),
     ),
+    (11, include_str!("../../migrations/0011_scores.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -217,6 +218,15 @@ pub enum StoreOp {
         hit_ts_us: i64,
         until_us: i64,
     },
+    /// One scored actor feature row (windside §6).
+    Score(ScoreRow),
+    /// The actor's latest score, for rule matching.
+    ActorScore {
+        id: String,
+        score: f64,
+        ts_us: i64,
+        top3: String,
+    },
     /// Commit everything queued before this and reply.
     Flush(oneshot::Sender<()>),
     /// Flush, reply, and end the writer loop.
@@ -271,6 +281,17 @@ impl BindingRow {
             returned: b.returned,
         }
     }
+}
+
+/// A `scores` row: one actor feature row's Windside score.
+#[derive(Debug, Clone)]
+pub struct ScoreRow {
+    pub actor_id: String,
+    pub surface: Option<String>,
+    pub ts_us: i64,
+    pub score: f64,
+    pub model_version: String,
+    pub top3: String,
 }
 
 /// An `actor_merges` row.
@@ -708,6 +729,37 @@ impl Store {
                             last_seen_us: last,
                             expires_us: expires,
                             returned,
+                        },
+                    ))
+                })
+                .collect())
+        })
+    }
+
+    /// Latest score per actor, for the in-memory lookup at start.
+    /// Unparseable ids are skipped, never fatal.
+    pub fn load_scores(&self) -> Result<Vec<(u64, crate::actors::ActorScore)>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, score, score_ts, score_top3 FROM actors WHERE score IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            Ok(rows
+                .filter_map(|r| r.ok())
+                .filter_map(|(id, score, ts, top3)| {
+                    Some((
+                        crate::rules::windows::key16(&id)?,
+                        crate::actors::ActorScore {
+                            score: score as f32,
+                            ts_us: ts,
+                            top3,
                         },
                     ))
                 })

@@ -54,7 +54,7 @@ dumps. Unknown fields are rejected at every level.
 | `principal` | `any` \| `anon` \| `authenticated` | the probe's `principal` is `anon` or a 16-hex hash |
 | `surface` | list of `honeypot` `webhook` `api` `web`, optional | 0..=4 entries, no duplicates; absent or empty means any; a v1 probe is `web` |
 
-A condition. Exactly one of `count`, `distinct`, `sequence`:
+A condition. Exactly one of `count`, `distinct`, `sequence`, `score`:
 
 | Field | Type | Rule |
 | --- | --- | --- |
@@ -64,6 +64,7 @@ A condition. Exactly one of `count`, `distinct`, `sequence`:
 | `gte`, `lte` | int | only with `count`, at least one of them; `lte: 0` means "no such turn" |
 | `distinct` | `{ "field": "bound_id" \| "route" \| "credential", "model"?, "where"? }` | number of distinct values across the window; `model` narrows `bound_id` to one model basename; `where` is a turn filter only matching turns contribute (`{"credential_status": ["rejected"]}` counts rejected keys); takes `gte` only, 1..=64 (the window size); without `model`, two models sharing an id hash count as two values |
 | `sequence` | list of 2..=8 route templates | the probe's route is the last entry and the newest k-1 turns in the session match the rest, in order; rejects `scope` and `window_s` |
+| `score` | `{ "gte": 0..=1 }` | the probe actor's Windside score; needs `scope: actor`, rejects `window_s`, `gte` and `lte`; holds only while Windside is active, so a score rule in shadow mode is present and never fires |
 
 A turn filter. Every field optional, OR inside a list, AND across fields:
 
@@ -364,11 +365,13 @@ pub struct TurnFilter {   // every field optional; OR inside a list, AND across 
 ```
 
 `Rule::validate()` runs after deserialisation and again on every load. It
-checks: exactly one of `count`, `distinct`, `sequence` per condition; `gte`
-or `lte` only with `count`, at least one of them, `gte <= lte`; `distinct`
-takes `gte` only, 1..=64; `sequence` rejects `scope`, `window_s`, `gte` and
-`lte`, and must end with a route in `match.route` unless that is `"*"`
-(otherwise the rule could never fire); route lists 1..=16 with `"*"` allowed
+checks: exactly one of `count`, `distinct`, `sequence`, `score` per
+condition; `gte` or `lte` only with `count`, at least one of them,
+`gte <= lte`; `distinct` takes `gte` only, 1..=64; `sequence` rejects
+`scope`, `window_s`, `gte` and `lte`, and must end with a route in
+`match.route` unless that is `"*"` (otherwise the rule could never
+fire); `score` needs `scope: actor`, rejects `window_s`, `gte` and
+`lte`, and its own `gte` must be 0..=1; route lists 1..=16 with `"*"` allowed
 only alone; verb lists 1..=8 without duplicates; filter lists 1..=16; status
 codes 0..=599; `validation_failed: false` rejected; `retry_after_s` required
 with `rate_limit` and rejected otherwise; `expires_at` in the future at

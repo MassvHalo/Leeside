@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// The probe, decoded once by the check server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Probe<'a> {
     pub verb: Verb,
     pub route: &'a str,
@@ -29,6 +29,10 @@ pub struct Probe<'a> {
     pub credential_verified: bool,
     /// The canonical actor the probe's identifiers name, when any is bound.
     pub actor: Option<u64>,
+    /// That actor's latest Windside score. `None` when unscored, and
+    /// always `None` unless Windside is active, so score rules can
+    /// never fire in shadow.
+    pub actor_score: Option<f32>,
 }
 
 /// One rule whose conditions held.
@@ -332,6 +336,7 @@ fn holds(cond: &CCond, route_sym: Option<Sym>, probe: &Probe, f: &mut Fetched) -
                 _ => false,
             }
         }
+        CTest::Score { gte } => probe.actor_score.is_some_and(|s| s >= gte.0),
     }
 }
 
@@ -410,6 +415,7 @@ mod tests {
                 credential: None,
                 credential_verified: false,
                 actor: None,
+                actor_score: None,
             }
         }
 
@@ -470,6 +476,34 @@ mod tests {
         assert_eq!(o.verdict.retry_after, Some(30));
         assert_eq!(o.hits[0].sticky, Some((Scope::Session, SESSION)));
         assert_eq!(serde_json::to_value(&o.verdict).unwrap()["retry_after"], 30);
+    }
+
+    #[test]
+    fn score_holds_only_on_a_present_score_at_or_above_gte() {
+        let h = H::new();
+        let rs = h.set(&[(
+            rule(
+                "windside-see",
+                "block",
+                "enforce",
+                "portal.login",
+                serde_json::json!({"scope": "actor", "score": {"gte": 0.7}}),
+            ),
+            State::Active,
+        )]);
+        // Unscored (or shadow: the caller passes None) never fires.
+        let p = h.probe(Verb::Post, "portal.login");
+        let o = h.eval(&rs, &p, Mode::Enforce);
+        assert_eq!(o.verdict.action, VerdictAction::Allow);
+        assert!(o.hits.is_empty());
+        let mut p = p;
+        p.actor_score = Some(0.69);
+        let o = h.eval(&rs, &p, Mode::Enforce);
+        assert_eq!(o.verdict.action, VerdictAction::Allow);
+        p.actor_score = Some(0.7);
+        let o = h.eval(&rs, &p, Mode::Enforce);
+        assert_eq!(o.verdict.action, VerdictAction::Block);
+        assert_eq!(&*o.verdict.rule.clone().unwrap(), "windside-see");
     }
 
     #[test]

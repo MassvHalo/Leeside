@@ -3,8 +3,8 @@
 //! work and no allocation.
 
 use super::model::{
-    Action, Condition, DistinctField, Mode, Origin, PrincipalKind, Rule, Scope, StatusClass,
-    StatusSel, Surface, TurnFilter, ValidationSel, Verb,
+    Action, Condition, DistinctField, Mode, Origin, PrincipalKind, Rule, Scope, ScoreGte,
+    StatusClass, StatusSel, Surface, TurnFilter, ValidationSel, Verb,
 };
 use super::symbols::{Sym, Symbols};
 use super::windows::TurnSummary;
@@ -200,6 +200,8 @@ pub enum CTest {
     },
     /// Ends with the route the probe must carry.
     Sequence(SmallVec<[Sym; 8]>),
+    /// The probe actor's Windside score, pre-resolved by the caller.
+    Score { gte: ScoreGte },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +233,12 @@ impl CCond {
                     gte: c.gte.unwrap_or(1),
                     filter: d.filter.as_ref().map(|f| CFilter::compile(f, syms)),
                 },
+            }
+        } else if let Some(s) = &c.score {
+            CCond {
+                scope: Scope::Actor,
+                window_ms: None,
+                test: CTest::Score { gte: s.gte },
             }
         } else {
             let seq = c.sequence.as_deref().unwrap_or(&[]);

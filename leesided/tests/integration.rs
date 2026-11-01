@@ -86,6 +86,8 @@ impl Harness {
             ))),
             honeytoken_routes,
             business_routes,
+            windside_model: None,
+            windside_mode: leesided::config::WindsideMode::Off,
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -102,6 +104,61 @@ impl Harness {
         self.engine.shutdown().await;
         drop(self);
         Harness::open(dir).await
+    }
+
+    /// A harness with a Windside model and mode, for the shadow tests.
+    async fn open_windside(
+        dir: PathBuf,
+        model: Option<PathBuf>,
+        mode: leesided::config::WindsideMode,
+    ) -> Harness {
+        std::fs::create_dir_all(dir.join("rules-empty")).unwrap();
+        let cfg = Config {
+            socket_dir: dir.clone(),
+            db: dir.join("leesided.sqlite"),
+            api: "127.0.0.1:0".parse().unwrap(),
+            enforce: true,
+            rules_dir: dir.join("rules-empty"),
+            socket_mode: 0o600,
+            socket_gid: None,
+            api_token: None,
+            hash_key: Some("test-key".into()),
+            geoip_asn: None,
+            geoip_country: None,
+            ja4_classes: None,
+            honeytoken_routes: Vec::new(),
+            business_routes: Vec::new(),
+            windside_model: model,
+            windside_mode: mode,
+        };
+        let engine = Engine::open(cfg).await.expect("engine open");
+        let running = serve(engine.clone()).await.expect("serve");
+        Harness {
+            dir,
+            engine,
+            running,
+        }
+    }
+
+    /// A constant test model: every row scores sigmoid(2.0) = 0.8808.
+    fn shadow_model(dir: &std::path::Path) {
+        use leesided::rules::features::NAMES;
+        let manifest = serde_json::json!({
+            "model_version": "0.0.0-test",
+            "features_version": 2,
+            "feature_names": NAMES.as_slice(),
+            "thresholds": {"web": {"threshold": 0.7}},
+        });
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+        std::fs::write(
+            dir.join("model.txt"),
+            "tree\nversion=v4\nnum_class=1\nnum_tree_per_iteration=1\nlabel_index=0\n\
+             max_feature_idx=37\nobjective=binary sigmoid:1\ntree_sizes=100\n\n\
+             Tree=0\nnum_leaves=1\nnum_cat=0\nleaf_value=2.0\nleaf_weight=10\n\
+             leaf_count=10\nis_linear=0\nshrinkage=1\n",
+        )
+        .unwrap();
     }
 
     async fn probe(&self, line: &str) -> Value {
@@ -174,6 +231,14 @@ fn now_f64() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64()
+}
+
+/// Integer microseconds: the v2 wire `ts`, exact across the JSON hop.
+fn now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64
 }
 
 fn probe_json(ts: f64, verb: &str, route: &str, session: &str) -> String {
@@ -614,6 +679,8 @@ async fn api_validate_schema_export_and_pinned_mode() {
         ja4_classes: None,
         honeytoken_routes: Vec::new(),
         business_routes: Vec::new(),
+        windside_model: None,
+        windside_mode: leesided::config::WindsideMode::Off,
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -649,6 +716,37 @@ async fn bad_input_is_counted_and_answered_allow() {
         h.engine.counters.bad_event.load(Ordering::Relaxed) == 2
     })
     .await;
+    assert_eq!(h.engine.counters.events.load(Ordering::Relaxed), 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ts_type_is_pinned_to_the_schema_version() {
+    let h = Harness::start().await;
+    // A v2 line with a float ts is a bad line on both sockets.
+    let mut v2p: Value =
+        serde_json::from_str(&v2_probe(ts_us(now_f64()), "home", SESSION, "web", None)).unwrap();
+    v2p["ts"] = json!(1761600000.123f64);
+    assert_eq!(h.probe(&v2p.to_string()).await["action"], "allow");
+    let mut v2e: Value =
+        serde_json::from_str(&v2_event(ts_us(now_f64()), SESSION, "home", "web", None)).unwrap();
+    v2e["ts"] = json!(1761600000.123f64);
+    h.event(&v2e.to_string()).await;
+    // A v1 line with an integer ts is a bad line too: v1 keeps float seconds.
+    let mut v1p: Value =
+        serde_json::from_str(&probe_json(now_f64(), "GET", "home", SESSION)).unwrap();
+    v1p["ts"] = json!(1761600000123000i64);
+    assert_eq!(h.probe(&v1p.to_string()).await["action"], "allow");
+    let f = now_f64();
+    let mut v1e: Value = serde_json::from_str(&login_failed_event(f, SESSION)).unwrap();
+    v1e["ts"] = json!(ts_us(f));
+    h.event(&v1e.to_string()).await;
+    h.wait_for("bad ts lines", || {
+        h.engine.counters.bad_event.load(Ordering::Relaxed) == 2
+    })
+    .await;
+    assert_eq!(h.engine.counters.bad_probe.load(Ordering::Relaxed), 2);
     assert_eq!(h.engine.counters.events.load(Ordering::Relaxed), 0);
     h.running.abort();
     h.engine.shutdown().await;
@@ -736,7 +834,7 @@ async fn uds_round_trip_p99_under_one_millisecond() {
 }
 
 fn v2_event(
-    ts: f64,
+    ts: i64,
     session: &str,
     route: &str,
     surface: &str,
@@ -762,7 +860,7 @@ fn v2_event(
 }
 
 fn v2_probe(
-    ts: f64,
+    ts: i64,
     route: &str,
     session: &str,
     surface: &str,
@@ -779,7 +877,7 @@ async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
     let h = Harness::start().await;
     let now = now_f64();
     h.event(&v2_event(
-        now,
+        ts_us(now),
         SESSION,
         "api.ping",
         "api",
@@ -809,10 +907,10 @@ async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
         .store
         .with_reader(|c| {
             c.query_row(
-                // ±1µs: the ts crosses a JSON float hop whose parse can
-                // slip 1 ulp (see the actor-row ts assert below).
+                // Exact: the v2 `ts` is integer microseconds, so the
+                // stored ts_us is the sent value bit for bit.
                 "SELECT surface, credential_kind, credential_hash, tag_id, ip_hash, net_hash, ua_class, flags, ja4 \
-                 FROM turns WHERE session_key = ?1 AND ts_us BETWEEN ?2 - 1 AND ?2 + 1",
+                 FROM turns WHERE session_key = ?1 AND ts_us = ?2",
                 rusqlite::params![SESSION, ts_us(now)],
                 |r| {
                     Ok((
@@ -857,8 +955,9 @@ async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
         .store
         .with_reader(|c| {
             c.query_row(
-                // ±1µs for the JSON float hop (see above); without the
-                // range a 1-ulp slip would pass vacuously via no row.
+                // ±1µs: v1 keeps the float `ts`, and serde_json's parser
+                // can return the 1-ulp neighbor across the hop. Without
+                // the range a slip would pass vacuously via no row.
                 "SELECT surface FROM turns WHERE ts_us BETWEEN ?1 - 1 AND ?1 + 1",
                 rusqlite::params![ts_us(now + 1.0)],
                 |r| r.get(0),
@@ -904,11 +1003,11 @@ async fn surface_match_and_credential_scope_with_no_peer_rate_on_api() {
         .await
         .unwrap();
 
-    let now = now_f64();
+    let now = now_us();
     let cred = "feedfacefeedface";
     for i in 0..3 {
         h.event(&v2_event(
-            now - 10.0 + i as f64,
+            now - 10_000_000 + (i as i64) * 1_000_000,
             SESSION,
             "api.ping",
             "api",
@@ -964,9 +1063,14 @@ async fn surface_match_and_credential_scope_with_no_peer_rate_on_api() {
         "on web the peer window is live and the api rule is gated off: {v}"
     );
     assert_eq!(v["action"], "block");
-    // A v1 probe is web.
+    // A v1 probe is web (v1 keeps the float `ts`).
     let v = h
-        .probe(&probe_json(now, "POST", "home", "1111111111111111"))
+        .probe(&probe_json(
+            now as f64 / 1e6,
+            "POST",
+            "home",
+            "1111111111111111",
+        ))
         .await;
     assert_eq!(v["action"], "block", "{v}");
     h.running.abort();
@@ -988,10 +1092,10 @@ async fn unauthenticated_api_burst_trips_peer_rule_but_a_credentialed_one_does_n
         .write_rule(per_peer, State::Active, "operator", None)
         .await
         .unwrap();
-    let now = now_f64();
+    let now = now_us();
     for i in 0..3 {
         h.event(&v2_event(
-            now - 10.0 + i as f64,
+            now - 10_000_000 + (i as i64) * 1_000_000,
             "1111111111111111",
             "api.ping",
             "api",
@@ -1044,7 +1148,7 @@ async fn unauthenticated_api_burst_trips_peer_rule_but_a_credentialed_one_does_n
 }
 
 fn v2_probe_status(
-    ts: f64,
+    ts: i64,
     route: &str,
     session: &str,
     surface: &str,
@@ -1056,7 +1160,7 @@ fn v2_probe_status(
     .to_string()
 }
 
-fn rejected_key_event(ts: f64, session: &str, credential: &str) -> String {
+fn rejected_key_event(ts: i64, session: &str, credential: &str) -> String {
     json!({"v":2,"ts":ts,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"POST",
         "route":"api.ping","status":401,"latency_ms":1.0,"bytes_in":0,"bytes_out":20,
         "req_shape":"[]","resp_shape":"{message:str:12}","bound":[],
@@ -1083,11 +1187,11 @@ async fn garbage_credential_burst_is_one_peer_not_many_credentials() {
         .write_rule(stuffing, State::Active, "operator", None)
         .await
         .unwrap();
-    let now = now_f64();
+    let now = now_us();
     for i in 0..10u64 {
         // Each attempt a new session (no cookie jar) and a new key.
         h.event(&rejected_key_event(
-            now - 30.0 + i as f64,
+            now - 30_000_000 + (i as i64) * 1_000_000,
             &format!("{:016x}", 0x1000 + i),
             &format!("{:016x}", 0xabc00 + i),
         ))
@@ -1151,7 +1255,7 @@ async fn garbage_credential_burst_is_one_peer_not_many_credentials() {
     h.engine.shutdown().await;
 }
 
-fn forged_webhook_event(ts: f64, session: &str, claimed: &str) -> String {
+fn forged_webhook_event(ts: i64, session: &str, claimed: &str) -> String {
     json!({"v":2,"ts":ts,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"POST",
         "route":"webhooks.demo","status":401,"latency_ms":1.0,"bytes_in":12,"bytes_out":26,
         "req_shape":"{order:int}","resp_shape":"{message:str:12}","bound":[],
@@ -1179,10 +1283,10 @@ async fn forged_webhook_burst_trips_a_peer_rule_and_a_signed_one_does_not() {
         .write_rule(forgeries, State::Active, "operator", None)
         .await
         .unwrap();
-    let now = now_f64();
+    let now = now_us();
     for i in 0..3u64 {
         h.event(&forged_webhook_event(
-            now - 20.0 + i as f64,
+            now - 20_000_000 + (i as i64) * 1_000_000,
             &format!("{:016x}", 0x7000 + i),
             &format!("{:016x}", 0xbad000 + i),
         ))
@@ -1225,7 +1329,7 @@ async fn forged_webhook_burst_trips_a_peer_rule_and_a_signed_one_does_not() {
 }
 
 fn tagged_event(
-    ts: f64,
+    ts: i64,
     turn_id: &str,
     session: &str,
     principal: &str,
@@ -1240,7 +1344,7 @@ fn tagged_event(
     .to_string()
 }
 
-fn tagged_probe(ts: f64, turn_id: &str, session: &str, tag: Option<&str>, route: &str) -> String {
+fn tagged_probe(ts: i64, turn_id: &str, session: &str, tag: Option<&str>, route: &str) -> String {
     json!({"v":2,"ts":ts,"turn_id":turn_id,"verb":"GET","route":route,"surface":"web","session_key":session,
         "peer_key":PEER,"principal":"anon","tag_id":tag}).to_string()
 }
@@ -1264,10 +1368,10 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
         .write_rule(rule, State::Active, "operator", None)
         .await
         .unwrap();
-    let now = now_f64();
+    let now = now_us();
     // Two sessions, one tag: the browser cleared its session cookie but kept the tag.
     h.event(&tagged_event(
-        now - 30.0,
+        now - 30_000_000,
         "00000000000000000000000000000a01",
         "1111111111111111",
         "anon",
@@ -1276,7 +1380,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     ))
     .await;
     h.event(&tagged_event(
-        now - 20.0,
+        now - 20_000_000,
         "00000000000000000000000000000a02",
         "1111111111111111",
         "anon",
@@ -1285,7 +1389,7 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     ))
     .await;
     h.event(&tagged_event(
-        now - 10.0,
+        now - 10_000_000,
         "00000000000000000000000000000a03",
         "2222222222222222",
         "anon",
@@ -1294,27 +1398,23 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
     ))
     .await;
     let tag = Ident::new(Kind::Tag, 0x7d2b9e4c1a6f0e3b);
-    h.wait_for("tag bound", || {
-        h.engine.resolver.lookup(tag, (now * 1e6) as i64).is_some()
-    })
-    .await;
-    let actor = h.engine.resolver.lookup(tag, (now * 1e6) as i64).unwrap();
+    h.wait_for("tag bound", || h.engine.resolver.lookup(tag, now).is_some())
+        .await;
+    let actor = h.engine.resolver.lookup(tag, now).unwrap();
     h.wait_for("actor window of 3", || {
         h.engine.windows.actor(actor).is_some_and(|w| w.len() == 3)
     })
     .await;
     assert_eq!(
-        h.engine.resolver.lookup(
-            Ident::new(Kind::Session, 0x1111111111111111),
-            (now * 1e6) as i64
-        ),
+        h.engine
+            .resolver
+            .lookup(Ident::new(Kind::Session, 0x1111111111111111), now),
         Some(actor)
     );
     assert_eq!(
-        h.engine.resolver.lookup(
-            Ident::new(Kind::Session, 0x2222222222222222),
-            (now * 1e6) as i64
-        ),
+        h.engine
+            .resolver
+            .lookup(Ident::new(Kind::Session, 0x2222222222222222), now),
         Some(actor)
     );
     h.engine.store.flush().await;
@@ -1403,10 +1503,10 @@ fn store_now() -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
     use leesided::actors::{Ident, Kind};
-    let script = |now: f64| {
+    let script = |now: i64| {
         vec![
             tagged_event(
-                now - 40.0,
+                now - 40_000_000,
                 "00000000000000000000000000000b01",
                 "1111111111111111",
                 "anon",
@@ -1414,7 +1514,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
                 "home",
             ),
             tagged_event(
-                now - 30.0,
+                now - 30_000_000,
                 "00000000000000000000000000000b02",
                 "1111111111111111",
                 "anon",
@@ -1423,7 +1523,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
             ),
             // Login regenerates the session: the tag carries the guest actor into the user's.
             tagged_event(
-                now - 20.0,
+                now - 20_000_000,
                 "00000000000000000000000000000b03",
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
@@ -1431,7 +1531,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
                 "portal.login",
             ),
             tagged_event(
-                now - 10.0,
+                now - 10_000_000,
                 "00000000000000000000000000000b04",
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
@@ -1440,7 +1540,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
             ),
         ]
     };
-    let now = now_f64();
+    let now = now_us();
     let read_ids = |h: &Harness| -> Vec<(String, String)> {
         h.engine
             .store
@@ -1459,15 +1559,12 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
     let tag = Ident::new(Kind::Tag, 0x7d2b9e4c1a6f0e3b);
     let principal = Ident::new(Kind::Principal, 0x0f0f0f0f0f0f0f0f);
     h.wait_for("principal bound", || {
-        h.engine
-            .resolver
-            .lookup(principal, (now * 1e6) as i64)
-            .is_some()
+        h.engine.resolver.lookup(principal, now).is_some()
     })
     .await;
-    let actor = h.engine.resolver.lookup(tag, (now * 1e6) as i64).unwrap();
+    let actor = h.engine.resolver.lookup(tag, now).unwrap();
     assert_eq!(
-        h.engine.resolver.lookup(principal, (now * 1e6) as i64),
+        h.engine.resolver.lookup(principal, now),
         Some(actor),
         "guest actor became the user's"
     );
@@ -1481,14 +1578,8 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
 
     // Restart on the same store: bindings reload, windows rebuild from turns.
     let h = h.restart().await;
-    assert_eq!(
-        h.engine.resolver.lookup(tag, (now * 1e6) as i64),
-        Some(actor)
-    );
-    assert_eq!(
-        h.engine.resolver.lookup(principal, (now * 1e6) as i64),
-        Some(actor)
-    );
+    assert_eq!(h.engine.resolver.lookup(tag, now), Some(actor));
+    assert_eq!(h.engine.resolver.lookup(principal, now), Some(actor));
     assert!(
         h.engine.windows.actor(actor).is_some_and(|w| w.len() == 4),
         "actor window rebuilt from stored turns"
@@ -1501,10 +1592,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
     );
     // A probe for a brand-new session with the tag names the same actor.
     let probe_ids = [Ident::new(Kind::Session, 0x9999999999999999), tag];
-    assert_eq!(
-        h.engine.resolver.lookup_any(&probe_ids, (now * 1e6) as i64),
-        Some(actor)
-    );
+    assert_eq!(h.engine.resolver.lookup_any(&probe_ids, now), Some(actor));
     h.running.abort();
     h.engine.shutdown().await;
 
@@ -1514,10 +1602,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
         h2.event(&e).await;
     }
     h2.wait_for("principal bound again", || {
-        h2.engine
-            .resolver
-            .lookup(principal, (now * 1e6) as i64)
-            .is_some()
+        h2.engine.resolver.lookup(principal, now).is_some()
     })
     .await;
     h2.engine.store.flush().await;
@@ -1526,7 +1611,7 @@ async fn actors_survive_a_restart_and_resolve_the_same_in_a_fresh_store() {
     h2.engine.shutdown().await;
 }
 
-fn tagless_event(ts: f64, turn_id: &str, session: &str) -> String {
+fn tagless_event(ts: i64, turn_id: &str, session: &str) -> String {
     json!({"v":2,"ts":ts,"turn_id":turn_id,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"GET",
         "route":"home","status":200,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,"req_shape":"[]","resp_shape":"html",
         "bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
@@ -1538,12 +1623,12 @@ fn tagless_event(ts: f64, turn_id: &str, session: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cookie_less_scanner_leaves_one_cluster_window_and_no_actors() {
     let h = Harness::start().await;
-    let now = now_f64();
+    let now = now_us();
     // Laravel mints a session per request for a client that returns no cookie;
     // the tag is issued every time and never comes back.
     for i in 0..100u64 {
         h.event(&tagless_event(
-            now - 200.0 + i as f64,
+            now - 200_000_000 + (i as i64) * 1_000_000,
             &format!("{i:032x}"),
             &format!("{:016x}", 0x5000 + i),
         ))
@@ -1574,10 +1659,7 @@ async fn a_cookie_less_scanner_leaves_one_cluster_window_and_no_actors() {
         "the cluster window holds the newest 64"
     );
     // A day later nothing came back: the sweep removes every binding and every unconfirmed actor.
-    let swept = h
-        .engine
-        .resolver
-        .sweep(((now + 25.0 * 3600.0) * 1e6) as i64);
+    let swept = h.engine.resolver.sweep(now + 25 * 3600 * 1_000_000);
     assert_eq!(swept.actors.len(), 100);
     assert_eq!(h.engine.resolver.len().0, 0, "zero actors after the sweep");
     h.engine.store.flush().await;
@@ -1614,11 +1696,11 @@ fn feature_rows(h: &Harness, scope: &str) -> Vec<(String, i64, String)> {
 async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
     use leesided::rules::features::{NAMES, VERSION};
     let h = Harness::start().await;
-    let now = now_f64();
+    let now = now_us();
     // A cookie-less scanner: 100 fresh sessions, no tag ever returned.
     for i in 0..100u64 {
         h.event(&tagless_event(
-            now - 300.0 + i as f64,
+            now - 300_000_000 + (i as i64) * 1_000_000,
             &format!("{i:032x}"),
             &format!("{:016x}", 0x5000 + i),
         ))
@@ -1657,7 +1739,7 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
 
     // A browser: issued, then valid. One actor row, at the confirming turn, covering both.
     let t1 = tagged_event(
-        now - 20.0,
+        now - 20_000_000,
         &"a".repeat(32),
         "1111111111111111",
         "anon",
@@ -1666,7 +1748,7 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
     )
     .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\"");
     let t2 = tagged_event(
-        now - 10.0,
+        now - 10_000_000,
         &"b".repeat(32),
         "1111111111111111",
         "anon",
@@ -1689,16 +1771,7 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
         "the first window already covers the provisional turn"
     );
     assert_eq!(at(&v, "distinct_routes"), 2.0);
-    // ±1µs: the ts crosses a JSON float hop and serde_json's parser can
-    // return the 1-ulp neighbor, so the stored ts_us can differ by 1µs
-    // from the pre-hop value. Production never needs bitwise ts across
-    // the hop (order is ingest_seq; joins reuse same-hop values).
-    assert!(
-        (actors[0].1 - ts_us(now - 10.0)).abs() <= 1,
-        "row ts {} is the confirming turn's {}",
-        actors[0].1,
-        ts_us(now - 10.0)
-    );
+    assert_eq!(actors[0].1, now - 10_000_000);
     let version: i64 = h
         .engine
         .store
@@ -1717,11 +1790,11 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
 async fn the_65th_turn_evicts_the_first() {
     use leesided::rules::features::NAMES;
     let h = Harness::start().await;
-    let now = now_f64();
+    let now = now_us();
     // One cluster, 65 turns: the window holds the newest 64, the total counts all.
     for i in 0..65u64 {
         h.event(&tagless_event(
-            now - 300.0 + i as f64,
+            now - 300_000_000 + (i as i64) * 1_000_000,
             &format!("{i:032x}"),
             &format!("{:016x}", 0x6000 + i),
         ))
@@ -1753,12 +1826,12 @@ async fn the_65th_turn_evicts_the_first() {
 async fn a_row_s_surface_is_its_turn_s() {
     use leesided::rules::features::NAMES;
     let h = Harness::start().await;
-    let now = now_f64();
+    let now = now_us();
     // One cluster across three surfaces; the window mixes them, each row
     // carries the surface of the turn that triggered it.
     for (i, surface) in ["web", "api", "webhook"].iter().enumerate() {
         let ev = tagless_event(
-            now - 10.0 + i as f64,
+            now - 10_000_000 + (i as i64) * 1_000_000,
             &format!("{i:032x}"),
             &format!("{:016x}", 0x7000 + i),
         )
@@ -1804,11 +1877,11 @@ async fn a_row_s_surface_is_its_turn_s() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
-    let now = now_f64();
-    let script = |now: f64| {
+    let now = now_us();
+    let script = |now: i64| {
         vec![
             tagged_event(
-                now - 50.0,
+                now - 50_000_000,
                 &"1".repeat(32),
                 "1111111111111111",
                 "anon",
@@ -1817,7 +1890,7 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
             )
             .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\""),
             tagged_event(
-                now - 40.0,
+                now - 40_000_000,
                 &"2".repeat(32),
                 "1111111111111111",
                 "anon",
@@ -1825,7 +1898,7 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
                 "venues.show",
             ),
             tagged_event(
-                now - 30.0,
+                now - 30_000_000,
                 &"3".repeat(32),
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
@@ -1833,7 +1906,7 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
                 "portal.login",
             ),
             tagged_event(
-                now - 20.0,
+                now - 20_000_000,
                 &"4".repeat(32),
                 "2222222222222222",
                 "0f0f0f0f0f0f0f0f",
@@ -1842,9 +1915,9 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
             ),
         ]
     };
-    let fifth = |now: f64| {
+    let fifth = |now: i64| {
         tagged_event(
-            now - 10.0,
+            now - 10_000_000,
             &"5".repeat(32),
             "2222222222222222",
             "0f0f0f0f0f0f0f0f",
@@ -1901,8 +1974,8 @@ async fn features_v2_are_deterministic_across_a_restart_and_a_fresh_store() {
 // ---- the passive tap (docs/tap.md) ----
 
 /// A v2 web turn from 203.0.113.7 with a source port, as php-fpm reports it.
-fn fp_event(ts: f64, turn_id: &str, port: u16, ja4: Option<&str>, ua_class: &str) -> String {
-    json!({"v":2,"ts":ts,"ts_ms":(ts * 1000.0) as i64,"turn_id":turn_id,"session_key":"1234123412341234","peer_key":PEER,
+fn fp_event(ts: i64, turn_id: &str, port: u16, ja4: Option<&str>, ua_class: &str) -> String {
+    json!({"v":2,"ts":ts,"ts_ms":ts / 1000,"turn_id":turn_id,"session_key":"1234123412341234","peer_key":PEER,
         "principal":"anon","verb":"GET","route":"home","status":200,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,
         "req_shape":"[]","resp_shape":"html","bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
         "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,"surface":"web","tag_status":"absent","tag_id":null,
@@ -1951,8 +2024,8 @@ fn fp_msg(ts_ms: u64, port: u16) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
     let h = Harness::start().await;
-    let now = now_f64();
-    let t0 = (now * 1000.0) as u64;
+    let now = now_us();
+    let t0 = (now / 1000) as u64;
     // SYN, then ClientHello, then the request: the usual order.
     let mut syn = fp_msg(t0 - 100, 51234);
     syn["ja4t"] = SOME_JA4T.into();
@@ -1967,7 +2040,7 @@ async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
         .await;
     // Another port the tap never saw: nothing to join, the turn waits.
     h.event(&fp_event(
-        now + 0.1,
+        now + 100_000,
         &"d".repeat(32),
         51235,
         None,
@@ -2005,12 +2078,7 @@ async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
             .key("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1"),
         0,
     );
-    assert_eq!(
-        h.engine
-            .resolver
-            .cluster_size(ja4_ident, 0, (now * 1e6) as i64),
-        1
-    );
+    assert_eq!(h.engine.resolver.cluster_size(ja4_ident, 0, now), 1);
     let s = h.engine.conns.stats();
     assert_eq!(
         (s.matched, s.unknown, s.deferred, s.missed),
@@ -2043,8 +2111,8 @@ async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_event_can_beat_the_tap_datagram_and_still_be_filled() {
     let h = Harness::start().await;
-    let now = now_f64();
-    let t0 = (now * 1000.0) as u64;
+    let now = now_us();
+    let t0 = (now / 1000) as u64;
     // A browser UA whose TLS stack turns out to be Python's: the late fill
     // also brings the mismatch flag, through json_insert on the stored row.
     h.event(&fp_event(now, &"e".repeat(32), 51300, None, "firefox"))
@@ -2079,8 +2147,8 @@ async fn the_event_can_beat_the_tap_datagram_and_still_be_filled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_proxy_ja4_on_the_event_is_kept_and_a_mismatch_flags_at_ingest() {
     let h = Harness::start().await;
-    let now = now_f64();
-    let t0 = (now * 1000.0) as u64;
+    let now = now_us();
+    let t0 = (now / 1000) as u64;
     let mut syn = fp_msg(t0 - 100, 51400);
     syn["ja4t"] = SOME_JA4T.into();
     syn["tls"] = true.into();
@@ -2111,7 +2179,7 @@ async fn a_trusted_proxy_ja4_on_the_event_is_kept_and_a_mismatch_flags_at_ingest
     // Same connection, a second request on it (keep-alive): the tap's Python
     // JA4 under a Chromium UA flags at ingest.
     h.event(&fp_event(
-        now + 0.5,
+        now + 500_000,
         &"a1".repeat(16),
         51400,
         None,
@@ -2135,7 +2203,7 @@ async fn a_trusted_proxy_ja4_on_the_event_is_kept_and_a_mismatch_flags_at_ingest
 }
 
 fn cred_event(
-    ts: f64,
+    ts: i64,
     turn_id: &str,
     session: &str,
     tag: &str,
@@ -2170,7 +2238,7 @@ fn all_labels(h: &Harness) -> Vec<(String, String, String, f64, Option<String>)>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn honeytoken_labels_the_hit_and_the_following_hour() {
     let h = Harness::start_with_routes(&["admin.backup"], &[]).await;
-    let now = now_f64();
+    let now = now_us();
     // Provisional first sighting: no actor row, no label.
     h.event(&tagged_event(
         now,
@@ -2183,7 +2251,7 @@ async fn honeytoken_labels_the_hit_and_the_following_hour() {
     .await;
     // The hit confirms the actor: row plus label.
     h.event(&tagged_event(
-        now + 60.0,
+        now + 60_000_000,
         "00000000000000000000000000000b02",
         SESSION,
         "anon",
@@ -2193,7 +2261,7 @@ async fn honeytoken_labels_the_hit_and_the_following_hour() {
     .await;
     // Inside the hour: chained label pointing at the hit.
     h.event(&tagged_event(
-        now + 1800.0,
+        now + 1_800_000_000,
         "00000000000000000000000000000b03",
         SESSION,
         "anon",
@@ -2203,7 +2271,7 @@ async fn honeytoken_labels_the_hit_and_the_following_hour() {
     .await;
     // Past the hour: row, no label.
     h.event(&tagged_event(
-        now + 3700.0,
+        now + 3_700_000_000,
         "00000000000000000000000000000b04",
         SESSION,
         "anon",
@@ -2252,7 +2320,7 @@ async fn honeytoken_labels_the_hit_and_the_following_hour() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn verified_business_labels_completed_actions_only() {
     let h = Harness::start_with_routes(&[], &["portal.login"]).await;
-    let now = now_f64();
+    let now = now_us();
     // A verified credential is a strong ident: confirmed on first sight.
     h.event(&cred_event(
         now,
@@ -2266,7 +2334,7 @@ async fn verified_business_labels_completed_actions_only() {
     .await;
     // Rejected, off-list, and unverified turns: rows, no labels.
     h.event(&cred_event(
-        now + 1.0,
+        now + 1_000_000,
         "00000000000000000000000000000c02",
         SESSION,
         TAG,
@@ -2276,7 +2344,7 @@ async fn verified_business_labels_completed_actions_only() {
     ))
     .await;
     h.event(&cred_event(
-        now + 2.0,
+        now + 2_000_000,
         "00000000000000000000000000000c03",
         SESSION,
         TAG,
@@ -2286,7 +2354,7 @@ async fn verified_business_labels_completed_actions_only() {
     ))
     .await;
     h.event(&cred_event(
-        now + 3.0,
+        now + 3_000_000,
         "00000000000000000000000000000c04",
         SESSION,
         TAG,
@@ -2336,10 +2404,10 @@ async fn rule_decision_labels_blocks_and_nothing_else() {
         .write_rule(watch, State::Active, "operator", None)
         .await
         .unwrap();
-    let now = now_f64();
+    let now = now_us();
     for (i, turn) in ["d01", "d02", "d03"].iter().enumerate() {
         h.event(&tagged_event(
-            now - 30.0 + i as f64,
+            now - 30_000_000 + (i as i64) * 1_000_000,
             &format!("00000000000000000000000000000{turn}"),
             SESSION,
             "anon",
@@ -2414,6 +2482,179 @@ async fn rule_decision_labels_blocks_and_nothing_else() {
         })
         .unwrap();
     assert_eq!(eligible, 0, "rule_decision rows never enter a test set");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shadow_mode_writes_scores_and_changes_no_decision() {
+    use leesided::config::WindsideMode;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    let h = Harness::open_windside(dir, Some(model.clone()), WindsideMode::Shadow).await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let rule: Rule = serde_json::from_value(json!({
+        "id": "windside-shadow-test", "note": "score above the test threshold",
+        "mode": "enforce", "action": "block",
+        "match": {"route": ["home"], "verb": ["GET"], "principal": "any", "surface": ["web"]},
+        "when": {"scope": "actor", "score": {"gte": 0.7}},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(rule, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_us();
+    // Actor one: issued, then five valid turns. The actor confirms at the
+    // second turn and every later turn writes a row; rows at five and six
+    // held turns clear the floor and score.
+    let s1 = "1111111111111111";
+    let t1 = tagged_event(now, &"a".repeat(32), s1, "anon", TAG, "home")
+        .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\"");
+    h.event(&t1).await;
+    for i in 1..6i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("{i:032x}"),
+            s1,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    // Actor two: three turns, never five held; the floor skips it.
+    let s2 = "2222222222222222";
+    let tag2 = "0123456789abcdef";
+    let u1 = tagged_event(now, &"b".repeat(32), s2, "anon", tag2, "home")
+        .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\"");
+    h.event(&u1).await;
+    for i in 1..3i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("1{i:031x}"),
+            s2,
+            "anon",
+            tag2,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("nine events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 9
+    })
+    .await;
+    h.engine.store.flush().await;
+    let scores: Vec<(String, f64, String)> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            let mut stmt = c
+                .prepare("SELECT actor_id, score, top3 FROM scores")
+                .unwrap();
+            Ok(stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect::<Vec<(String, f64, String)>>())
+        })
+        .unwrap();
+    assert_eq!(scores.len(), 2, "{scores:?}");
+    for (_, p, top3) in &scores {
+        assert!((p - 0.8807970779778823).abs() < 1e-9, "{p}");
+        assert_eq!(top3, "[]");
+    }
+    let actor1: String = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT DISTINCT actor_id FROM turns WHERE session_key = ?1",
+                rusqlite::params![s1],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(scores.iter().all(|(a, _, _)| a == &actor1));
+    let actor_score: Option<f64> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT score FROM actors WHERE id = ?1",
+                rusqlite::params![actor1],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(actor_score.is_some_and(|s| (s - 0.8807970779778823).abs() < 1e-9));
+    // The score rule is present and the actor is above it, but shadow
+    // never fires: allow, and no decision sticks.
+    let v = h
+        .probe(&tagged_probe(
+            now + 6_000_000,
+            &"f".repeat(32),
+            s1,
+            Some(TAG),
+            "home",
+        ))
+        .await;
+    assert_eq!(v["action"], "allow", "{v}");
+    assert!(h.engine.decisions.is_empty());
+    // The report agrees with the store: two rows scored, the rest skipped.
+    let report = leesided::report::shadow(&h.dir.join("leesided.sqlite"), Some(&model), 0).unwrap();
+    assert_eq!(report.scored, 2);
+    assert_eq!(report.feature_rows, 7);
+    assert_eq!(report.skipped, 5);
+    assert_eq!(report.agreement, (0, 1));
+    assert_eq!(report.above_without_block, 1);
+    assert_eq!(report.disagreements.len(), 1);
+    assert_eq!(report.disagreements[0].actor_id, actor1);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_with_wrong_features_version_refuses_to_load() {
+    use leesided::config::WindsideMode;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    let manifest = std::fs::read_to_string(model.join("manifest.json")).unwrap();
+    std::fs::write(
+        model.join("manifest.json"),
+        manifest.replace("\"features_version\":2", "\"features_version\":999"),
+    )
+    .unwrap();
+    let h = Harness::open_windside(dir, Some(model), WindsideMode::Shadow).await;
+    let (_, health) = h.http("GET", "/health", None).await;
+    assert_eq!(health["windside"]["mode"], "shadow");
+    assert!(health["windside"]["model_version"].is_null());
+    let err = health["windside"]["error"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(err.contains("features_version"), "{err}");
+    // The daemon still serves; nothing scores.
+    let v = h
+        .probe(&probe_json(now_f64(), "GET", "home", SESSION))
+        .await;
+    assert_eq!(v["action"], "allow");
+    h.engine.store.flush().await;
+    let scored: i64 = h
+        .engine
+        .store
+        .with_reader(|c| c.query_row("SELECT count(*) FROM scores", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(scored, 0);
     h.running.abort();
     h.engine.shutdown().await;
 }
