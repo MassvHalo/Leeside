@@ -209,9 +209,31 @@ malicious for the following hour. The business list names completed
 actions that label a verified credential's window benign. Same names the
 generators use (`bin/gen-lib.sh`); restart leesided after changing them.
 
+## LLM label proposals: review three sends before live
+
+`leesided llm send` makes one live call for one subject and prints the
+raw response plus the parsed proposal; the call and the `llm_proposed`
+label land in the store. Outside the deployed daemon the database and
+the model must be set explicitly: the e2e store for review, and the
+repo's model directory for the envelope's threshold (from the repo
+root):
+
+```bash
+LEESIDED_DB=/tmp/leeside-e2e/leesided.sqlite \
+LEESIDED_WINDSIDE_MODEL=windside/models/0.1.0 \
+LEESIDED_LLM_URL=https://inference.baseten.co/v1 \
+LEESIDED_LLM_KEY=$LEESIDED_LLM_KEY \
+  leesided llm send --point label --subject cluster:<key>
+```
+
+`llm show` with the same subject prints the request without sending.
+Review one scanner cluster, one cookie-keeping scraper actor and one
+benign browser actor; flip the unit's `LEESIDED_LLM_MODE` from dry to
+live only after the three responses read clean.
+
 ## First v2 deploy
 
-This deploy crosses migrations 0005 to 0014 and the v2 `ts` change
+This deploy crosses migrations 0005 to 0015 and the v2 `ts` change
 (integer microseconds; v1 keeps float seconds and its `(peer_key, ts_us)`
 join). **Daemon first, package second, never the reverse:** the old and
 new versions are mutually incompatible on v2 traffic, and the reverse
@@ -255,11 +277,11 @@ sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
 
 # 3. Deploy (app first, then the new binary) and watch the migrations.
 sudo bash leeside-sample/deploy/deploy.sh
-journalctl -u leesided -f   # expect: migrated version=5 .. version=14
+journalctl -u leesided -f   # expect: migrated version=5 .. version=15
 
 # 4. Verify /health.
 curl -s 127.0.0.1:7390/health | python3 -m json.tool
-# schema_versions [1, 2]; features_version 2; migration_version 14;
+# schema_versions [1, 2]; features_version 2; migration_version 15;
 # ip_hashing true; geoip true; tap counters zero (its unit is not
 # started yet); windside mode shadow, model_version 0.1.0, no error.
 
