@@ -11,10 +11,11 @@ ingest_seq at the 80th percentile, so the test side is strictly later.
 Whole-group splitting is infeasible on this data (single-key scopes like
 the api cluster cannot split at all, and skewed keys cut perversely), so
 a scope id may span the cut; spanning ids are counted in the manifest.
-Adjacent train/test rows share window content (64-turn sliding windows),
-which is why the holdout blocks, not the in-run split, are the honest
-estimate. The train side is capped per kind after the split; the test
-side keeps its natural rows.
+Adjacent train/test rows share window content (64-turn sliding windows):
+the in-run split is leaky by construction and is a smoke check only.
+Thresholds are chosen on the pooled holdouts per surface. The train
+side is capped per kind after the split; the test side keeps its
+natural rows.
 """
 
 import argparse
@@ -156,14 +157,32 @@ def main() -> None:
     model = lgb.LGBMClassifier(**params)
     model.fit(X_train, y_train)
 
-    # Per-surface thresholds for precision >= 0.98 on the test split.
+    # Per-surface thresholds for precision >= 0.98 on the pooled
+    # holdouts. The in-run test split is leaky by construction and never
+    # sets thresholds.
     p_test = model.predict_proba(test.select(names).to_numpy())[:, 1]
     test = test.with_columns(pl.Series("p", p_test))
+    if holdout.height:
+        ph = model.predict_proba(holdout.select(names).to_numpy())[:, 1]
+        holdout = holdout.with_columns(pl.Series("p", ph))
+    else:
+        print("train: no holdout rows; thresholds unset (0.5, met=False)")
     thresholds: dict[str, dict] = {}
-    for surface in sorted(test["surface"].unique()):
-        sub = test.filter(pl.col("surface") == surface)
-        y = sub["y"].to_numpy()
-        p = sub["p"].to_numpy()
+    for surface in sorted(pool["surface"].unique()):
+        sub = holdout.filter(pl.col("surface") == surface)
+        y = sub["y"].to_numpy() if sub.height else np.array([])
+        p = sub["p"].to_numpy() if sub.height else np.array([])
+        if len(y) == 0:
+            thresholds[surface] = {
+                "threshold": 0.5,
+                "precision": None,
+                "recall": None,
+                "met": False,
+                "support": 0,
+                "note": "no holdout rows",
+            }
+            print(f"train: surface {surface}: no holdout rows; t=0.5 met=False")
+            continue
         if y.sum() == 0 or y.sum() == len(y):
             thresholds[surface] = {
                 "threshold": 0.5,
@@ -171,8 +190,9 @@ def main() -> None:
                 "recall": None,
                 "met": False,
                 "support": len(y),
-                "note": "single-class test slice",
+                "note": "single-class holdout slice",
             }
+            print(f"train: surface {surface}: single-class holdout slice; t=0.5 met=False")
             continue
         mal, ben = p[y == 1], p[y == 0]
         if mal.min() > ben.max():
@@ -215,7 +235,7 @@ def main() -> None:
                 "recall": float(rec[i]),
                 "met": False,
                 "support": len(y),
-                "note": "0.98 unreachable on test slice",
+                "note": "0.98 unreachable on holdout slice",
             }
         th = thresholds[surface]
         print(f"train: surface {surface}: t={th['threshold']:.4f} P={th['precision']} R={th['recall']} met={th['met']}")
@@ -236,7 +256,7 @@ def main() -> None:
     onnx_save(onnx_model, str(out / "model.onnx"))
 
     test.drop("p").write_csv(out / "test.csv")
-    holdout.write_csv(out / "holdout.csv")
+    (holdout.drop("p") if "p" in holdout.columns else holdout).write_csv(out / "holdout.csv")
     (out / "manifest.json").write_text(
         json.dumps(
             {

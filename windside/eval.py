@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Evaluate a Windside model (docs/windside.md section 5).
 
-Scores the test split and the holdout blocks with the trained booster at
-the per-surface thresholds, and writes eval.json: metrics per surface and
-per kind, confusion counts, feature importance, the holdout blocks, and
-the 20 highest-confidence errors with their run_id, kind, scope_id and
-top three features by |SHAP|. Accuracy is not reported anywhere.
+Scores the holdout blocks and the test split with the trained booster
+at the per-surface thresholds, and writes eval.json: the holdout blocks,
+metrics per surface and per kind, confusion counts, feature importance,
+and the 20 highest-confidence errors with their run_id, kind, scope_id
+and top three features by |SHAP|. The holdout blocks lead: the in-run
+test split is leaky by construction (sliding windows) and is a smoke
+check only. Accuracy is not reported anywhere.
 """
 
 import argparse
@@ -191,6 +193,7 @@ def main() -> None:
         json.dumps(
             {
                 "model_version": manifest["model_version"],
+                "test_note": "leaky by construction (sliding windows share content across the cut); smoke check only",
                 "surfaces": surfaces,
                 "kinds": kinds,
                 "importance_gain": [{"name": n, "gain": int(g)} for n, g in importance],
@@ -201,17 +204,18 @@ def main() -> None:
         )
     )
 
-    print(f"eval: test {test.height} rows, holdout {holdout.height if holdout is not None else 0} rows")
-    for surface, m in surfaces.items():
-        print(f"  surface {surface}: P={m['precision']} R={m['recall']} PR-AUC={m['pr_auc']} n={m['support']}")
-    for kind, m in kinds.items():
-        print(f"  kind {kind}: P={m['precision']} R={m['recall']} n={m['support']}")
+    print(f"eval: holdout {holdout.height if holdout is not None else 0} rows (the evaluation), test {test.height} rows (smoke check)")
     for run_id, m in holdouts.items():
         n_mal = m["tp"] + m["fn"]
         if n_mal == 0:
             print(f"  holdout {run_id} ({m['kind']}): fp={m['fp']}/{m['support']} fpr={m['fp'] / m['support']:.4f} n={m['support']}")
         else:
             print(f"  holdout {run_id} ({m['kind']}): P={m['precision']} R={m['recall']} PR-AUC={m['pr_auc']} n={m['support']}")
+    print("  in-run test, leaky by construction (sliding windows); smoke check only:")
+    for surface, m in surfaces.items():
+        print(f"  surface {surface}: P={m['precision']} R={m['recall']} PR-AUC={m['pr_auc']} n={m['support']}")
+    for kind, m in kinds.items():
+        print(f"  kind {kind}: P={m['precision']} R={m['recall']} n={m['support']}")
     print(f"  top-{args.top} errors:")
     for e in errors:
         feats = ", ".join(f"{f['name']}={f['value']:.2f}" for f in e["top_features"])

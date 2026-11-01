@@ -36,4 +36,5 @@ uv run python inspect.py --model models/0.1.0 \
   highest-confidence one per window.
 - Latest run per kind trains and tests; earlier runs are holdout blocks.
 - Accuracy is not reported anywhere. Thresholds target precision ≥ 0.98
-  per surface; recall is reported, not targeted.
+  per surface, chosen on the pooled holdouts; recall is reported, not
+  targeted. The in-run split is a smoke check only.
