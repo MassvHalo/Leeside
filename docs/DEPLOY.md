@@ -153,3 +153,24 @@ the wrong interface or the request reached PHP through a proxy, so
 The e2e script's tap act needs the same capability on the development
 binary, once per build: `sudo setcap cap_net_raw+ep leesided/target/release/leesided`.
 Without it the act is skipped and says so.
+
+## Generator tools
+
+`leeside-sample/bin/benign.sh` and `bin/attack.sh` (docs/windside.md
+section 4) need a toolchain that `composer install` does not provide:
+Playwright browsers, ffuf, nuclei and sqlmap. `bin/tools.sh` installs all
+of it and is the reproducible path on another box:
+
+```bash
+cd leeside-sample
+./bin/tools.sh
+```
+
+Run it as the user that will run the generators, without a sudo prefix:
+only the apt step (`playwright install-deps`, `sqlmap`) and the
+`/usr/local/bin` installs use sudo. Versions are pinned in the script
+(ffuf 2.3.0, nuclei 3.11.1); the Playwright browsers follow the `playwright`
+npm version in `package.json`. Browsers land in that user's
+`~/.cache/ms-playwright` and nuclei templates in `~/nuclei-templates`, so
+every generating user runs it once. The Python scraper and the stuffing and
+forgery runs need nothing beyond the system Python 3 and `requests`.

@@ -10,6 +10,8 @@ use App\Models\User;
 
 Route::get('/', fn () => view('welcome', ['venues' => Venue::all()]))->name('home');
 
+Route::get('/about', fn () => view('about'))->name('about');
+
 Route::post('/portal/login', function (Request $request) {
     $data = $request->validate(['phone' => 'required|digits:10', 'otp' => 'required|digits:6']);
 

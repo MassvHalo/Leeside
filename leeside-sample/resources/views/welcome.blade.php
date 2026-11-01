@@ -119,6 +119,8 @@
         }
         footer a { color: var(--accent-dark); }
     </style>
+    <link rel="stylesheet" href="/sample.css">
+    <script src="/sample.js" defer></script>
 </head>
 <body>
 <div class="wrap">
@@ -159,6 +161,7 @@
     <footer>
         <span>Every request emits a PII-free turn event to the Leeside tap.</span>
         <span><a href="{{ route('api.venues.index') }}">/api/venues</a> · Laravel v{{ app()->version() }}</span>
+        <a href="/admin-backup" style="display:none" tabindex="-1" aria-hidden="true">nightly backup</a>
     </footer>
 </div>
 

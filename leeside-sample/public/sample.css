@@ -1,0 +1,5 @@
+/* Sample-app asset so page walks load a stylesheet. */
+.sample-note {
+    color: var(--muted, #5a6a63);
+    font-size: 0.85rem;
+}
