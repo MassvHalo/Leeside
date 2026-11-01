@@ -59,7 +59,7 @@ A manifest lands next to the CSV with `features_version`, the `feature_names`, r
 
 ## 3. Labels
 
-`labels` table: `id`, `scope` (`actor` or `cluster`), `scope_id`, `surface`, `window_end_ts`, `label` (`benign`, `malicious`, `unknown`), `source`, `confidence` (0 to 1), `kind`, `note`, `created_at`. Labels attach to windows, not actors, because an actor can turn malicious mid-life; cluster windows take labels the same way, which is how tool runs that never return a cookie get labelled. `kind` is the manifest's run kind (e.g. `attack-nuclei`, `benign-api`), set by label-import; it is the key for per-kind sampling and per-kind eval (section 5), and NULL for labels with no run behind them (operator, llm_proposed, rule_decision).
+`labels` table: `id`, `scope` (`actor` or `cluster`), `scope_id`, `surface`, `window_end_ts`, `label` (`benign`, `malicious`, `unknown`), `source`, `confidence` (0 to 1), `kind`, `note`, `created_at`, `signals` (a JSON array, `llm_proposed` only). Labels attach to windows, not actors, because an actor can turn malicious mid-life; cluster windows take labels the same way, which is how tool runs that never return a cookie get labelled. `kind` is the manifest's run kind (e.g. `attack-nuclei`, `benign-api`), set by label-import; it is the key for per-kind sampling and per-kind eval (section 5), and NULL for labels with no run behind them (operator, llm_proposed, rule_decision). Labels append: a re-label is a new row, and readers take the latest per subject and source, so a correction stays auditable and a flip is visible to training.
 
 Sources, with the confidence they carry:
 
@@ -73,7 +73,7 @@ Sources, with the confidence they carry:
 | `llm_proposed` | label assistant (section 8), pending operator confirmation | 0.6 | no |
 | `rule_decision` | automatic from install-set block verdicts (blocks and sticky block replays; watch/log/rate-limit/challenge and proposed rules never label) | 0.5 | never |
 
-Rule-decision labels bootstrap training and are excluded from evaluation without exception, otherwise the model is graded on how well it reproduces the rules. The exclusion is a view, `labels_test_eligible`, over the four test sources (operator, tool_run, synthetic_benign, honeytoken); train.py splits from the view, not the table.
+Rule-decision labels bootstrap training and are excluded from evaluation without exception, otherwise the model is graded on how well it reproduces the rules. The exclusion is a view, `labels_test_eligible`, over the four test sources (operator, tool_run, synthetic_benign, honeytoken), picking the latest row per subject and source; train.py splits from the view, not the table.
 
 Generator labels are applied by run membership, not by header and not by wall-clock interval: the generator records a warmup watermark (`warmup_last_turn_id`, once its two warmup turns have landed) and `leesided label-import <manifest>` labels every window in the fresh run store after it, whatever the turns' stamps say — a backward clock step cannot exclude a turn. The interval stays in the manifest for the record, and benign and malicious runs never overlap in time on the same instance.
 
@@ -122,7 +122,7 @@ Multiple labels per window: a window carries up to one label per source, so a ma
 
 Config: `LEESIDED_WINDSIDE_MODEL` (path to a model directory), `LEESIDED_WINDSIDE_MODE` (`off`, `shadow`, `active`). **Resolution, step F: the brief named `ort` as the loader with the native text model as fallback, but no stable `ort` exists (the 1.x line is yanked on crates.io; only a 2.0 release candidate installs), so leesided loads the native LightGBM text model directly (`leesided/src/windside.rs`) and there is no ONNX path until `ort` stables. The native predictor matches the booster to 3e-9 on the 7666-row dataset.** A manifest whose `features_version` does not match leesided's refuses to load, with the reason on `/health`. `/health` reports `windside.model_version`, `windside.mode`, `windside.features_version`.
 
-On every feature row update: score the row, write to a `scores` table (`scope`, `scope_id`, `surface`, `ts`, `score`, `model_version`, `top3` as JSON). Actor rows also set `actor.score`, `actor.score_ts`, `actor.score_top3`, and only actor rows feed rule matching (rules reading cluster scores remain in H). The floor applies per scope: rows below five held turns are not scored and the skipped count is reported per scope. `top3` is split gain along the row's taken paths (path gain, not SHAP); training-side inspection keeps true SHAP.
+On every feature row update: score the row, write to a `scores` table keyed (`scope`, `scope_id`, `turn_id`) like `feature_vectors`, with `surface`, `ts_us`, `score`, `model_version`, `top3` as JSON. Actor rows also set `actor.score`, `actor.score_ts`, `actor.score_top3`, and only actor rows feed rule matching (rules reading cluster scores remain in H). The floor applies per scope: rows below five held turns are not scored and the skipped count is reported per scope. `top3` is split gain along the row's taken paths (path gain, not SHAP); training-side inspection keeps true SHAP.
 
 Shadow mode: nothing reads the score. `leesided report shadow --since <ts>` prints agreement between score-above-threshold and rule decisions, the disagreements ranked by score, and the per-surface distribution of scores. Run shadow for at least a week of real traffic before active.
 
@@ -135,13 +135,13 @@ Sticky decisions apply as today. Rollback is a config change to the previous mod
 
 ## 7. Review view
 
-Minimum for the hackathon: `leesided review --top 20` prints actors by score with window summary and top features and accepts `b`, `m`, `u` per row, writing operator labels. Better, if time allows: a single HTML page served by leesided on localhost with the same list, the actor's recent turns, and three buttons. Every operator label is immediately exportable; retraining is a scheduled job, not triggered by labelling.
+Minimum for the hackathon: `leesided review --top 20` prints actors by score with window summary and top features and accepts `b`, `m`, `u` per row, writing operator labels. A row with an `llm_proposed` label shows the proposal beside it and offers `c` to confirm it (an `operator` label with the proposed value); entering your own verdict is the rejection, and the log keeps both. Better, if time allows: a single HTML page served by leesided on localhost with the same list, the actor's recent turns, and three buttons. Every operator label is immediately exportable; retraining is a scheduled job, not triggered by labelling.
 
 ## 8. LLM roles
 
 Never on the probe path. Outputs are proposals or text, never decisions.
 
-- Label assistant: given a window's feature row and the actor's last 30 turns as JSON, propose `benign`, `malicious` or `unknown` with a one-paragraph reason. Stored as `llm_proposed` at 0.6 until confirmed in the review view, which upgrades it to `operator`.
+- Label assistant (built, docs/llm.md point 1): given a window's feature row and the actor's last 30 turns as JSON, propose `benign`, `malicious` or `unknown` with a one-paragraph reason. Stored as `llm_proposed` at 0.6 until confirmed in the review view, which appends an `operator` label.
 - Verdict explanation: turn `top3` and the window summary into a sentence for the dashboard.
 - Payload classifier, async: map a request path and body to a category (`sqli`, `traversal`, `enumeration`, `scanner_signature`, `none`), cached by a hash of the path pattern; the category counts join a later features version.
 - Rule drafting: given a cluster of malicious windows, propose a match block for the rules file, for review.
@@ -156,6 +156,7 @@ Done in `20358ca`: determinism across a restart and a replay into a fresh store;
 - Done with step D: export round-trip — CSV plus manifest, chosen label per window, header and row counts match the manifest, unlabeled and older-version rows excluded.
 - Done with step C, updated for membership: label import from a manifest labels every window after the warmup watermark (a backward-stepped turn included), none before it.
 - Shadow mode writes scores and changes no decision (a rule on score is present and does not fire).
+- Done with G: the LLM module's queue, validation and worker against a mocked endpoint, the point-1 confirm in the review CLI, and the export of a confirmed label.
 - Active mode: the same rule fires on a score above threshold.
 - A model manifest with the wrong `features_version` refuses to load and `/health` says why.
 - In `windside/`: a split test proving the test side is strictly later-ingested than the train side within every (`run_id`, `scope_id`) group.
