@@ -29,3 +29,6 @@ Each directory has its own AGENTS.md with its own rules and stack.
 - No commit, no push, no deploy from the agent. I review and commit. I run
   the deploy/ scripts myself with sudo.
 - Never read or write .env files, storage/, *.sqlite, /var/www or /etc.
+
+
+read docs/handoff.md first
