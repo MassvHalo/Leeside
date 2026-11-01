@@ -198,8 +198,14 @@ class LeesideServiceProvider extends ServiceProvider
         $onKernel = function ($kernel) use ($pushGate) {
             $kernel->pushMiddleware(CaptureTurn::class);
 
-            if (method_exists($kernel, 'addToMiddlewarePriorityAfter')) {
-                $kernel->addToMiddlewarePriorityAfter(SubstituteBindings::class, GateTurn::class);
+            if (method_exists($kernel, 'addToMiddlewarePriorityBefore')) {
+                // The gate probes ahead of SubstituteBindings so a binding
+                // failure (an enumeration 404) is still gated; the tag reads
+                // ahead of the gate so the probe carries a valid tag_id. Both
+                // stay after Authenticate and StartSession, which sort before
+                // SubstituteBindings in the default priority list.
+                $kernel->addToMiddlewarePriorityBefore(SubstituteBindings::class, GateTurn::class);
+                $kernel->addToMiddlewarePriorityBefore(GateTurn::class, TagTurn::class);
             }
 
             // Kernel mutators re-sync (overwrite) the router groups, so the

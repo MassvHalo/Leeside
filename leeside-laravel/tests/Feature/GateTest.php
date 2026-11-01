@@ -2,6 +2,8 @@
 
 namespace Leeside\Laravel\Tests\Feature;
 
+use Illuminate\Auth\GenericUser;
+use Illuminate\Http\JsonResponse;
 use Leeside\Laravel\Check\ArrayRuleClient;
 use Leeside\Laravel\Check\RuleClient;
 use Leeside\Laravel\Check\UnixRuleClient;
@@ -146,6 +148,57 @@ class GateTest extends SampleAppTestCase
         );
 
         $this->getJson('/challenge-demo')->assertExactJson(['challenge' => null]);
+    }
+
+    public function test_binding_failure_still_probes_and_records_404(): void
+    {
+        // The gate runs ahead of SubstituteBindings, so an enumeration hit
+        // on a missing id probes before the binding fails.
+        $this->get('/venues/999')->assertNotFound();
+
+        $this->assertCount(1, $this->rules->probes);
+        $this->assertSame('venues.show', $this->rules->probes[0]['route']);
+
+        $event = $this->lastEvent();
+        $this->assertSame(404, $event['status']);
+        $this->assertSame('venues.show', $event['route']);
+        $this->assertSame('ModelNotFoundException', $event['exception']);
+        $this->assertSame(
+            ['action' => 'allow', 'mode' => 'monitor', 'rule' => null, 'applied' => false],
+            $event['gate']
+        );
+    }
+
+    public function test_sticky_block_answers_429_on_binding_failure(): void
+    {
+        $this->scriptVerdict(new Verdict('rate_limit', 'enforce', 'venue-enumeration', 30));
+
+        $response = $this->get('/venues/999');
+        $response->assertStatus(429);
+        $this->assertSame('30', $response->headers->get('Retry-After'));
+
+        $event = $this->lastEvent();
+        $this->assertSame(429, $event['status']);
+        $this->assertNull($event['exception']);
+        $this->assertSame(
+            ['action' => 'rate_limit', 'mode' => 'enforce', 'rule' => 'venue-enumeration', 'applied' => true],
+            $event['gate']
+        );
+    }
+
+    public function test_verified_principal_reaches_probe_on_authenticated_route(): void
+    {
+        $this->app['router']->get('/me', fn () => new JsonResponse(['ok' => true]))
+            ->middleware(['web', 'auth'])->name('me');
+
+        $this->actingAs(new GenericUser(['id' => 7]));
+
+        $this->getJson('/me')->assertOk();
+
+        $expected = $this->hasher()->principal('7');
+        $this->assertCount(1, $this->rules->probes);
+        $this->assertSame($expected, $this->rules->probes[0]['principal']);
+        $this->assertSame($expected, $this->lastEvent()['principal']);
     }
 
     public function test_check_disabled_skips_probe(): void

@@ -2,14 +2,17 @@
 
 namespace Leeside\Laravel\Tests\Feature;
 
+use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Routing\Middleware\SubstituteBindings;
+use Illuminate\Session\Middleware\StartSession;
 use Leeside\Laravel\Check\NullRuleClient;
 use Leeside\Laravel\Check\RuleClient;
 use Leeside\Laravel\Check\UnixRuleClient;
 use Leeside\Laravel\Event\TurnContext;
 use Leeside\Laravel\Middleware\CaptureTurn;
 use Leeside\Laravel\Middleware\GateTurn;
+use Leeside\Laravel\Middleware\TagTurn;
 use Leeside\Laravel\Tests\TestCase;
 use Leeside\Laravel\Transport\LogTransport;
 use Leeside\Laravel\Transport\NullTransport;
@@ -91,10 +94,15 @@ class ProviderWiringTest extends TestCase
 
         $priority = $this->kernelProperty($kernel, 'middlewarePriority');
         $this->assertContains(GateTurn::class, $priority);
-        $this->assertLessThan(
-            array_search(GateTurn::class, $priority),
-            array_search(SubstituteBindings::class, $priority)
-        );
+        $this->assertContains(TagTurn::class, $priority);
+        $at = fn (string $middleware) => array_search($middleware, $priority);
+        // Session, then auth, then the tag read, then the gate, all ahead of
+        // SubstituteBindings, so binding failures still probe with principal,
+        // session and tag present.
+        $this->assertLessThan($at(GateTurn::class), $at(StartSession::class));
+        $this->assertLessThan($at(GateTurn::class), $at(AuthenticatesRequests::class));
+        $this->assertLessThan($at(GateTurn::class), $at(TagTurn::class));
+        $this->assertLessThan($at(SubstituteBindings::class), $at(GateTurn::class));
 
         $groups = $this->app['router']->getMiddlewareGroups();
         $this->assertContains(GateTurn::class, $groups['web']);

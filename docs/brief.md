@@ -50,7 +50,7 @@ can neither see the route template in `handle()` nor the session. Split the job:
 | Middleware | Registered | handle() | terminate() |
 | --- | --- | --- | --- |
 | `CaptureTurn` | Global, appended (catches 404s and unrouted turns) | Stamps `ts` and `hrtime` on a per-request `TurnContext`. Nothing else. | After the response has gone out: build the event, hand it to the transport. Never throws. |
-| `GateTurn` | Appended to the `web` and `api` groups; added to middleware priority after `SubstituteBindings` so it runs after auth and binding | Sets `route` on the context, builds the probe, calls `RuleClient::check()` within the timeout, applies the verdict only when `mode == enforce`. | none |
+| `GateTurn` | Appended to the `web` and `api` groups; added to middleware priority before `SubstituteBindings` (after `Authenticate` and `StartSession`) so binding failures still probe; `TagTurn` reads ahead of the gate so the probe carries a valid `tag_id` | Sets `route` on the context, builds the probe, calls `RuleClient::check()` within the timeout, applies the verdict only when `mode == enforce`. | none |
 
 `TurnContext` is a scoped container binding (Octane-safe), reset by `begin()`
 on every request.
@@ -72,9 +72,9 @@ The service provider also registers:
   `pushMiddleware()` when the kernel is already resolved and through
   `afterResolving()` otherwise, so console processes never resolve the kernel.
   The gate goes into the groups with `Router::pushMiddlewareToGroup()` and into
-  the priority list with `addToMiddlewarePriorityAfter()` when that method
-  exists. `register_middleware = false` turns all of this off for apps that
-  wire it in `bootstrap/app.php` themselves.
+  the priority list with `addToMiddlewarePriorityBefore(SubstituteBindings::class, ...)`
+  (the tag ahead of the gate) when that method exists. `register_middleware = false`
+  turns all of this off for apps that wire it in `bootstrap/app.php` themselves.
 
 ### The event, one per request, schema v1
 
