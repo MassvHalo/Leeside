@@ -174,3 +174,90 @@ npm version in `package.json`. Browsers land in that user's
 `~/.cache/ms-playwright` and nuclei templates in `~/nuclei-templates`, so
 every generating user runs it once. The Python scraper and the stuffing and
 forgery runs need nothing beyond the system Python 3 and `requests`.
+
+## Shadow week: off-box partner traffic
+
+`leeside-sample/bin/offbox-api.sh` runs from any machine with curl against
+the public app during the shadow week, so verified `api` traffic with a
+real JA4 exists for the shadow report's headline (windside section 6). One
+call every 5 to 30 seconds with an occasional burst of 20:
+
+```bash
+LEESIDE_OFFBOX_BASE=https://webapp.leeside.halowifi.com \
+LEESIDE_OFFBOX_API_KEY=<a key the app verifies> \
+./bin/offbox-api.sh
+```
+
+The key is the app's `LEESIDE_DEMO_API_KEY` (`config/leeside_demo.php`;
+`StaticApiKeyVerifier` vouches for it, anything else reads unverified and
+`RequireApiKey` answers 401). Set a real value in the deployed `.env` —
+never the `demo-api-key` default — and hand the same value to whoever runs
+the off-box client. Failed calls print a warning and the loop continues.
+
+The daemon's route lists live in `/etc/leeside/leesided.env` next to the
+other placeholders install.sh writes:
+
+```bash
+LEESIDED_HONEYTOKEN_ROUTES=admin.backup
+LEESIDED_BUSINESS_ROUTES=portal.login,api.ping,webhooks.demo
+```
+
+`admin.backup` is the honeytoken route: a hit labels the actor's windows
+malicious for the following hour. The business list names completed
+actions that label a verified credential's window benign. Same names the
+generators use (`bin/gen-lib.sh`); restart leesided after changing them.
+
+## First v2 deploy
+
+This deploy crosses migrations 0005 to 0011 and the v2 `ts` change
+(integer microseconds; v1 keeps float seconds and its `(peer_key, ts_us)`
+join). The old and new versions are mutually incompatible on v2 traffic,
+in both directions: the old daemon reads an integer `ts` as float
+seconds and saturates `ts_us` (silent corruption, including joining
+everything onto one key), while the new daemon rejects the old package's
+float `ts` lines (loud: `bad_probe`/`bad_event` climb, checks fail open,
+events drop). Stopping the daemon first is what makes the window safe:
+with nothing listening, checks fail open and events drop counted, and no
+corrupt row can land. `deploy.sh` then installs the app and restarts the
+daemon in one run; do not start the new binary by hand ahead of it.
+
+```bash
+# 0. Prerequisites, as the deploy user: build both artifacts, and fill
+# /etc/leeside/leesided.env (LEESIDED_HASH_KEY = the app's
+# LEESIDE_HASH_KEY; GeoIP credentials; the route lists above).
+(cd leesided && cargo build --release)
+(cd leesided/ui && npm ci && npm run build)
+
+# 1. Stop the daemon.
+sudo systemctl stop leesided
+
+# 2. Back up the store and the binary. A clean shutdown checkpoints the
+# WAL, so the one sqlite file is the whole store.
+sudo cp /var/lib/leeside/leesided.sqlite /var/lib/leeside/leesided.sqlite.pre-v2
+sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
+
+# 3. Deploy (app first, then the new binary) and watch the migrations.
+sudo bash leeside-sample/deploy/deploy.sh
+journalctl -u leesided -f   # expect: migrated version=5 .. version=11
+
+# 4. Verify /health.
+curl -s 127.0.0.1:7390/health | python3 -m json.tool
+# schema_versions [1, 2]; features_version 2; ip_hashing true;
+# geoip true; tap counters zero (its unit is not started yet);
+# windside mode off with null versions.
+
+# 5. The package is live with the deploy. Confirm the new wire: no
+# bad_probe or bad_event climb on the next requests.
+
+# 6. Start the tap unit, then watch matched climb with traffic.
+sudo systemctl start leesided-tap
+
+# 7. One real request, checked in the store.
+curl -s -o /dev/null https://webapp.leeside.halowifi.com/
+sudo sqlite3 /var/lib/leeside/leesided.sqlite \
+  "SELECT ts_us, route, actor_id, cluster_key FROM turns ORDER BY ingest_seq DESC LIMIT 1;"
+# check.unjoined in /health stays 0: the probe joined its turn.
+```
+
+Rollback: stop leesided, copy the `.pre-v2` files back over the store
+and `/usr/local/bin/leesided`, start, re-check /health.
