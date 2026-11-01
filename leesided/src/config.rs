@@ -43,6 +43,13 @@ pub struct Config {
     pub llm_url: Option<String>,
     pub llm_key: Option<String>,
     pub llm_model: String,
+    /// Per-point model overrides (`LEESIDED_LLM_MODEL_<POINT>`), each
+    /// falling back to `llm_model`: classify and explain can move to a
+    /// non-reasoning model while label and draft keep Muse Spark.
+    pub llm_model_label: Option<String>,
+    pub llm_model_explain: Option<String>,
+    pub llm_model_classify: Option<String>,
+    pub llm_model_draft: Option<String>,
     /// `off`, `dry` or `live` (default `off`). Dry builds the full
     /// request and logs it with a null response; live sends.
     pub llm_mode: LlmMode,
@@ -131,6 +138,10 @@ impl Default for Config {
             llm_url: None,
             llm_key: None,
             llm_model: "meta-models/muse-spark-open-1026".to_string(),
+            llm_model_label: None,
+            llm_model_explain: None,
+            llm_model_classify: None,
+            llm_model_draft: None,
             llm_mode: LlmMode::Off,
             llm_daily_calls: 500,
             llm_daily_tokens: 500_000,
@@ -248,6 +259,18 @@ impl Config {
         if let Ok(v) = std::env::var("LEESIDED_LLM_MODEL") {
             if !v.is_empty() {
                 cfg.llm_model = v;
+            }
+        }
+        for (var, slot) in [
+            ("LEESIDED_LLM_MODEL_LABEL", &mut cfg.llm_model_label),
+            ("LEESIDED_LLM_MODEL_EXPLAIN", &mut cfg.llm_model_explain),
+            ("LEESIDED_LLM_MODEL_CLASSIFY", &mut cfg.llm_model_classify),
+            ("LEESIDED_LLM_MODEL_DRAFT", &mut cfg.llm_model_draft),
+        ] {
+            if let Ok(v) = std::env::var(var) {
+                if !v.is_empty() {
+                    *slot = Some(v);
+                }
             }
         }
         if let Ok(v) = std::env::var("LEESIDED_LLM_MODE") {

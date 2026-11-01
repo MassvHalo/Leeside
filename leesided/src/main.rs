@@ -14,6 +14,10 @@ fn main() {
         .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if words.iter().any(|w| *w == "--help" || *w == "-h") {
+        print_help(&words);
+        return;
+    }
     match words.as_slice() {
         [] | ["serve"] => run_serve(),
         ["rules", "schema"] => println!("{}", leesided::rules::schema::rule_schema_json()),
@@ -38,12 +42,30 @@ fn main() {
         ["llm", "show", rest @ ..] => run_llm_show(rest),
         ["llm", "send", rest @ ..] => run_llm_send(rest),
         _ => {
-            eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>]"
-            );
+            eprintln!("{FULL_USAGE}");
             std::process::exit(2);
         }
     }
+}
+
+const FULL_USAGE: &str = "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>]";
+
+/// Every subcommand answers `--help` (or `-h`) with its usage line.
+fn print_help(words: &[&str]) {
+    let line = match words {
+        ["serve", ..] => "usage: leesided serve (config from LEESIDED_* env; LEESIDED_DB, LEESIDED_API, LEESIDED_RULES_DIR)",
+        ["rules", ..] => "usage: leesided rules schema | rules validate <file> | rules export",
+        ["tap", ..] => "usage: leesided tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH]",
+        ["label-import", ..] => "usage: leesided label-import <manifest>",
+        ["export", ..] => "usage: leesided export --since <unix_s> --run-id <id> --out <csv>",
+        ["report", ..] => "usage: leesided report shadow --since <unix_s>",
+        ["review", ..] => "usage: leesided review [--top <n>]",
+        ["llm", "show", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id>",
+        ["llm", "send", ..] => "usage: leesided llm send --point label --subject <actor|cluster>:<id>",
+        ["llm", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>",
+        _ => FULL_USAGE,
+    };
+    println!("{line}");
 }
 
 /// The passive fingerprint tap (docs/tap.md): its own process, needs
@@ -108,8 +130,8 @@ fn run_serve() {
             eprintln!("leesided: {e}");
             std::process::exit(1);
         });
-        // Live probes the JSON mode once at start-up; dry sends
-        // nothing, so its mode stays unprobed until a live drain.
+        // Live probes the wire settings once at start-up; dry sends
+        // nothing, so its settings stay unprobed until a live drain.
         if let Some(exec) = engine.llm.exec.clone() {
             if exec.mode == leesided::config::LlmMode::Live {
                 let inner = engine.clone();
@@ -120,9 +142,14 @@ fn run_serve() {
                 .expect("probe thread")
                 .map_err(|e| e.to_string());
                 match probed {
-                    Ok(mode) => {
-                        tracing::info!(json_mode = mode.as_str(), "llm endpoint probed");
-                        *inner.llm.json_mode.write() = Some(mode);
+                    Ok(o) => {
+                        tracing::info!(
+                            json_mode = o.json_mode.as_str(),
+                            effort = o.effort,
+                            "llm endpoint probed"
+                        );
+                        *inner.llm.json_mode.write() = Some(o.json_mode);
+                        *inner.llm.effort_supported.write() = Some(o.effort);
                     }
                     Err(e) => tracing::warn!("llm probe failed ({e}); the worker retries"),
                 }
@@ -370,15 +397,43 @@ fn run_llm_send(args: &[&str]) {
         std::process::exit(2);
     };
     let exec = leesided::llm::Exec {
-        url,
-        key,
+        url: url.clone(),
+        key: key.clone(),
         model: cfg.llm_model.clone(),
+        model_overrides: leesided::llm::Exec::overrides_from_config(&cfg),
         mode: leesided::config::LlmMode::Live,
         daily_calls: cfg.llm_daily_calls,
         daily_tokens: cfg.llm_daily_tokens,
     };
+    // The worker's wire settings, so the send matches live: prompt
+    // mode needs no probe, but `reasoning_effort` does.
+    let effort = match leesided::llm::probe(&url, &key, &exec.model) {
+        Ok(o) => {
+            eprintln!(
+                "probe: json_mode={} effort={}",
+                o.json_mode.as_str(),
+                o.effort
+            );
+            if o.effort {
+                leesided::llm::effort_for(&point).ok()
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            eprintln!("probe failed ({e}); sending without reasoning_effort");
+            None
+        }
+    };
     let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
-    match leesided::llm::send_label(&cfg.db, &exec, &classes, &llm_thresholds(&cfg), &subject) {
+    match leesided::llm::send_label(
+        &cfg.db,
+        &exec,
+        &classes,
+        &llm_thresholds(&cfg),
+        &subject,
+        effort,
+    ) {
         Ok(out) => {
             for (i, raw) in out.raws.iter().enumerate() {
                 println!("--- raw response {} ---\n{raw}", i + 1);

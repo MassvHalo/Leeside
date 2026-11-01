@@ -23,11 +23,13 @@ use std::time::Duration;
 /// recorded with every call.
 pub const LABEL_PROMPT: &str = include_str!("../prompts/label.md");
 
-/// Per-point `max_tokens` (docs/llm.md section 4).
-pub const MAX_TOKENS_LABEL: u32 = 400;
-pub const MAX_TOKENS_EXPLAIN: u32 = 200;
-pub const MAX_TOKENS_CLASSIFY: u32 = 120;
-pub const MAX_TOKENS_DRAFT: u32 = 600;
+/// Per-point `max_tokens`, sized for a reasoning model: a trivial
+/// probe cost 1,997 reasoning tokens, so reasoning dominates every call
+/// and the content budget sits on top of it.
+pub const MAX_TOKENS_LABEL: u32 = 4000;
+pub const MAX_TOKENS_EXPLAIN: u32 = 2000;
+pub const MAX_TOKENS_CLASSIFY: u32 = 1500;
+pub const MAX_TOKENS_DRAFT: u32 = 4000;
 
 /// Timeout per call, and attempts per job (llm.md section 4).
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -117,8 +119,8 @@ pub enum LlmError {
     Shape(usize),
     #[error("validation: {0}")]
     Validate(String),
-    #[error("the completion carried no content")]
-    EmptyContent,
+    #[error("the completion stayed empty at double budget (finish_reason length)")]
+    LengthExhausted,
 }
 
 /// What a send runs with. No Debug: it holds the key.
@@ -127,12 +129,30 @@ pub struct Exec {
     pub url: String,
     pub key: String,
     pub model: String,
+    pub model_overrides: HashMap<String, String>,
     pub mode: LlmMode,
     pub daily_calls: u32,
     pub daily_tokens: u32,
 }
 
 impl Exec {
+    /// The per-point overrides, whatever the mode: `send` runs
+    /// regardless of mode but still honours them.
+    pub fn overrides_from_config(cfg: &crate::config::Config) -> HashMap<String, String> {
+        let mut model_overrides = HashMap::new();
+        for (point, slot) in [
+            ("label", &cfg.llm_model_label),
+            ("explain", &cfg.llm_model_explain),
+            ("classify", &cfg.llm_model_classify),
+            ("draft", &cfg.llm_model_draft),
+        ] {
+            if let Some(m) = slot {
+                model_overrides.insert(point.to_string(), m.clone());
+            }
+        }
+        model_overrides
+    }
+
     /// Some only when the mode is not off and URL and key are set.
     pub fn from_config(cfg: &crate::config::Config) -> Option<Exec> {
         if cfg.llm_mode == LlmMode::Off {
@@ -145,17 +165,28 @@ impl Exec {
             url: url.clone(),
             key: key.clone(),
             model: cfg.llm_model.clone(),
+            model_overrides: Self::overrides_from_config(cfg),
             mode: cfg.llm_mode,
             daily_calls: cfg.llm_daily_calls,
             daily_tokens: cfg.llm_daily_tokens,
         })
     }
+
+    /// The point's model: its override when set, else the shared model.
+    pub fn model_for(&self, point: &str) -> &str {
+        self.model_overrides
+            .get(point)
+            .map(String::as_str)
+            .unwrap_or(&self.model)
+    }
 }
 
-/// The daemon's LLM state: the exec config plus the probed JSON mode.
+/// The daemon's LLM state: the exec config plus the probed JSON
+/// mode and whether the endpoint honours `reasoning_effort`.
 pub struct State {
     pub exec: Option<Exec>,
     pub json_mode: parking_lot::RwLock<Option<JsonMode>>,
+    pub effort_supported: parking_lot::RwLock<Option<bool>>,
 }
 
 impl State {
@@ -163,6 +194,7 @@ impl State {
         State {
             exec: Exec::from_config(cfg),
             json_mode: parking_lot::RwLock::new(None),
+            effort_supported: parking_lot::RwLock::new(None),
         }
     }
 
@@ -190,6 +222,18 @@ pub fn max_tokens(point: &str) -> Result<u32, LlmError> {
         "explain" => Ok(MAX_TOKENS_EXPLAIN),
         "classify" => Ok(MAX_TOKENS_CLASSIFY),
         "draft" => Ok(MAX_TOKENS_DRAFT),
+        p => Err(LlmError::Point(p.to_string())),
+    }
+}
+
+/// Per-point `reasoning_effort`, sent only when the endpoint honours
+/// the field (start-up probe): cheap judgments stay low, the drafts
+/// that become rules get the full budget.
+pub fn effort_for(point: &str) -> Result<&'static str, LlmError> {
+    match point {
+        "label" => Ok("medium"),
+        "draft" => Ok("high"),
+        "explain" | "classify" => Ok("low"),
         p => Err(LlmError::Point(p.to_string())),
     }
 }
@@ -453,12 +497,16 @@ pub fn build_label_envelope(
 
 /// One system message from the registry, one user message that is the
 /// envelope as a JSON string, and (in schema mode) a `response_format`
-/// (docs/llm.md section 8.5). `temperature: 0` always.
+/// (docs/llm.md section 8.5). `temperature: 0` always. `effort` rides
+/// along only when the endpoint honours it; `budget` overrides the
+/// point's `max_tokens` for the length retry's double budget.
 pub fn build_request(
     model: &str,
     point: &str,
     envelope: &serde_json::Value,
     json_mode: JsonMode,
+    effort: Option<&str>,
+    budget: Option<u32>,
 ) -> Result<serde_json::Value, LlmError> {
     let (system, schema) = match point {
         "label" => (LABEL_PROMPT, LABEL_SCHEMA_JSON),
@@ -467,12 +515,15 @@ pub fn build_request(
     let mut body = serde_json::json!({
         "model": model,
         "temperature": 0,
-        "max_tokens": max_tokens(point)?,
+        "max_tokens": budget.unwrap_or(max_tokens(point)?),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": envelope.to_string()},
         ],
     });
+    if let Some(e) = effort {
+        body["reasoning_effort"] = e.into();
+    }
     if json_mode == JsonMode::Schema {
         body["response_format"] = serde_json::json!({
             "type": "json_schema",
@@ -684,37 +735,62 @@ pub fn post_chat(url: &str, key: &str, body: &serde_json::Value) -> Result<ChatR
 }
 
 pub struct Completion {
+    /// Empty when the model spent the budget reasoning.
     pub content: String,
+    pub finish_reason: Option<String>,
+    /// The first 2 KB of `reasoning_content`, when the model thinks aloud.
+    pub reasoning_excerpt: Option<String>,
     pub prompt_tokens: Option<i64>,
     pub completion_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
 }
 
-/// 200 parses `choices[0].message.content` plus usage; anything else is
-/// an error carrying the status and a snippet.
-pub fn parse_completion(status: u16, body: &str) -> Result<Completion, LlmError> {
-    if status != 200 {
-        return Err(LlmError::Http(format!(
-            "status {status}: {}",
-            snippet(body)
-        )));
-    }
+/// A 200 parses `choices[0]` plus usage. Content may be empty (a
+/// reasoning model that hit `length`); that is data, not an error —
+/// the executor decides the retry. Error strings feed the validation
+/// retry, same as a schema failure.
+pub fn parse_completion_200(body: &str) -> Result<Completion, String> {
     let v: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| LlmError::Http(format!("status 200 with an unparseable body: {e}")))?;
-    let content = v
-        .pointer("/choices/0/message/content")
+        .map_err(|e| format!("status 200 with an unparseable body: {e}"))?;
+    let message = v
+        .pointer("/choices/0/message")
+        .ok_or_else(|| "status 200 without choices[0].message".to_string())?;
+    let content = message
+        .get("content")
         .and_then(serde_json::Value::as_str)
-        .ok_or(LlmError::EmptyContent)?
+        .unwrap_or_default()
         .to_string();
     let usage = v.get("usage");
     Ok(Completion {
         content,
+        finish_reason: v
+            .pointer("/choices/0/finish_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        reasoning_excerpt: message
+            .get("reasoning_content")
+            .and_then(serde_json::Value::as_str)
+            .map(head_2k),
         prompt_tokens: usage
             .and_then(|u| u.get("prompt_tokens"))
             .and_then(serde_json::Value::as_i64),
         completion_tokens: usage
             .and_then(|u| u.get("completion_tokens"))
             .and_then(serde_json::Value::as_i64),
+        reasoning_tokens: usage
+            .and_then(|u| u.get("completion_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(serde_json::Value::as_i64),
     })
+}
+
+/// The first 2 KB of a string, floored to a character boundary.
+fn head_2k(s: &str) -> String {
+    let mut end = s.len().min(2048);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 fn snippet(body: &str) -> String {
@@ -728,10 +804,21 @@ fn retryable(status: u16) -> bool {
     status == 429 || status >= 500
 }
 
-/// The start-up probe (llm.md section 4): one tiny request with a
-/// json_schema `response_format`. 200 means schema mode, 400 means
-/// prompt mode; anything else leaves the mode unprobed.
-pub fn probe(url: &str, key: &str, model: &str) -> Result<JsonMode, LlmError> {
+pub struct ProbeOutcome {
+    pub json_mode: JsonMode,
+    /// Whether the endpoint honours `reasoning_effort`. Fails closed:
+    /// anything but a 200 leaves the field off the wire.
+    pub effort: bool,
+}
+
+/// The start-up probe: the JSON-mode probe of llm.md section 4 (one
+/// tiny request with a json_schema `response_format`: 200 means schema
+/// mode, 400 means prompt mode), plus one minimal request carrying
+/// `reasoning_effort` to learn whether the endpoint honours the field.
+/// Anything but a decisive JSON-mode answer leaves the mode unprobed;
+/// the effort answer fails closed. Both probes cost reasoning tokens
+/// on a reasoning model even when trivial.
+pub fn probe(url: &str, key: &str, model: &str) -> Result<ProbeOutcome, LlmError> {
     let body = serde_json::json!({
         "model": model,
         "temperature": 0,
@@ -746,14 +833,34 @@ pub fn probe(url: &str, key: &str, model: &str) -> Result<JsonMode, LlmError> {
         },
     });
     let r = post_chat(url, key, &body)?;
-    match r.status {
-        200 => Ok(JsonMode::Schema),
-        400 => Ok(JsonMode::Prompt),
-        s => Err(LlmError::Http(format!(
-            "probe: status {s}: {}",
-            snippet(&r.body)
-        ))),
-    }
+    let json_mode = match r.status {
+        200 => JsonMode::Schema,
+        400 => JsonMode::Prompt,
+        s => {
+            return Err(LlmError::Http(format!(
+                "probe: status {s}: {}",
+                snippet(&r.body)
+            )));
+        }
+    };
+    let effort_body = serde_json::json!({
+        "model": model,
+        "temperature": 0,
+        "max_tokens": 5,
+        "reasoning_effort": "low",
+        "messages": [
+            {"role": "system", "content": "Reply OK."},
+            {"role": "user", "content": "OK"},
+        ],
+    });
+    let effort = match post_chat(url, key, &effort_body) {
+        Ok(r) => r.status == 200,
+        Err(e) => {
+            tracing::warn!("reasoning_effort probe failed ({e}); leaving the field off");
+            false
+        }
+    };
+    Ok(ProbeOutcome { json_mode, effort })
 }
 
 // ---------- Queue ----------
@@ -793,6 +900,44 @@ pub fn enqueue_label(
     Ok(n == 1)
 }
 
+/// Per-point daily totals for `/health`: (calls, tokens) from the
+/// call log. Tokens are prompt + completion, and completion includes
+/// reasoning, so the budgets already count what reasoning costs.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PointTotals {
+    pub label: (i64, i64),
+    pub explain: (i64, i64),
+    pub classify: (i64, i64),
+    pub draft: (i64, i64),
+}
+
+pub fn llm_today(conn: &Connection, now: i64) -> Result<PointTotals, rusqlite::Error> {
+    let day_start = (now / 86_400) * 86_400;
+    let mut stmt = conn.prepare(
+        "SELECT point, count(*), \
+         coalesce(sum(coalesce(prompt_tokens, 0) + coalesce(completion_tokens, 0)), 0) \
+         FROM llm_calls WHERE created_at >= ?1 GROUP BY point",
+    )?;
+    let mut totals = PointTotals::default();
+    for row in stmt.query_map(params![day_start], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })? {
+        let (point, calls, tokens) = row?;
+        match point.as_str() {
+            "label" => totals.label = (calls, tokens),
+            "explain" => totals.explain = (calls, tokens),
+            "classify" => totals.classify = (calls, tokens),
+            "draft" => totals.draft = (calls, tokens),
+            _ => {}
+        }
+    }
+    Ok(totals)
+}
+
 /// The same budget predicates as the enqueue guard, split out so the
 /// worker and `send` can name which one ran out.
 pub fn budget_check(
@@ -828,8 +973,15 @@ pub fn budget_check(
 pub struct DrainCtx {
     pub exec: Exec,
     pub json_mode: Option<JsonMode>,
+    pub effort_supported: Option<bool>,
     pub classes: Ja4Classes,
     pub thresholds: HashMap<String, f64>,
+}
+
+/// The probed wire settings a drain settled on, if any.
+pub struct DrainMode {
+    pub json: Option<JsonMode>,
+    pub effort: Option<bool>,
 }
 
 pub enum DrainOutcome {
@@ -898,13 +1050,17 @@ fn retry_or_fail(
     }
 }
 
-struct Attempt {
+/// One `llm_calls` row: the request plus whatever came back.
+pub(crate) struct Attempt {
     request: String,
     response: Option<String>,
     parsed: Option<String>,
     latency_ms: Option<i64>,
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
+    finish_reason: Option<String>,
+    reasoning_tokens: Option<i64>,
+    reasoning_excerpt: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -920,8 +1076,9 @@ fn write_call(
 ) -> Result<i64, LlmError> {
     conn.execute(
         "INSERT INTO llm_calls (job_id, point, model, prompt_hash, json_mode, input_summary, \
-         request, response, parsed, latency_ms, prompt_tokens, completion_tokens, created_at) \
-         VALUES (?1, 'label', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         request, response, parsed, latency_ms, prompt_tokens, completion_tokens, \
+         finish_reason, reasoning_tokens, reasoning_excerpt, created_at) \
+         VALUES (?1, 'label', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             job,
             model,
@@ -934,10 +1091,42 @@ fn write_call(
             attempt.latency_ms,
             attempt.prompt_tokens,
             attempt.completion_tokens,
+            attempt.finish_reason,
+            attempt.reasoning_tokens,
+            attempt.reasoning_excerpt,
             now
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Write every exchange of an execution, in order; returns the call
+/// ids, so the proposal links to its row.
+#[allow(clippy::too_many_arguments)]
+fn write_exchanges(
+    conn: &Connection,
+    job: Option<i64>,
+    model: &str,
+    prompt_hash: &str,
+    json_mode: JsonMode,
+    summary: &str,
+    exchanges: &[Exchange],
+    now: i64,
+) -> Result<Vec<i64>, LlmError> {
+    let mut ids = Vec::with_capacity(exchanges.len());
+    for e in exchanges {
+        ids.push(write_call(
+            conn,
+            job,
+            model,
+            prompt_hash,
+            json_mode,
+            summary,
+            &e.attempt,
+            now,
+        )?);
+    }
+    Ok(ids)
 }
 
 fn proposal_from_content(content: &str) -> Result<LabelProposal, String> {
@@ -986,9 +1175,197 @@ fn input_summary(subject: &Subject, meta: &LabelMeta) -> String {
     .to_string()
 }
 
+// ---------- Executor ----------
+
+/// One physical POST and what came back: a response when one was
+/// received, a completion when the response was a usable 200, an
+/// error string when the transport failed.
+pub struct Exchange {
+    pub(crate) attempt: Attempt,
+}
+
+pub enum ExecutionOutcome {
+    Proposed(LabelProposal),
+    /// Validation failed with no retries left; carries the first error.
+    Invalid {
+        first_error: String,
+    },
+    /// `length` with empty content at double budget: dropped and logged.
+    LengthExhausted,
+    /// A non-200 needs the caller's policy (requeue or fail).
+    Http {
+        status: u16,
+    },
+    /// A transport failure needs the caller's policy.
+    Transport {
+        error: String,
+    },
+}
+
+pub struct Execution {
+    pub exchanges: Vec<Exchange>,
+    pub outcome: ExecutionOutcome,
+}
+
+fn exchange_for(
+    request: &str,
+    res: &ChatResponse,
+    completion: Option<&Completion>,
+    parsed: Option<String>,
+) -> Exchange {
+    Exchange {
+        attempt: Attempt {
+            request: request.to_string(),
+            response: Some(res.body.clone()),
+            parsed,
+            latency_ms: Some(res.latency_ms),
+            prompt_tokens: completion.and_then(|c| c.prompt_tokens),
+            completion_tokens: completion.and_then(|c| c.completion_tokens),
+            finish_reason: completion.and_then(|c| c.finish_reason.clone()),
+            reasoning_tokens: completion.and_then(|c| c.reasoning_tokens),
+            reasoning_excerpt: completion.and_then(|c| c.reasoning_excerpt.clone()),
+        },
+    }
+}
+
+fn proposal_json(p: &LabelProposal) -> String {
+    serde_json::json!({
+        "label": p.label, "confidence": p.confidence,
+        "reason": p.reason, "signals": p.signals,
+    })
+    .to_string()
+}
+
+/// Run a point-1 call to its end: at most three physical POSTs. A
+/// `length` with empty content is retried once at double the budget;
+/// an invalid proposal is retried once with the error appended. Every
+/// exchange comes back in the transcript; the caller logs all of them
+/// and applies its own policy to HTTP and transport failures.
+pub fn execute_label_call(
+    url: &str,
+    key: &str,
+    model: &str,
+    envelope: &serde_json::Value,
+    json_mode: JsonMode,
+    effort: Option<&str>,
+) -> Result<Execution, LlmError> {
+    let base = max_tokens("label")?;
+    let mut budget = base;
+    let mut length_used = false;
+    let mut validation_used = false;
+    let mut first_error: Option<String> = None;
+    let mut suffix: Option<String> = None;
+    let mut exchanges = Vec::new();
+    loop {
+        let mut request = build_request(model, "label", envelope, json_mode, effort, Some(budget))?;
+        if let Some(s) = &suffix {
+            let user = request
+                .pointer("/messages/1/content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            request["messages"][1]["content"] = format!(
+                "{user}\n\nPrevious response failed validation: {s}. \
+                 Answer with one JSON object and nothing else."
+            )
+            .into();
+        }
+        let request_text = request.to_string();
+        let res = match post_chat(url, key, &request) {
+            Ok(r) => r,
+            Err(LlmError::Http(e)) => {
+                exchanges.push(Exchange {
+                    attempt: Attempt {
+                        request: request_text,
+                        response: None,
+                        parsed: None,
+                        latency_ms: None,
+                        prompt_tokens: None,
+                        completion_tokens: None,
+                        finish_reason: None,
+                        reasoning_tokens: None,
+                        reasoning_excerpt: None,
+                    },
+                });
+                return Ok(Execution {
+                    exchanges,
+                    outcome: ExecutionOutcome::Transport { error: e },
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        if res.status != 200 {
+            exchanges.push(exchange_for(&request_text, &res, None, None));
+            return Ok(Execution {
+                exchanges,
+                outcome: ExecutionOutcome::Http { status: res.status },
+            });
+        }
+        let completion = match parse_completion_200(&res.body) {
+            Ok(c) => c,
+            Err(e) => {
+                exchanges.push(exchange_for(&request_text, &res, None, None));
+                first_error.get_or_insert(e.clone());
+                if !validation_used {
+                    validation_used = true;
+                    suffix = Some(e);
+                    continue;
+                }
+                return Ok(Execution {
+                    exchanges,
+                    outcome: ExecutionOutcome::Invalid {
+                        first_error: first_error.unwrap_or(e),
+                    },
+                });
+            }
+        };
+        if completion.content.is_empty() && completion.finish_reason.as_deref() == Some("length") {
+            exchanges.push(exchange_for(&request_text, &res, Some(&completion), None));
+            if !length_used {
+                length_used = true;
+                budget = budget.saturating_mul(2);
+                continue;
+            }
+            return Ok(Execution {
+                exchanges,
+                outcome: ExecutionOutcome::LengthExhausted,
+            });
+        }
+        match proposal_from_content(&completion.content) {
+            Ok(p) => {
+                exchanges.push(exchange_for(
+                    &request_text,
+                    &res,
+                    Some(&completion),
+                    Some(proposal_json(&p)),
+                ));
+                return Ok(Execution {
+                    exchanges,
+                    outcome: ExecutionOutcome::Proposed(p),
+                });
+            }
+            Err(e) => {
+                exchanges.push(exchange_for(&request_text, &res, Some(&completion), None));
+                first_error.get_or_insert(e.clone());
+                if !validation_used {
+                    validation_used = true;
+                    suffix = Some(e);
+                    continue;
+                }
+                return Ok(Execution {
+                    exchanges,
+                    outcome: ExecutionOutcome::Invalid {
+                        first_error: first_error.unwrap_or(e),
+                    },
+                });
+            }
+        }
+    }
+}
+
 /// Claim the oldest due job and run it. Returns the outcome plus the
-/// JSON mode to keep (a live drain probes when unprobed).
-pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<JsonMode>), LlmError> {
+/// probed wire settings to keep (a live drain probes when unprobed).
+pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode), LlmError> {
     let conn = open_db(db)?;
     let now = now_s();
     let job: Option<(i64, String, String, String, i64)> = conn
@@ -1005,12 +1382,16 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<Jso
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             e => Err(LlmError::Sqlite(e)),
         })?;
+    let mode = || DrainMode {
+        json: ctx.json_mode,
+        effort: ctx.effort_supported,
+    };
     let Some((id, point, scope, subject_id, attempts)) = job else {
-        return Ok((DrainOutcome::Empty, ctx.json_mode));
+        return Ok((DrainOutcome::Empty, mode()));
     };
     if point != "label" {
         let out = fail(&conn, id, now, &format!("point `{point}` is not built yet"))?;
-        return Ok((out, ctx.json_mode));
+        return Ok((out, mode()));
     }
     let subject = Subject {
         scope: scope.clone(),
@@ -1027,7 +1408,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<Jso
         Ok(b) => b,
         Err(e) => {
             let out = fail(&conn, id, now, &e.to_string())?;
-            return Ok((out, ctx.json_mode));
+            return Ok((out, mode()));
         }
     };
     if let Err(e) = budget_check(
@@ -1045,16 +1426,19 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<Jso
             ((now / 86_400) + 1) * 86_400,
             &e.to_string(),
         )?;
-        return Ok((out, ctx.json_mode));
+        return Ok((out, mode()));
     }
     let hash = prompt_hash("label")?;
     let summary = input_summary(&subject, &meta);
     if ctx.exec.mode == LlmMode::Dry {
-        let request = build_request(&ctx.exec.model, "label", &envelope, JsonMode::Prompt)?;
+        // Prompt mode, no effort: dry never probes (a probe is a
+        // request), so the logged request is the unprobed shape.
+        let model = ctx.exec.model_for("label");
+        let request = build_request(model, "label", &envelope, JsonMode::Prompt, None, None)?;
         write_call(
             &conn,
             Some(id),
-            &ctx.exec.model,
+            model,
             &hash,
             JsonMode::Prompt,
             &summary,
@@ -1065,6 +1449,9 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<Jso
                 latency_ms: None,
                 prompt_tokens: None,
                 completion_tokens: None,
+                finish_reason: None,
+                reasoning_tokens: None,
+                reasoning_excerpt: None,
             },
             now,
         )?;
@@ -1072,298 +1459,105 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, Option<Jso
             "UPDATE llm_jobs SET status = 'done', updated_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
-        return Ok((DrainOutcome::Done { job: id }, ctx.json_mode));
+        return Ok((DrainOutcome::Done { job: id }, mode()));
     }
-    let json_mode = match ctx.json_mode {
-        Some(m) => m,
-        None => match probe(&ctx.exec.url, &ctx.exec.key, &ctx.exec.model) {
-            Ok(m) => m,
+    let (json_mode, effort_supported) = match (ctx.json_mode, ctx.effort_supported) {
+        (Some(m), Some(e)) => (m, e),
+        _ => match probe(&ctx.exec.url, &ctx.exec.key, &ctx.exec.model) {
+            Ok(o) => (o.json_mode, o.effort),
             Err(e) => {
                 let out = retry_or_fail(&conn, id, now, attempts, &format!("probe: {e}"))?;
-                return Ok((out, None));
+                return Ok((
+                    out,
+                    DrainMode {
+                        json: ctx.json_mode,
+                        effort: ctx.effort_supported,
+                    },
+                ));
             }
         },
     };
-    let request = build_request(&ctx.exec.model, "label", &envelope, json_mode)?;
-    // Attempt 1.
-    let res = match post_chat(&ctx.exec.url, &ctx.exec.key, &request) {
-        Ok(r) => r,
-        Err(e) => {
-            let out = retry_or_fail(&conn, id, now, attempts, &e.to_string())?;
-            return Ok((out, Some(json_mode)));
-        }
+    let settled = DrainMode {
+        json: Some(json_mode),
+        effort: Some(effort_supported),
     };
-    if res.status != 200 {
-        write_call(
-            &conn,
-            Some(id),
-            &ctx.exec.model,
-            &hash,
-            json_mode,
-            &summary,
-            &Attempt {
-                request: request.to_string(),
-                response: Some(res.body.clone()),
-                parsed: None,
-                latency_ms: Some(res.latency_ms),
-                prompt_tokens: None,
-                completion_tokens: None,
-            },
-            now,
-        )?;
-        if retryable(res.status) {
-            let out = retry_or_fail(&conn, id, now, attempts, &format!("status {}", res.status))?;
-            return Ok((out, Some(json_mode)));
-        }
-        let out = fail(
-            &conn,
-            id,
-            now,
-            &format!("status {}: {}", res.status, snippet(&res.body)),
-        )?;
-        return Ok((out, Some(json_mode)));
-    }
-    let completion = match parse_completion(res.status, &res.body) {
-        Ok(c) => c,
-        Err(e) => {
-            // A 200 that is not a completion is content failure, not
-            // transport: it goes down the validation path, not the
-            // retry path.
-            let out = fail_validation(
-                &conn,
-                id,
-                now,
-                attempts,
-                &ctx.exec.model,
-                &hash,
-                json_mode,
-                &summary,
-                &request.to_string(),
-                &res,
-                None,
-                &e.to_string(),
-                &subject,
-                &meta,
-                &ctx.exec,
-            )?;
-            return Ok((out, Some(json_mode)));
-        }
-    };
-    match proposal_from_content(&completion.content) {
-        Ok(p) => {
-            let parsed = serde_json::json!({
-                "label": p.label, "confidence": p.confidence,
-                "reason": p.reason, "signals": p.signals,
-            })
-            .to_string();
-            let call_id = write_call(
-                &conn,
-                Some(id),
-                &ctx.exec.model,
-                &hash,
-                json_mode,
-                &summary,
-                &Attempt {
-                    request: request.to_string(),
-                    response: Some(res.body.clone()),
-                    parsed: Some(parsed),
-                    latency_ms: Some(res.latency_ms),
-                    prompt_tokens: completion.prompt_tokens,
-                    completion_tokens: completion.completion_tokens,
-                },
-                now,
-            )?;
-            write_proposal(&conn, &scope, &subject_id, &meta, &p, call_id, now)?;
-            conn.execute(
-                "UPDATE llm_jobs SET status = 'done', updated_at = ?1 WHERE id = ?2",
-                params![now, id],
-            )?;
-            Ok((DrainOutcome::Done { job: id }, Some(json_mode)))
-        }
-        Err(e1) => {
-            let out = fail_validation(
-                &conn,
-                id,
-                now,
-                attempts,
-                &ctx.exec.model,
-                &hash,
-                json_mode,
-                &summary,
-                &request.to_string(),
-                &res,
-                Some(&completion),
-                &e1,
-                &subject,
-                &meta,
-                &ctx.exec,
-            )?;
-            Ok((out, Some(json_mode)))
-        }
-    }
-}
-
-/// Attempt 2 with the validation error appended, then drop and log.
-/// Both attempts land in `llm_calls`.
-#[allow(clippy::too_many_arguments)]
-fn fail_validation(
-    conn: &Connection,
-    id: i64,
-    now: i64,
-    attempts: i64,
-    model: &str,
-    hash: &str,
-    json_mode: JsonMode,
-    summary: &str,
-    request: &str,
-    res: &ChatResponse,
-    completion: Option<&Completion>,
-    first_error: &str,
-    subject: &Subject,
-    meta: &LabelMeta,
-    exec: &Exec,
-) -> Result<DrainOutcome, LlmError> {
-    let mut req2: serde_json::Value = serde_json::from_str(request)?;
-    let user = req2
-        .pointer("/messages/1/content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    req2["messages"][1]["content"] = format!(
-        "{user}\n\nPrevious response failed validation: {first_error}. \
-         Answer with one JSON object and nothing else."
-    )
-    .into();
-    let res2 = match post_chat(&exec.url, &exec.key, &req2) {
-        Ok(r) => r,
-        Err(e) => {
-            write_call(
-                conn,
-                Some(id),
-                model,
-                hash,
-                json_mode,
-                summary,
-                &first_attempt(request, res, completion),
-                now,
-            )?;
-            return retry_or_fail(conn, id, now, attempts, &e.to_string());
-        }
-    };
-    write_call(
-        conn,
+    let model = ctx.exec.model_for("label");
+    let effort = effort_supported.then(|| effort_for("label")).transpose()?;
+    let execution = execute_label_call(
+        &ctx.exec.url,
+        &ctx.exec.key,
+        model,
+        &envelope,
+        json_mode,
+        effort,
+    )?;
+    let call_ids = write_exchanges(
+        &conn,
         Some(id),
         model,
-        hash,
+        &hash,
         json_mode,
-        summary,
-        &first_attempt(request, res, completion),
+        &summary,
+        &execution.exchanges,
         now,
     )?;
-    if res2.status != 200 {
-        write_call(
-            conn,
-            Some(id),
-            model,
-            hash,
-            json_mode,
-            summary,
-            &Attempt {
-                request: req2.to_string(),
-                response: Some(res2.body.clone()),
-                parsed: None,
-                latency_ms: Some(res2.latency_ms),
-                prompt_tokens: None,
-                completion_tokens: None,
-            },
-            now,
-        )?;
-        if retryable(res2.status) {
-            return retry_or_fail(
-                conn,
+    let done = |conn: &Connection| {
+        conn.execute(
+            "UPDATE llm_jobs SET status = 'done', updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+    };
+    match execution.outcome {
+        ExecutionOutcome::Proposed(p) => {
+            let call_id = *call_ids.last().expect("a proposal logged its call");
+            write_proposal(&conn, &scope, &subject_id, &meta, &p, call_id, now)?;
+            done(&conn)?;
+            Ok((DrainOutcome::Done { job: id }, settled))
+        }
+        ExecutionOutcome::Invalid { first_error } => {
+            let out = fail(
+                &conn,
                 id,
                 now,
-                attempts,
-                &format!("retry: status {}", res2.status),
-            );
+                &format!(
+                    "proposal invalid after {} attempts, first: {first_error}",
+                    execution.exchanges.len()
+                ),
+            )?;
+            Ok((out, settled))
         }
-        return fail(
-            conn,
-            id,
-            now,
-            &format!("retry: status {}: {}", res2.status, snippet(&res2.body)),
-        );
-    }
-    let recovered = parse_completion(res2.status, &res2.body)
-        .ok()
-        .and_then(|c| proposal_from_content(&c.content).ok().map(|p| (c, p)));
-    match recovered {
-        Some((c, p)) => {
-            let parsed = serde_json::json!({
-                "label": p.label, "confidence": p.confidence,
-                "reason": p.reason, "signals": p.signals,
-            })
-            .to_string();
-            let call_id = write_call(
-                conn,
-                Some(id),
-                model,
-                hash,
-                json_mode,
-                summary,
-                &Attempt {
-                    request: req2.to_string(),
-                    response: Some(res2.body.clone()),
-                    parsed: Some(parsed),
-                    latency_ms: Some(res2.latency_ms),
-                    prompt_tokens: c.prompt_tokens,
-                    completion_tokens: c.completion_tokens,
-                },
-                now,
-            )?;
-            write_proposal(conn, &subject.scope, &subject.id, meta, &p, call_id, now)?;
-            conn.execute(
-                "UPDATE llm_jobs SET status = 'done', updated_at = ?1 WHERE id = ?2",
-                params![now, id],
-            )?;
-            Ok(DrainOutcome::Done { job: id })
-        }
-        None => {
-            write_call(
-                conn,
-                Some(id),
-                model,
-                hash,
-                json_mode,
-                summary,
-                &Attempt {
-                    request: req2.to_string(),
-                    response: Some(res2.body.clone()),
-                    parsed: None,
-                    latency_ms: Some(res2.latency_ms),
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                },
-                now,
-            )?;
-            fail(
-                conn,
+        ExecutionOutcome::LengthExhausted => {
+            let out = fail(
+                &conn,
                 id,
                 now,
-                &format!("validation failed twice, first: {first_error}"),
-            )
+                "finish_reason length at double budget; dropped",
+            )?;
+            Ok((out, settled))
         }
-    }
-}
-
-fn first_attempt(request: &str, res: &ChatResponse, completion: Option<&Completion>) -> Attempt {
-    Attempt {
-        request: request.to_string(),
-        response: Some(res.body.clone()),
-        parsed: None,
-        latency_ms: Some(res.latency_ms),
-        prompt_tokens: completion.and_then(|c| c.prompt_tokens),
-        completion_tokens: completion.and_then(|c| c.completion_tokens),
+        ExecutionOutcome::Http { status } => {
+            let body = execution
+                .exchanges
+                .last()
+                .and_then(|e| e.attempt.response.as_deref())
+                .unwrap_or_default();
+            if retryable(status) {
+                let out = retry_or_fail(&conn, id, now, attempts, &format!("status {status}"))?;
+                Ok((out, settled))
+            } else {
+                let out = fail(
+                    &conn,
+                    id,
+                    now,
+                    &format!("status {status}: {}", snippet(body)),
+                )?;
+                Ok((out, settled))
+            }
+        }
+        ExecutionOutcome::Transport { error } => {
+            let out = retry_or_fail(&conn, id, now, attempts, &error)?;
+            Ok((out, settled))
+        }
     }
 }
 
@@ -1381,7 +1575,9 @@ pub fn show_label(
     let conn = open_db(db)?;
     let now = now_s();
     let (envelope, _) = build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
-    build_request(model, "label", &envelope, JsonMode::Prompt)
+    // Prompt mode, no effort: show never probes, so the printed
+    // request is the unprobed shape.
+    build_request(model, "label", &envelope, JsonMode::Prompt, None, None)
 }
 
 pub struct SendOutput {
@@ -1392,15 +1588,20 @@ pub struct SendOutput {
 }
 
 /// One live call for one subject, regardless of mode. Budgets still
-/// apply, and both attempts land in `llm_calls` with a null job.
-/// Prompt mode, no probe: it works on every endpoint, and send is one
-/// logical call.
+/// apply, and every exchange lands in `llm_calls` with a null job.
+/// Prompt mode, no JSON-mode probe: it works on every endpoint, and
+/// send is one logical call.
+///
+/// `effort` carries the point's `reasoning_effort` when the caller
+/// knows the endpoint honours it; the CLI probes first, so `send`
+/// matches what the worker would put on the wire.
 pub fn send_label(
     db: &Path,
     exec: &Exec,
     classes: &Ja4Classes,
     thresholds: &HashMap<String, f64>,
     subject: &Subject,
+    effort: Option<&str>,
 ) -> Result<SendOutput, LlmError> {
     if exec.url.is_empty() || exec.key.is_empty() {
         return Err(LlmError::Unconfigured);
@@ -1410,187 +1611,59 @@ pub fn send_label(
     budget_check(&conn, "label", now, exec.daily_calls, exec.daily_tokens)?;
     let (envelope, meta) =
         build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
-    let request = build_request(&exec.model, "label", &envelope, JsonMode::Prompt)?;
+    let model = exec.model_for("label");
+    let execution = execute_label_call(
+        &exec.url,
+        &exec.key,
+        model,
+        &envelope,
+        JsonMode::Prompt,
+        effort,
+    )?;
     let hash = prompt_hash("label")?;
     let summary = input_summary(subject, &meta);
-    let res = post_chat(&exec.url, &exec.key, &request)?;
-    if res.status != 200 {
-        write_call(
-            &conn,
-            None,
-            &exec.model,
-            &hash,
-            JsonMode::Prompt,
-            &summary,
-            &Attempt {
-                request: request.to_string(),
-                response: Some(res.body.clone()),
-                parsed: None,
-                latency_ms: Some(res.latency_ms),
-                prompt_tokens: None,
-                completion_tokens: None,
-            },
-            now,
-        )?;
-        return Err(LlmError::Http(format!(
-            "status {}: {}",
-            res.status,
-            snippet(&res.body)
-        )));
-    }
-    let completion = parse_completion(res.status, &res.body)
-        .map_err(|e| LlmError::Validate(format!("the completion is not usable: {e}")))?;
-    match proposal_from_content(&completion.content) {
-        Ok(p) => {
-            let parsed = serde_json::json!({
-                "label": p.label, "confidence": p.confidence,
-                "reason": p.reason, "signals": p.signals,
-            })
-            .to_string();
-            let call_id = write_call(
-                &conn,
-                None,
-                &exec.model,
-                &hash,
-                JsonMode::Prompt,
-                &summary,
-                &Attempt {
-                    request: request.to_string(),
-                    response: Some(res.body.clone()),
-                    parsed: Some(parsed),
-                    latency_ms: Some(res.latency_ms),
-                    prompt_tokens: completion.prompt_tokens,
-                    completion_tokens: completion.completion_tokens,
-                },
-                now,
-            )?;
+    let call_ids = write_exchanges(
+        &conn,
+        None,
+        model,
+        &hash,
+        JsonMode::Prompt,
+        &summary,
+        &execution.exchanges,
+        now,
+    )?;
+    let raws: Vec<String> = execution
+        .exchanges
+        .iter()
+        .filter_map(|e| e.attempt.response.clone())
+        .collect();
+    match execution.outcome {
+        ExecutionOutcome::Proposed(p) => {
+            let call_id = *call_ids.last().expect("a proposal logged its call");
             write_proposal(&conn, &subject.scope, &subject.id, &meta, &p, call_id, now)?;
             Ok(SendOutput {
-                raws: vec![res.body],
+                raws,
                 parsed: Some(p),
                 call_id: Some(call_id),
             })
         }
-        Err(e1) => {
-            let mut req2 = request.clone();
-            let user = req2
-                .pointer("/messages/1/content")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            req2["messages"][1]["content"] = format!(
-                "{user}\n\nPrevious response failed validation: {e1}. \
-                 Answer with one JSON object and nothing else."
-            )
-            .into();
-            let res2 = match post_chat(&exec.url, &exec.key, &req2) {
-                Ok(r) => r,
-                Err(e) => {
-                    write_call(
-                        &conn,
-                        None,
-                        &exec.model,
-                        &hash,
-                        JsonMode::Prompt,
-                        &summary,
-                        &first_attempt(&request.to_string(), &res, Some(&completion)),
-                        now,
-                    )?;
-                    return Err(e);
-                }
-            };
-            write_call(
-                &conn,
-                None,
-                &exec.model,
-                &hash,
-                JsonMode::Prompt,
-                &summary,
-                &first_attempt(&request.to_string(), &res, Some(&completion)),
-                now,
-            )?;
-            if res2.status != 200 {
-                write_call(
-                    &conn,
-                    None,
-                    &exec.model,
-                    &hash,
-                    JsonMode::Prompt,
-                    &summary,
-                    &Attempt {
-                        request: req2.to_string(),
-                        response: Some(res2.body.clone()),
-                        parsed: None,
-                        latency_ms: Some(res2.latency_ms),
-                        prompt_tokens: None,
-                        completion_tokens: None,
-                    },
-                    now,
-                )?;
-                return Err(LlmError::Http(format!(
-                    "retry: status {}: {}",
-                    res2.status,
-                    snippet(&res2.body)
-                )));
-            }
-            let recovered = parse_completion(res2.status, &res2.body)
-                .ok()
-                .and_then(|c| proposal_from_content(&c.content).ok().map(|p| (c, p)));
-            match recovered {
-                Some((c, p)) => {
-                    let parsed = serde_json::json!({
-                        "label": p.label, "confidence": p.confidence,
-                        "reason": p.reason, "signals": p.signals,
-                    })
-                    .to_string();
-                    let call_id = write_call(
-                        &conn,
-                        None,
-                        &exec.model,
-                        &hash,
-                        JsonMode::Prompt,
-                        &summary,
-                        &Attempt {
-                            request: req2.to_string(),
-                            response: Some(res2.body.clone()),
-                            parsed: Some(parsed),
-                            latency_ms: Some(res2.latency_ms),
-                            prompt_tokens: c.prompt_tokens,
-                            completion_tokens: c.completion_tokens,
-                        },
-                        now,
-                    )?;
-                    write_proposal(&conn, &subject.scope, &subject.id, &meta, &p, call_id, now)?;
-                    Ok(SendOutput {
-                        raws: vec![res.body, res2.body],
-                        parsed: Some(p),
-                        call_id: Some(call_id),
-                    })
-                }
-                None => {
-                    write_call(
-                        &conn,
-                        None,
-                        &exec.model,
-                        &hash,
-                        JsonMode::Prompt,
-                        &summary,
-                        &Attempt {
-                            request: req2.to_string(),
-                            response: Some(res2.body.clone()),
-                            parsed: None,
-                            latency_ms: Some(res2.latency_ms),
-                            prompt_tokens: None,
-                            completion_tokens: None,
-                        },
-                        now,
-                    )?;
-                    Err(LlmError::Validate(format!(
-                        "validation failed twice, first: {e1}"
-                    )))
-                }
-            }
+        ExecutionOutcome::Invalid { first_error } => Err(LlmError::Validate(format!(
+            "proposal invalid after {} attempts, first: {first_error}",
+            execution.exchanges.len()
+        ))),
+        ExecutionOutcome::LengthExhausted => Err(LlmError::LengthExhausted),
+        ExecutionOutcome::Http { status } => {
+            let body = execution
+                .exchanges
+                .last()
+                .and_then(|e| e.attempt.response.as_deref())
+                .unwrap_or_default();
+            Err(LlmError::Http(format!(
+                "status {status}: {}",
+                snippet(body)
+            )))
         }
+        ExecutionOutcome::Transport { error } => Err(LlmError::Http(error)),
     }
 }
 
@@ -1672,10 +1745,16 @@ mod tests {
     }
 
     /// A canned endpoint: serves one response per connection, in order.
-    fn mock_server(responses: Vec<(u16, String)>) -> String {
+    /// A canned endpoint: serves one response per connection, in
+    /// order, and records every request body it received.
+    fn mock_server(
+        responses: Vec<(u16, String)>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in = seen.clone();
         std::thread::spawn(move || {
             for (status, body) in responses {
                 let Ok((mut stream, _)) = listener.accept() else {
@@ -1702,7 +1781,12 @@ mod tests {
                     .unwrap_or(0);
                 if len > 0 {
                     let mut rest = vec![0u8; len];
-                    let _ = stream.read_exact(&mut rest);
+                    if stream.read_exact(&mut rest).is_ok() {
+                        seen_in
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&rest).into_owned());
+                    }
                 }
                 let reason = match status {
                     200 => "OK",
@@ -1719,15 +1803,39 @@ mod tests {
                 let _ = stream.write_all(reply.as_bytes());
             }
         });
-        url
+        (url, seen)
     }
 
     fn completion(content: &str) -> String {
+        completion_full(content, "stop", None, 10, 5, None)
+    }
+
+    /// A completion shaped like the direct call's: optional reasoning
+    /// transcript plus the token-details block.
+    fn completion_full(
+        content: &str,
+        finish_reason: &str,
+        reasoning: Option<&str>,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        reasoning_tokens: Option<i64>,
+    ) -> String {
+        let mut message = serde_json::json!({"role": "assistant", "content": content});
+        if let Some(r) = reasoning {
+            message["reasoning_content"] = r.into();
+        }
+        let mut usage = serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        });
+        if let Some(t) = reasoning_tokens {
+            usage["completion_tokens_details"] = serde_json::json!({"reasoning_tokens": t});
+        }
         serde_json::json!({
             "id": "x", "object": "chat.completion", "created": 1, "model": "m",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
-                        "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": usage,
         })
         .to_string()
     }
@@ -1739,16 +1847,18 @@ mod tests {
             url: url.to_string(),
             key: "k".to_string(),
             model: "m".to_string(),
+            model_overrides: HashMap::new(),
             mode,
             daily_calls: 500,
             daily_tokens: 500_000,
         }
     }
 
-    fn drain_ctx(exec: Exec, json_mode: Option<JsonMode>) -> DrainCtx {
+    fn drain_ctx(exec: Exec, json_mode: Option<JsonMode>, effort: Option<bool>) -> DrainCtx {
         DrainCtx {
             exec,
             json_mode,
+            effort_supported: effort,
             classes: Ja4Classes::default(),
             thresholds: HashMap::from([("web".to_string(), 0.5)]),
         }
@@ -1847,10 +1957,10 @@ mod tests {
     #[test]
     fn build_request_modes_match_the_wire_format() {
         let env = serde_json::json!({"task": "propose_label"});
-        let prompt = build_request("m", "label", &env, JsonMode::Prompt).unwrap();
+        let prompt = build_request("m", "label", &env, JsonMode::Prompt, None, None).unwrap();
         assert!(prompt.get("response_format").is_none());
         assert_eq!(prompt["temperature"], 0);
-        assert_eq!(prompt["max_tokens"], 400);
+        assert_eq!(prompt["max_tokens"], 4000);
         assert_eq!(prompt["model"], "m");
         assert_eq!(prompt["messages"][0]["role"], "system");
         assert!(prompt["messages"][0]["content"]
@@ -1861,13 +1971,28 @@ mod tests {
             prompt["messages"][1]["content"].as_str().unwrap(),
             env.to_string()
         );
-        let schema = build_request("m", "label", &env, JsonMode::Schema).unwrap();
+        let schema = build_request("m", "label", &env, JsonMode::Schema, None, None).unwrap();
         assert_eq!(schema["response_format"]["json_schema"]["name"], "label");
         assert_eq!(
             schema["response_format"]["json_schema"]["schema"]["required"][0],
             "label"
         );
-        assert!(build_request("m", "explain", &env, JsonMode::Prompt).is_err());
+        assert!(build_request("m", "explain", &env, JsonMode::Prompt, None, None).is_err());
+        assert!(prompt.get("reasoning_effort").is_none());
+        let with_effort =
+            build_request("m", "label", &env, JsonMode::Prompt, Some("medium"), None).unwrap();
+        assert_eq!(with_effort["reasoning_effort"], "medium");
+        let doubled = build_request(
+            "m",
+            "label",
+            &env,
+            JsonMode::Prompt,
+            Some("medium"),
+            Some(8000),
+        )
+        .unwrap();
+        assert_eq!(doubled["max_tokens"], 8000);
+        assert_eq!(doubled["reasoning_effort"], "medium");
     }
 
     #[test]
@@ -2007,16 +2132,56 @@ mod tests {
     }
 
     #[test]
-    fn probe_reads_the_endpoint_answer() {
-        let bad = mock_server(vec![(
-            400,
-            r#"{"error": "no response_format"}"#.to_string(),
-        )]);
-        assert_eq!(probe(&bad, "k", "m").unwrap(), JsonMode::Prompt);
-        let good = mock_server(vec![(200, "{}".to_string())]);
-        assert_eq!(probe(&good, "k", "m").unwrap(), JsonMode::Schema);
-        let denied = mock_server(vec![(401, "no".to_string())]);
+    fn probe_reads_both_endpoint_answers() {
+        // Prompt mode, effort honoured.
+        let (url, seen) = mock_server(vec![
+            (400, r#"{"error": "no response_format"}"#.to_string()),
+            (200, "{}".to_string()),
+        ]);
+        let o = probe(&url, "k", "m").unwrap();
+        assert_eq!(o.json_mode, JsonMode::Prompt);
+        assert!(o.effort);
+        let bodies = seen.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("response_format"));
+        assert!(!bodies[0].contains("reasoning_effort"));
+        assert!(bodies[1].contains("reasoning_effort"));
+        assert!(!bodies[1].contains("response_format"));
+        // Schema mode, effort rejected: the field fails closed.
+        let (url, _) = mock_server(vec![
+            (200, "{}".to_string()),
+            (400, r#"{"error": "unknown field"}"#.to_string()),
+        ]);
+        let o = probe(&url, "k", "m").unwrap();
+        assert_eq!(o.json_mode, JsonMode::Schema);
+        assert!(!o.effort);
+        // No decisive JSON-mode answer: unprobed.
+        let (denied, _) = mock_server(vec![(401, "no".to_string())]);
         assert!(probe(&denied, "k", "m").is_err());
+    }
+
+    #[test]
+    fn effort_and_models_resolve_per_point() {
+        assert_eq!(effort_for("label").unwrap(), "medium");
+        assert_eq!(effort_for("draft").unwrap(), "high");
+        assert_eq!(effort_for("explain").unwrap(), "low");
+        assert_eq!(effort_for("classify").unwrap(), "low");
+        assert!(effort_for("nope").is_err());
+        let exec = Exec {
+            url: "u".to_string(),
+            key: "k".to_string(),
+            model: "base".to_string(),
+            model_overrides: HashMap::from([
+                ("classify".to_string(), "small".to_string()),
+                ("explain".to_string(), "small".to_string()),
+            ]),
+            mode: LlmMode::Live,
+            daily_calls: 1,
+            daily_tokens: 1,
+        };
+        assert_eq!(exec.model_for("label"), "base");
+        assert_eq!(exec.model_for("classify"), "small");
+        assert_eq!(exec.model_for("draft"), "base");
     }
 
     #[test]
@@ -2028,10 +2193,10 @@ mod tests {
             assert!(enqueue_label(&conn, "actor", "aa", "review", now_s(), 500, 500_000).unwrap());
         }
         // Unroutable: the drain would fail if it tried to send.
-        let ctx = drain_ctx(exec_for("http://127.0.0.1:9", LlmMode::Dry), None);
+        let ctx = drain_ctx(exec_for("http://127.0.0.1:9", LlmMode::Dry), None, None);
         let (out, mode) = drain_once(&db, &ctx).unwrap();
         assert!(matches!(out, DrainOutcome::Done { .. }));
-        assert_eq!(mode, None);
+        assert_eq!(mode.json, None);
         let conn = Connection::open(&db).unwrap();
         let call: (Option<i64>, String, String, Option<String>) = conn
             .query_row(
@@ -2066,11 +2231,16 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
         }
-        let url = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
-        let ctx = drain_ctx(exec_for(&url, LlmMode::Live), Some(JsonMode::Prompt));
+        let (url, _) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
         let (out, mode) = drain_once(&db, &ctx).unwrap();
         assert!(matches!(out, DrainOutcome::Done { .. }));
-        assert_eq!(mode, Some(JsonMode::Prompt));
+        assert_eq!(mode.json, Some(JsonMode::Prompt));
+        assert_eq!(mode.effort, Some(false));
         let conn = Connection::open(&db).unwrap();
         let label: (String, String, f64, String, String) = conn
             .query_row(
@@ -2109,8 +2279,12 @@ mod tests {
             assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
         }
         let bad = completion("I think this is fine, trust me.");
-        let url = mock_server(vec![(200, bad.clone()), (200, bad)]);
-        let ctx = drain_ctx(exec_for(&url, LlmMode::Live), Some(JsonMode::Prompt));
+        let (url, _) = mock_server(vec![(200, bad.clone()), (200, bad)]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
         let (out, _) = drain_once(&db, &ctx).unwrap();
         let why = match out {
             DrainOutcome::Failed { why, .. } => why,
@@ -2124,7 +2298,7 @@ mod tests {
                 }
             ),
         };
-        assert!(why.contains("validation failed twice"), "{why}");
+        assert!(why.contains("proposal invalid after 2 attempts"), "{why}");
         let conn = Connection::open(&db).unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
@@ -2148,12 +2322,16 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
         }
-        let url = mock_server(vec![
+        let (url, _) = mock_server(vec![
             (500, "boom".to_string()),
             (500, "boom".to_string()),
             (500, "boom".to_string()),
         ]);
-        let ctx = drain_ctx(exec_for(&url, LlmMode::Live), Some(JsonMode::Prompt));
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
         let before = now_s();
         let (d1, _) = drain_once(&db, &ctx).unwrap();
         assert!(matches!(d1, DrainOutcome::Deferred { .. }));
@@ -2183,6 +2361,235 @@ mod tests {
             })
             .unwrap();
         assert_eq!((attempts, status.as_str()), (3, "failed"));
+    }
+
+    #[test]
+    fn drain_live_retries_length_once_at_double_budget() {
+        let db = tmp_db("length");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        // The direct call's shape: length with empty content, then a
+        // proposal with a reasoning transcript.
+        let (url, seen) = mock_server(vec![
+            (
+                200,
+                completion_full("", "length", Some("hmm, thinking"), 159, 2000, Some(1997)),
+            ),
+            (
+                200,
+                completion_full(
+                    GOOD_PROPOSAL,
+                    "stop",
+                    Some("the paths look wordlist-like"),
+                    200,
+                    300,
+                    Some(150),
+                ),
+            ),
+        ]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(true),
+        );
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let bodies = seen.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert_eq!(first["max_tokens"], 4000);
+        assert_eq!(second["max_tokens"], 8000);
+        assert_eq!(first["reasoning_effort"], "medium");
+        assert_eq!(second["reasoning_effort"], "medium");
+        let conn = Connection::open(&db).unwrap();
+        let rows: Vec<(Option<String>, Option<i64>, Option<String>)> = conn
+            .prepare(
+                "SELECT finish_reason, reasoning_tokens, reasoning_excerpt \
+                 FROM llm_calls ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.as_deref(), Some("length"));
+        assert_eq!(rows[0].1, Some(1997));
+        assert_eq!(rows[0].2.as_deref(), Some("hmm, thinking"));
+        assert_eq!(rows[1].0.as_deref(), Some("stop"));
+        assert_eq!(rows[1].1, Some(150));
+        let labels: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(labels, 1);
+    }
+
+    #[test]
+    fn drain_live_drops_double_length_and_logs_both() {
+        let db = tmp_db("length2");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        let empty = completion_full("", "length", Some("still thinking"), 159, 4000, Some(3990));
+        let (url, _) = mock_server(vec![(200, empty.clone()), (200, empty)]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        match out {
+            DrainOutcome::Failed { why, .. } => assert!(why.contains("double budget"), "{why}"),
+            _ => panic!("expected failed"),
+        }
+        let conn = Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let labels: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(labels, 0);
+    }
+
+    #[test]
+    fn drain_live_logs_transport_errors_and_requeues() {
+        let db = tmp_db("transport");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        // Discard port: refused, so no response is ever received.
+        let ctx = drain_ctx(
+            exec_for("http://127.0.0.1:9", LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Deferred { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let call: (String, Option<String>) = conn
+            .query_row("SELECT request, response FROM llm_calls", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert!(call.0.contains("propose_label"));
+        assert_eq!(call.1, None);
+        let attempts: i64 = conn
+            .query_row("SELECT attempts FROM llm_jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn drain_live_probes_once_when_unprobed() {
+        let db = tmp_db("probe-drain");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        let (url, _) = mock_server(vec![
+            (400, r#"{"error": "no response_format"}"#.to_string()),
+            (200, "{}".to_string()),
+            (200, completion(GOOD_PROPOSAL)),
+        ]);
+        let ctx = drain_ctx(exec_for(&url, LlmMode::Live), None, None);
+        let (out, mode) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        assert_eq!(mode.json, Some(JsonMode::Prompt));
+        assert_eq!(mode.effort, Some(true));
+    }
+
+    #[test]
+    fn send_label_writes_a_jobless_call_and_label() {
+        let db = tmp_db("send");
+        fixture(&db);
+        let (url, seen) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let out = send_label(
+            &db,
+            &exec_for(&url, LlmMode::Live),
+            &Ja4Classes::default(),
+            &HashMap::from([("web".to_string(), 0.5)]),
+            &parse_subject("actor:aa").unwrap(),
+            Some("medium"),
+        )
+        .unwrap();
+        assert_eq!(out.raws.len(), 1);
+        assert_eq!(out.parsed.as_ref().unwrap().label, "malicious");
+        let bodies = seen.lock().unwrap();
+        let req: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(req["reasoning_effort"], "medium");
+        assert!(req.get("response_format").is_none());
+        let conn = Connection::open(&db).unwrap();
+        let job: Option<i64> = conn
+            .query_row("SELECT job_id FROM llm_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(job, None);
+        let label: String = conn
+            .query_row(
+                "SELECT label FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(label, "malicious");
+    }
+
+    #[test]
+    fn llm_today_totals_calls_and_tokens_per_point() {
+        let db = tmp_db("today");
+        {
+            let mut conn = Connection::open(&db).unwrap();
+            crate::store::migrate(&mut conn).unwrap();
+        }
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for (point, prompt, completion) in
+            [("label", 100, 2000), ("label", 50, 60), ("explain", 10, 20)]
+        {
+            conn.execute(
+                "INSERT INTO llm_calls (point, model, prompt_hash, json_mode, input_summary, \
+                 request, prompt_tokens, completion_tokens, created_at) \
+                 VALUES (?1, 'm', 'h', 'prompt', 's', 'r', ?2, ?3, ?4)",
+                params![point, prompt, completion, now],
+            )
+            .unwrap();
+        }
+        // Yesterday's row stays out of today.
+        conn.execute(
+            "INSERT INTO llm_calls (point, model, prompt_hash, json_mode, input_summary, \
+             request, prompt_tokens, completion_tokens, created_at) \
+             VALUES ('label', 'm', 'h', 'prompt', 's', 'r', 1, 1, ?1)",
+            params![now - 100_000],
+        )
+        .unwrap();
+        let totals = llm_today(&conn, now).unwrap();
+        assert_eq!(
+            totals,
+            PointTotals {
+                label: (2, 2210),
+                explain: (1, 30),
+                classify: (0, 0),
+                draft: (0, 0),
+            }
+        );
     }
 
     #[test]

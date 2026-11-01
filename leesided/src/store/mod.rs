@@ -46,6 +46,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("../../migrations/0012_scores_scope.sql")),
     (13, include_str!("../../migrations/0013_labels_append.sql")),
     (14, include_str!("../../migrations/0014_llm.sql")),
+    (15, include_str!("../../migrations/0015_llm_reasoning.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]

@@ -1248,9 +1248,10 @@ impl Engine {
 
     /// One worker tick: drain the LLM queue, a few jobs at a time.
     /// Blocking HTTP, so the serve loop runs it on a blocking thread.
-    /// Returns the JSON mode the drain settled on, if any.
-    pub fn llm_drain_tick(&self) -> Option<crate::llm::JsonMode> {
-        let exec = self.llm.exec.clone()?;
+    pub fn llm_drain_tick(&self) {
+        let Some(exec) = self.llm.exec.clone() else {
+            return;
+        };
         let classes = self.ja4_classes.clone();
         let thresholds = self
             .windside
@@ -1258,11 +1259,15 @@ impl Engine {
             .as_ref()
             .map(|l| l.manifest.thresholds.clone())
             .unwrap_or_default();
-        let mut settled = *self.llm.json_mode.read();
+        let mut settled = crate::llm::DrainMode {
+            json: *self.llm.json_mode.read(),
+            effort: *self.llm.effort_supported.read(),
+        };
         for _ in 0..10 {
             let ctx = crate::llm::DrainCtx {
                 exec: exec.clone(),
-                json_mode: settled,
+                json_mode: settled.json,
+                effort_supported: settled.effort,
                 classes: classes.clone(),
                 thresholds: thresholds.clone(),
             };
@@ -1278,10 +1283,29 @@ impl Engine {
                 }
             }
         }
-        if settled != *self.llm.json_mode.read() {
-            *self.llm.json_mode.write() = settled;
+        if settled.json != *self.llm.json_mode.read() {
+            *self.llm.json_mode.write() = settled.json;
         }
-        settled
+        if settled.effort != *self.llm.effort_supported.read() {
+            *self.llm.effort_supported.write() = settled.effort;
+        }
+    }
+
+    /// The `/health` LLM fragment: mode, JSON mode, and per-point
+    /// daily call and token totals from the call log.
+    fn llm_health(&self) -> serde_json::Value {
+        let mut v = self.llm.health();
+        let today = self
+            .store
+            .with_reader(|c| crate::llm::llm_today(c, crate::store::now_s()))
+            .unwrap_or_default();
+        v["today"] = serde_json::json!({
+            "label": {"calls": today.label.0, "tokens": today.label.1},
+            "explain": {"calls": today.explain.0, "tokens": today.explain.1},
+            "classify": {"calls": today.classify.0, "tokens": today.classify.1},
+            "draft": {"calls": today.draft.0, "tokens": today.draft.1},
+        });
+        v
     }
 
     pub fn health(&self) -> serde_json::Value {
@@ -1322,7 +1346,7 @@ impl Engine {
                     "cluster": self.windside.skipped_cluster.load(Ordering::Relaxed),
                 },
             },
-            "llm": self.llm.health(),
+            "llm": self.llm_health(),
             "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),
             "symbols": { "count": self.symbols.len(), "overflowed": self.symbols.overflowed() },

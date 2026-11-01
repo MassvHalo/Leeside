@@ -2725,7 +2725,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 14);
+    assert_eq!(health["migration_version"], 15);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -2922,4 +2922,29 @@ async fn review_confirm_writes_an_operator_label_the_export_carries() {
     );
     h.running.abort();
     h.engine.shutdown().await;
+}
+
+#[test]
+fn every_subcommand_answers_help() {
+    let bin = env!("CARGO_BIN_EXE_leesided");
+    for args in [
+        ["--help"].as_slice(),
+        ["serve", "--help"].as_slice(),
+        ["rules", "schema", "--help"].as_slice(),
+        ["rules", "validate", "--help"].as_slice(),
+        ["rules", "export", "--help"].as_slice(),
+        ["tap", "--help"].as_slice(),
+        ["label-import", "--help"].as_slice(),
+        ["export", "--help"].as_slice(),
+        ["report", "shadow", "--help"].as_slice(),
+        ["review", "--help"].as_slice(),
+        ["llm", "--help"].as_slice(),
+        ["llm", "show", "--help"].as_slice(),
+        ["llm", "send", "--help"].as_slice(),
+    ] {
+        let out = std::process::Command::new(bin).args(args).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.starts_with("usage:"), "{args:?}: {text}");
+    }
 }
