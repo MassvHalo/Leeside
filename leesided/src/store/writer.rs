@@ -175,8 +175,8 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                     }
                     StoreOp::Score(s) => {
                         tx.execute(
-                            "INSERT INTO scores (scope, scope_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![s.scope, s.scope_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
+                            "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            params![s.scope, s.scope_id, s.turn_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
                         )?;
                     }
                     StoreOp::ActorScore {
@@ -191,8 +191,11 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                         )?;
                     }
                     StoreOp::Label(l) => {
+                        // Append-only since 0013: the engine sends one label
+                        // per window and source, and a re-label is a new row
+                        // the latest-wins readers collapse.
                         tx.execute(
-                            "INSERT OR IGNORE INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \
+                            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                             params![
                                 l.scope,
@@ -205,6 +208,26 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                                 l.kind,
                                 l.note,
                                 l.created_at
+                            ],
+                        )?;
+                    }
+                    StoreOp::LlmEnqueue {
+                        scope,
+                        subject_id,
+                        enqueued_by,
+                        now_s,
+                        daily_calls,
+                        daily_tokens,
+                    } => {
+                        tx.execute(
+                            crate::llm::ENQUEUE_LABEL_SQL,
+                            params![
+                                scope,
+                                subject_id,
+                                enqueued_by,
+                                now_s,
+                                daily_calls,
+                                daily_tokens
                             ],
                         )?;
                     }

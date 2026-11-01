@@ -8,7 +8,8 @@
 //! it is run traffic. `attack-*` kinds label malicious with source
 //! `tool_run`, `benign-*` kinds benign with `synthetic_benign`, both at
 //! 0.95; the run kind lands in `labels.kind` for per-kind sampling and
-//! eval. Reruns are safe (`INSERT OR IGNORE`).
+//! eval. Reruns are safe: the insert skips windows its source already
+//! labeled (labels append since 0013, so no constraint dedups them).
 
 use crate::store::{now_s, StoreError};
 use rusqlite::{params, Connection};
@@ -114,11 +115,14 @@ pub fn import(
     };
     for scope in ["actor", "cluster"] {
         let n = conn.execute(
-            "INSERT OR IGNORE INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \
+            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \
              SELECT fv.scope, fv.key, fv.surface, fv.ts_us, ?1, ?2, ?3, ?4, ?5, ?6 \
              FROM feature_vectors fv \
              JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
-             WHERE fv.scope = ?7 AND t.rowid > ?8",
+             WHERE fv.scope = ?7 AND t.rowid > ?8 \
+             AND NOT EXISTS (SELECT 1 FROM labels l2 \
+               WHERE l2.scope = fv.scope AND l2.scope_id = fv.key AND l2.window_end_ts = fv.ts_us \
+               AND l2.source = ?2 AND l2.label = ?1)",
             params![
                 label,
                 source,
@@ -323,5 +327,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bad, 0);
+    }
+
+    #[test]
+    fn eligible_view_picks_the_latest_row_per_subject_and_source() {
+        let dir = std::env::temp_dir().join(format!("leeside-labels-w-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("gen.sqlite");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        // An operator correction: two rows, one window, both kept.
+        for (label, created) in [("malicious", 10), ("benign", 20)] {
+            conn.execute(
+                "INSERT INTO labels (scope, scope_id, window_end_ts, label, source, confidence, created_at) \
+                 VALUES ('actor', 'a', 100, ?1, 'operator', 1.0, ?2)",
+                params![label, created],
+            )
+            .unwrap();
+        }
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM labels", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+        let seen: (i64, String) = conn
+            .query_row(
+                "SELECT count(*), max(label) FROM labels_test_eligible",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(seen, (1, "benign".to_string()));
     }
 }

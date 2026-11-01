@@ -38,6 +38,17 @@ pub struct Config {
     pub windside_model: Option<PathBuf>,
     /// `off`, `shadow` or `active` (docs/windside.md section 6).
     pub windside_mode: WindsideMode,
+    /// Any OpenAI-compatible Chat Completions base URL (docs/llm.md
+    /// section 4); absent disables every LLM worker.
+    pub llm_url: Option<String>,
+    pub llm_key: Option<String>,
+    pub llm_model: String,
+    /// `off`, `dry` or `live` (default `off`). Dry builds the full
+    /// request and logs it with a null response; live sends.
+    pub llm_mode: LlmMode,
+    /// Per-point daily budgets in calls and tokens.
+    pub llm_daily_calls: u32,
+    pub llm_daily_tokens: u32,
 }
 
 /// What the loaded model may do. Shadow writes scores and changes no
@@ -69,6 +80,35 @@ impl WindsideMode {
     }
 }
 
+/// What the LLM workers may do. Dry builds the full request and logs it
+/// with a null response; only live sends. Default off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmMode {
+    #[default]
+    Off,
+    Dry,
+    Live,
+}
+
+impl LlmMode {
+    pub fn parse(s: &str) -> Option<LlmMode> {
+        match s {
+            "off" => Some(LlmMode::Off),
+            "dry" => Some(LlmMode::Dry),
+            "live" => Some(LlmMode::Live),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmMode::Off => "off",
+            LlmMode::Dry => "dry",
+            LlmMode::Live => "live",
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -88,6 +128,12 @@ impl Default for Config {
             business_routes: Vec::new(),
             windside_model: None,
             windside_mode: WindsideMode::Off,
+            llm_url: None,
+            llm_key: None,
+            llm_model: "meta-models/muse-spark-open-1026".to_string(),
+            llm_mode: LlmMode::Off,
+            llm_daily_calls: 500,
+            llm_daily_tokens: 500_000,
         }
     }
 }
@@ -188,6 +234,35 @@ impl Config {
             cfg.windside_mode = WindsideMode::parse(&v).unwrap_or_else(|| {
                 panic!("LEESIDED_WINDSIDE_MODE: off, shadow or active, not {v}")
             });
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_URL") {
+            if !v.is_empty() {
+                cfg.llm_url = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_KEY") {
+            if !v.is_empty() {
+                cfg.llm_key = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_MODEL") {
+            if !v.is_empty() {
+                cfg.llm_model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_MODE") {
+            cfg.llm_mode = LlmMode::parse(&v)
+                .unwrap_or_else(|| panic!("LEESIDED_LLM_MODE: off, dry or live, not {v}"));
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_DAILY_CALLS") {
+            cfg.llm_daily_calls = v
+                .parse()
+                .unwrap_or_else(|_| panic!("LEESIDED_LLM_DAILY_CALLS: not a number: {v}"));
+        }
+        if let Ok(v) = std::env::var("LEESIDED_LLM_DAILY_TOKENS") {
+            cfg.llm_daily_tokens = v
+                .parse()
+                .unwrap_or_else(|_| panic!("LEESIDED_LLM_DAILY_TOKENS: not a number: {v}"));
         }
         cfg
     }

@@ -67,7 +67,7 @@ pub fn export(
          WHERE fv.version = ?1 AND fv.ts_us >= ?2 \
            AND l.rowid = (SELECT l2.rowid FROM labels l2 \
                           WHERE l2.scope = fv.scope AND l2.scope_id = fv.key AND l2.window_end_ts = fv.ts_us \
-                          ORDER BY l2.confidence DESC, l2.source ASC, l2.rowid ASC LIMIT 1) \
+                          ORDER BY l2.confidence DESC, l2.source ASC, l2.created_at DESC, l2.rowid DESC LIMIT 1) \
          ORDER BY fv.ts_us ASC, fv.scope ASC, fv.key ASC",
     )?;
     let rows = stmt.query_map(params![features::VERSION, since_s * 1_000_000], |r| {

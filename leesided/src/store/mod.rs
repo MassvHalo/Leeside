@@ -44,6 +44,8 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (11, include_str!("../../migrations/0011_scores.sql")),
     (12, include_str!("../../migrations/0012_scores_scope.sql")),
+    (13, include_str!("../../migrations/0013_labels_append.sql")),
+    (14, include_str!("../../migrations/0014_llm.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -213,6 +215,17 @@ pub enum StoreOp {
         mismatch: bool,
     },
     Label(LabelRow),
+    /// A point-1 label job (docs/llm.md): lands only when no open job
+    /// for the subject exists, no proposal went out in the last hour,
+    /// and the daily budgets hold (`llm::ENQUEUE_LABEL_SQL`).
+    LlmEnqueue {
+        scope: String,
+        subject_id: String,
+        enqueued_by: String,
+        now_s: i64,
+        daily_calls: u32,
+        daily_tokens: u32,
+    },
     /// A honeytoken hit: the actor's windows label malicious until `until_us`.
     HoneytokenHit {
         actor_id: String,
@@ -285,10 +298,13 @@ impl BindingRow {
 }
 
 /// A `scores` row: one feature row's Windside score, actor or cluster.
+/// Keyed (scope, scope_id, turn_id) like `feature_vectors`; ts_us is a
+/// plain column.
 #[derive(Debug, Clone)]
 pub struct ScoreRow {
     pub scope: String,
     pub scope_id: String,
+    pub turn_id: String,
     pub surface: Option<String>,
     pub ts_us: i64,
     pub score: f64,
@@ -982,6 +998,46 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scores key on (scope, scope_id, turn_id) with ts_us a plain column
+    /// (0012): two scores for one scope in the same microsecond coexist,
+    /// and the same turn twice is refused.
+    #[tokio::test]
+    async fn scores_key_includes_turn_id() {
+        let dir = std::env::temp_dir().join(format!("leesided-scores-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scores.sqlite");
+        let store = Store::open(&path).unwrap();
+        for turn in ["t1", "t2"] {
+            store.send(StoreOp::Score(ScoreRow {
+                scope: "actor".to_string(),
+                scope_id: "aa".to_string(),
+                turn_id: turn.to_string(),
+                surface: Some("web".to_string()),
+                ts_us: 1_700_000_000_000_000,
+                score: 0.5,
+                model_version: "0.1.0".to_string(),
+                top3: "[]".to_string(),
+            }));
+        }
+        store.flush().await;
+        let n: i64 = store
+            .with_reader(|c| c.query_row("SELECT count(*) FROM scores", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(n, 2);
+        // The same turn twice violates the key. The writer logs and drops
+        // a failing op, so this goes through SQL directly.
+        let dup = store.with_reader(|c| {
+            c.execute(
+                "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) \
+                 VALUES ('actor', 'aa', 't1', 'web', 1700000000000000, 0.5, '0.1.0', '[]')",
+                [],
+            )
+        });
+        assert!(dup.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

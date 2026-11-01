@@ -27,6 +27,9 @@ sha2 = "0.10"
 maxminddb = "0.24"
 # libc: the tap's AF_PACKET socket (docs/tap.md); no libpcap, so no new system package on the box.
 libc = "0.2"
+# ureq: the LLM module's Chat Completions client (docs/llm.md); rustls
+# with bundled webpki roots, json for the request/response bodies.
+ureq = { version = "3.5.0", features = ["json"] }
 
 [dev-dependencies]
 criterion = "0.5"

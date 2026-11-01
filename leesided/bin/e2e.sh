@@ -32,6 +32,7 @@ trap cleanup EXIT
 
 LEESIDED_SOCKET_DIR="$WORK/run" LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_API="$API" \
 LEESIDED_RULES_DIR="$HERE/rules/install" LEESIDED_HASH_KEY="$E2E_HASH_KEY" RUST_LOG=info \
+LEESIDED_WINDSIDE_MODE=shadow LEESIDED_WINDSIDE_MODEL="$HERE/../windside/models/0.1.0" \
   "$HERE/target/release/leesided" serve >"$WORK/leesided.log" 2>&1 &
 LPID=$!
 for _ in $(seq 1 50); do curl -sf "http://$API/health" >/dev/null && break; sleep 0.1; done
@@ -60,7 +61,7 @@ sleep 11   # one stats flush
 echo "== what leesided saw: traffic script + machine surfaces only (OTP, tag, tap acts still to come)"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("checks", h["check"]["total"], "| events", h["ingest"]["total"], "| sessions", h["windows"]["sessions"], "| unjoined", h["check"]["unjoined"], "| dropped", h["store"]["dropped"])'
 sqlite3 "$WORK/leesided.sqlite" "select 'turns', count(*) from turns union all select 'joined to a verdict', count(*) from turns where verdict is not null union all select 'feature rows (actor)', count(*) from feature_vectors where scope='actor' union all select 'feature rows (cluster)', count(*) from feature_vectors where scope='cluster';"
-sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (binding 404s never probe: GateTurn runs after SubstituteBindings): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
+sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (events whose probe never joined): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
 
 echo "== promote: global enforce, portal-otp-burst to enforce"
 curl -s -X PUT "http://$API/mode" -H 'content-type: application/json' -d '{"mode":"enforce"}'; echo
@@ -177,7 +178,12 @@ sqlite3 "$WORK/leesided.sqlite" "select scope, action, mode, rule, expires_at - 
 echo "== totals over every act (the mid-run line above covered the traffic script and machine surfaces only)"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("  checks", h["check"]["total"], "| events", h["ingest"]["total"], "| unjoined", h["check"]["unjoined"], "| bad events", h["ingest"]["bad_event"], "| dropped", h["store"]["dropped"])'
 sqlite3 "$WORK/leesided.sqlite" "select '  turns ' || count(*) || ' | joined to a verdict ' || count(verdict) || ' | with actor ' || count(actor_id) || ' | with cluster ' || count(cluster_key) || ' | with ja4 ' || count(ja4) from turns;"
-sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (binding 404s never probe: GateTurn runs after SubstituteBindings): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
+sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (events whose probe never joined): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
+echo "== shadow: the daemon scored in shadow mode; both scopes must have score rows"
+LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_WINDSIDE_MODEL="$HERE/../windside/models/0.1.0" \
+  "$HERE/target/release/leesided" report shadow --since 0 | tee "$WORK/shadow.txt"
+grep -qE "^  actor: [0-9]+ feature rows, [1-9][0-9]* scored" "$WORK/shadow.txt" || FAIL="$FAIL shadow-actor:0"
+grep -qE "^  cluster: [0-9]+ feature rows, [1-9][0-9]* scored" "$WORK/shadow.txt" || FAIL="$FAIL shadow-cluster:0"
 echo "== logs: $WORK/leesided.log, $WORK/php.log, $WORK/tap.log; db: $WORK/leesided.sqlite"
 echo "== asserts"
 CLUSTERLESS=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from turns where cluster_key is null;")

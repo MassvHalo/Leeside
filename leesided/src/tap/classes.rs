@@ -38,7 +38,7 @@ struct Entry {
     class: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Ja4Classes {
     map: HashMap<String, Class>,
 }

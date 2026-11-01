@@ -35,9 +35,11 @@ fn main() {
         ["export", rest @ ..] => run_export_data(rest),
         ["report", "shadow", rest @ ..] => run_report_shadow(rest),
         ["review", rest @ ..] => run_review(rest),
+        ["llm", "show", rest @ ..] => run_llm_show(rest),
+        ["llm", "send", rest @ ..] => run_llm_send(rest),
         _ => {
             eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>]]"
+                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>]"
             );
             std::process::exit(2);
         }
@@ -106,6 +108,26 @@ fn run_serve() {
             eprintln!("leesided: {e}");
             std::process::exit(1);
         });
+        // Live probes the JSON mode once at start-up; dry sends
+        // nothing, so its mode stays unprobed until a live drain.
+        if let Some(exec) = engine.llm.exec.clone() {
+            if exec.mode == leesided::config::LlmMode::Live {
+                let inner = engine.clone();
+                let probed = tokio::task::spawn_blocking(move || {
+                    leesided::llm::probe(&exec.url, &exec.key, &exec.model)
+                })
+                .await
+                .expect("probe thread")
+                .map_err(|e| e.to_string());
+                match probed {
+                    Ok(mode) => {
+                        tracing::info!(json_mode = mode.as_str(), "llm endpoint probed");
+                        *inner.llm.json_mode.write() = Some(mode);
+                    }
+                    Err(e) => tracing::warn!("llm probe failed ({e}); the worker retries"),
+                }
+            }
+        }
         let running = serve(engine.clone()).await.unwrap_or_else(|e| {
             eprintln!("leesided: {e}");
             std::process::exit(1);
@@ -255,6 +277,129 @@ fn run_review(args: &[&str]) {
         }
         Err(e) => {
             eprintln!("leesided review: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn llm_args(args: &[&str], cmd: &str) -> (String, String) {
+    let mut point: Option<String> = None;
+    let mut subject: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--point" | "--subject" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided llm {cmd}: {a} needs a value");
+                    std::process::exit(2);
+                };
+                if *a == "--point" {
+                    point = Some(v.to_string());
+                } else {
+                    subject = Some(v.to_string());
+                }
+            }
+            _ => {
+                eprintln!("leesided llm {cmd}: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    match (point, subject) {
+        (Some(p), Some(s)) => (p, s),
+        _ => {
+            eprintln!("leesided llm {cmd}: --point label --subject <actor|cluster>:<id> required");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn llm_thresholds(cfg: &Config) -> std::collections::HashMap<String, f64> {
+    let Some(dir) = cfg.windside_model.as_deref() else {
+        return std::collections::HashMap::new();
+    };
+    match leesided::windside::load_manifest(dir) {
+        Ok(m) => m.thresholds,
+        Err(e) => {
+            eprintln!("leesided llm: model unreadable ({e}); threshold stays null");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+fn run_llm_show(args: &[&str]) {
+    let cfg = Config::from_env();
+    let (point, subject) = llm_args(args, "show");
+    if point != "label" {
+        eprintln!("leesided llm show: unknown point `{point}` (built: label)");
+        std::process::exit(2);
+    }
+    let subject = leesided::llm::parse_subject(&subject).unwrap_or_else(|e| {
+        eprintln!("leesided llm show: {e}");
+        std::process::exit(2);
+    });
+    let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
+    match leesided::llm::show_label(
+        &cfg.db,
+        &cfg.llm_model,
+        &classes,
+        &llm_thresholds(&cfg),
+        &subject,
+    ) {
+        Ok(request) => println!("{}", serde_json::to_string_pretty(&request).expect("json")),
+        Err(e) => {
+            eprintln!("leesided llm show: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_llm_send(args: &[&str]) {
+    let cfg = Config::from_env();
+    let (point, subject) = llm_args(args, "send");
+    if point != "label" {
+        eprintln!("leesided llm send: unknown point `{point}` (built: label)");
+        std::process::exit(2);
+    }
+    let subject = leesided::llm::parse_subject(&subject).unwrap_or_else(|e| {
+        eprintln!("leesided llm send: {e}");
+        std::process::exit(2);
+    });
+    let (Some(url), Some(key)) = (cfg.llm_url.clone(), cfg.llm_key.clone()) else {
+        eprintln!("leesided llm send: LEESIDED_LLM_URL and LEESIDED_LLM_KEY are required");
+        std::process::exit(2);
+    };
+    let exec = leesided::llm::Exec {
+        url,
+        key,
+        model: cfg.llm_model.clone(),
+        mode: leesided::config::LlmMode::Live,
+        daily_calls: cfg.llm_daily_calls,
+        daily_tokens: cfg.llm_daily_tokens,
+    };
+    let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
+    match leesided::llm::send_label(&cfg.db, &exec, &classes, &llm_thresholds(&cfg), &subject) {
+        Ok(out) => {
+            for (i, raw) in out.raws.iter().enumerate() {
+                println!("--- raw response {} ---\n{raw}", i + 1);
+            }
+            match out.parsed {
+                Some(p) => println!(
+                    "--- parsed ---\n{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "label": p.label,
+                        "confidence": p.confidence,
+                        "reason": p.reason,
+                        "signals": p.signals,
+                        "call_id": out.call_id,
+                    }))
+                    .expect("json")
+                ),
+                None => println!("--- parsed ---\nnone"),
+            }
+        }
+        Err(e) => {
+            eprintln!("leesided llm send: {e}");
             std::process::exit(1);
         }
     }

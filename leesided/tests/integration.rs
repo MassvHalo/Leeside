@@ -88,6 +88,7 @@ impl Harness {
             business_routes,
             windside_model: None,
             windside_mode: leesided::config::WindsideMode::Off,
+            ..Config::default()
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -130,6 +131,7 @@ impl Harness {
             business_routes: Vec::new(),
             windside_model: model,
             windside_mode: mode,
+            ..Config::default()
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -681,6 +683,7 @@ async fn api_validate_schema_export_and_pinned_mode() {
         business_routes: Vec::new(),
         windside_model: None,
         windside_mode: leesided::config::WindsideMode::Off,
+        ..Config::default()
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -2722,7 +2725,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 12);
+    assert_eq!(health["migration_version"], 14);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -2795,26 +2798,128 @@ async fn review_labels_the_highest_scored_actor() {
         label,
         ("malicious".to_string(), "operator".to_string(), 1.0, None)
     );
-    // Re-reviewing updates the label: the latest judgment stands.
+    // Re-reviewing appends: both judgments stay, the latest wins.
     let mut out = Vec::new();
     let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("b\n"), &mut out).unwrap();
     assert_eq!(labeled, 1);
-    let label: String = h
+    let rows: Vec<(String, i64)> = h
         .engine
         .store
-        .with_reader(|c| c.query_row("SELECT label FROM labels", [], |r| r.get(0)))
+        .with_reader(|c| {
+            c.prepare("SELECT label, created_at FROM labels ORDER BY id ASC")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
         .unwrap();
-    assert_eq!(label, "benign");
-    let count: i64 = h
+    assert_eq!(rows.len(), 2, "append, not upsert");
+    assert_eq!(rows[0].0, "malicious");
+    assert_eq!(rows[1].0, "benign");
+    let latest: String = h
         .engine
         .store
-        .with_reader(|c| c.query_row("SELECT count(*) FROM labels", [], |r| r.get(0)))
+        .with_reader(|c| c.query_row("SELECT label FROM labels_test_eligible", [], |r| r.get(0)))
         .unwrap();
-    assert_eq!(count, 1, "upsert, not a second row");
+    assert_eq!(latest, "benign");
     // Skipping writes nothing.
     let mut out = Vec::new();
     let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("\n"), &mut out).unwrap();
     assert_eq!(labeled, 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn review_confirm_writes_an_operator_label_the_export_carries() {
+    use leesided::config::WindsideMode;
+    use std::io::Cursor;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    let h = Harness::open_windside(dir, Some(model), WindsideMode::Shadow).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("{i:032x}"),
+            SESSION,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = h.dir.join("leesided.sqlite");
+    // A proposal for the scored actor, as the worker would write it.
+    let (scope_id, window_ts): (String, i64) = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT key, ts_us FROM feature_vectors WHERE scope = 'actor' \
+                 ORDER BY ts_us DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    h.engine
+        .store
+        .send(leesided::store::StoreOp::Label(leesided::store::LabelRow {
+            scope: "actor",
+            scope_id: scope_id.clone(),
+            surface: Some("web".to_string()),
+            window_end_ts: window_ts,
+            label: "malicious",
+            source: "llm_proposed",
+            confidence: 0.6,
+            kind: None,
+            note: Some("machine cadence".to_string()),
+            created_at: 0,
+        }));
+    h.engine.store.flush().await;
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("c\n"), &mut out).unwrap();
+    assert_eq!(labeled, 1);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("llm proposes malicious (0.60)"), "{text}");
+    assert!(text.contains("confirmed proposal"), "{text}");
+    let op: (String, String, f64, String) = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT label, source, confidence, note FROM labels WHERE source = 'operator'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        op,
+        (
+            "malicious".to_string(),
+            "operator".to_string(),
+            1.0,
+            "confirmed llm_proposed".to_string()
+        )
+    );
+    // The export carries the confirmed label at 1.0, not the 0.6 proposal.
+    let csv = h.dir.join("export.csv");
+    let stats = leesided::export::export(&db, 0, "confirm-test", &csv).unwrap();
+    assert!(stats.rows > 0);
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert!(
+        text.lines().any(|l| l.ends_with(",malicious,operator,1")),
+        "{text}"
+    );
     h.running.abort();
     h.engine.shutdown().await;
 }

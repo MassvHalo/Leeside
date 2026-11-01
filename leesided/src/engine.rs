@@ -69,6 +69,8 @@ pub struct Engine {
     /// The Windside scorer (docs/windside.md section 6): loaded once at
     /// start, read-only after.
     pub windside: WindsideState,
+    /// The LLM workers' config plus the probed JSON mode (docs/llm.md).
+    pub llm: crate::llm::State,
     /// The highest migration applied at open, for `/health`.
     pub migration_version: i64,
 }
@@ -332,6 +334,7 @@ impl Engine {
         resolver.load(store.load_actors()?, store.load_bindings(now_us)?);
         resolver.load_scores(store.load_scores()?);
         let windside = WindsideState::open(&cfg);
+        let llm = crate::llm::State::from_config(&cfg);
         let migration_version = store.migration_version()?;
         let enrich = Enricher::open(cfg.geoip_asn.as_deref(), cfg.geoip_country.as_deref());
         let ja4_classes = Ja4Classes::load(cfg.ja4_classes.as_deref());
@@ -363,6 +366,7 @@ impl Engine {
             ja4_classes,
             honey_cache: Mutex::new(HashMap::new()),
             windside,
+            llm,
             migration_version,
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
@@ -967,12 +971,14 @@ impl Engine {
                         self.store.send(StoreOp::Score(ScoreRow {
                             scope: "actor".to_string(),
                             scope_id: id_hex.clone(),
+                            turn_id: seed.clone(),
                             surface: surface.map(|s| s.as_str().to_string()),
                             ts_us,
                             score: p,
                             model_version: version,
                             top3: top3.clone(),
                         }));
+                        self.enqueue_label("actor", &id_hex, p);
                         self.store.send(StoreOp::ActorScore {
                             id: id_hex,
                             score: p,
@@ -1023,12 +1029,14 @@ impl Engine {
                         self.store.send(StoreOp::Score(ScoreRow {
                             scope: "cluster".to_string(),
                             scope_id: format!("{c:016x}"),
+                            turn_id: seed.clone(),
                             surface: surface.map(|s| s.as_str().to_string()),
                             ts_us,
                             score: p,
                             model_version: version,
                             top3: top3.clone(),
                         }));
+                        self.enqueue_label("cluster", &format!("{c:016x}"), p);
                     }
                     ScoreOutcome::Skipped => {
                         self.windside
@@ -1218,6 +1226,64 @@ impl Engine {
         }
     }
 
+    /// A row above 0.5 asks for a label proposal (docs/llm.md point 1).
+    /// The queue guard dedups, caps and budgets, so this stays
+    /// unconditional; with the LLM unconfigured it sends nothing.
+    fn enqueue_label(&self, scope: &str, subject_id: &str, score: f64) {
+        if score <= crate::llm::ENQUEUE_SCORE {
+            return;
+        }
+        let Some(exec) = self.llm.exec.as_ref() else {
+            return;
+        };
+        self.store.send(StoreOp::LlmEnqueue {
+            scope: scope.to_string(),
+            subject_id: subject_id.to_string(),
+            enqueued_by: "scorer".to_string(),
+            now_s: store::now_s(),
+            daily_calls: exec.daily_calls,
+            daily_tokens: exec.daily_tokens,
+        });
+    }
+
+    /// One worker tick: drain the LLM queue, a few jobs at a time.
+    /// Blocking HTTP, so the serve loop runs it on a blocking thread.
+    /// Returns the JSON mode the drain settled on, if any.
+    pub fn llm_drain_tick(&self) -> Option<crate::llm::JsonMode> {
+        let exec = self.llm.exec.clone()?;
+        let classes = self.ja4_classes.clone();
+        let thresholds = self
+            .windside
+            .loaded
+            .as_ref()
+            .map(|l| l.manifest.thresholds.clone())
+            .unwrap_or_default();
+        let mut settled = *self.llm.json_mode.read();
+        for _ in 0..10 {
+            let ctx = crate::llm::DrainCtx {
+                exec: exec.clone(),
+                json_mode: settled,
+                classes: classes.clone(),
+                thresholds: thresholds.clone(),
+            };
+            match crate::llm::drain_once(&self.cfg.db, &ctx) {
+                Ok((crate::llm::DrainOutcome::Empty, mode)) => {
+                    settled = mode;
+                    break;
+                }
+                Ok((_, mode)) => settled = mode,
+                Err(e) => {
+                    tracing::warn!(error = %e, "llm drain failed");
+                    break;
+                }
+            }
+        }
+        if settled != *self.llm.json_mode.read() {
+            *self.llm.json_mode.write() = settled;
+        }
+        settled
+    }
+
     pub fn health(&self) -> serde_json::Value {
         let rs = self.rules.current();
         let (sessions, peers, principals, credentials, actor_windows, clusters) =
@@ -1256,6 +1322,7 @@ impl Engine {
                     "cluster": self.windside.skipped_cluster.load(Ordering::Relaxed),
                 },
             },
+            "llm": self.llm.health(),
             "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),
             "symbols": { "count": self.symbols.len(), "overflowed": self.symbols.overflowed() },
@@ -1398,6 +1465,18 @@ pub async fn serve(engine: Arc<Engine>) -> std::io::Result<Running> {
         loop {
             tick.tick().await;
             e.flush_stats();
+        }
+    }));
+    let e = engine.clone();
+    tasks.push(tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let inner = e.clone();
+            // Blocking HTTP must not stall the runtime; overlapping
+            // ticks just find no due job.
+            let _ = tokio::task::spawn_blocking(move || inner.llm_drain_tick()).await;
         }
     }));
     Ok(Running { api_addr, tasks })
