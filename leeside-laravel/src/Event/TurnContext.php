@@ -8,7 +8,8 @@ use Throwable;
 
 class TurnContext
 {
-    public ?float $ts = null;
+    /** Integer microseconds since the epoch; the wire `ts` on v2 probes and events. */
+    public ?int $tsUs = null;
     public ?int $hrtime = null;
     /** 32 hex (16 random bytes) minted per request: the probe/event join key and the seed of actor ids. */
     public ?string $turnId = null;
@@ -26,7 +27,7 @@ class TurnContext
 
     public function begin(): void
     {
-        $this->ts = microtime(true);
+        $this->tsUs = (int) (microtime(true) * 1_000_000);
         $this->hrtime = hrtime(true);
         $this->turnId = bin2hex(random_bytes(16));
         $this->route = null;

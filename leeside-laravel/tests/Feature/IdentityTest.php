@@ -45,7 +45,7 @@ class IdentityTest extends SampleAppTestCase
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $event['ua_hash']);
         $this->assertTrue($event['remote_port'] === null || is_int($event['remote_port']));
         $this->assertIsInt($event['ts_ms']);
-        $this->assertSame((int) floor($event['ts'] * 1000), $event['ts_ms']);
+        $this->assertSame(intdiv($event['ts'], 1000), $event['ts_ms']);
         $this->assertGreaterThanOrEqual((int) floor($before * 1000), $event['ts_ms']);
 
         $probe = $this->rules->probes[0];

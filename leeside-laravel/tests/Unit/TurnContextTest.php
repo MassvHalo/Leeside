@@ -24,7 +24,7 @@ class TurnContextTest extends TestCase
 
         $context->begin();
 
-        $this->assertIsFloat($context->ts);
+        $this->assertIsInt($context->tsUs);
         $this->assertIsInt($context->hrtime);
         $this->assertNull($context->route);
         $this->assertNull($context->exception);

@@ -70,7 +70,7 @@ class TurnEventFactory
 
         return [
             'v' => 2,
-            'ts' => $context->ts ?? microtime(true),
+            'ts' => $context->tsUs ?? (int) (microtime(true) * 1_000_000),
             'turn_id' => $context->turnId ?? bin2hex(random_bytes(16)),
             'verb' => $request->getMethod(),
             'route' => $context->route ?? RouteName::fromRoute($request->route()),
@@ -150,7 +150,7 @@ class TurnEventFactory
             'ip_trust' => $this->ipTrust($request),
             'ua_class' => $uaClass,
             'remote_port' => $this->remotePort($request),
-            'ts_ms' => (int) floor($probe['ts'] * 1000),
+            'ts_ms' => intdiv($probe['ts'], 1000),
         ];
     }
 

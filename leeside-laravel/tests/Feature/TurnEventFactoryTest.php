@@ -56,7 +56,7 @@ class TurnEventFactoryTest extends TestCase
 
         $peer = $this->hasher->peerKey('10.0.0.9', 'TestAgent/1.0');
         $this->assertSame(2, $event['v']);
-        $this->assertSame($context->ts, $event['ts']);
+        $this->assertSame($context->tsUs, $event['ts']);
         $this->assertSame($peer, $event['session_key']);
         $this->assertSame($peer, $event['peer_key']);
         $this->assertSame('anon', $event['principal']);
@@ -290,7 +290,7 @@ class TurnEventFactoryTest extends TestCase
             array_keys($probe)
         );
         $this->assertSame(2, $probe['v']);
-        $this->assertSame($context->ts, $probe['ts']);
+        $this->assertSame($context->tsUs, $probe['ts']);
         $this->assertSame('POST', $probe['verb']);
         $this->assertSame('portal.login', $probe['route']);
         $this->assertSame($this->hasher->peerKey('10.1.2.3', 'Probe/1.0'), $probe['peer_key']);

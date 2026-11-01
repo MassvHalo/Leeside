@@ -49,7 +49,7 @@ can neither see the route template in `handle()` nor the session. Split the job:
 
 | Middleware | Registered | handle() | terminate() |
 | --- | --- | --- | --- |
-| `CaptureTurn` | Global, appended (catches 404s and unrouted turns) | Stamps `ts` and `hrtime` on a per-request `TurnContext`. Nothing else. | After the response has gone out: build the event, hand it to the transport. Never throws. |
+| `CaptureTurn` | Global, appended (catches 404s and unrouted turns) | Stamps `ts` (integer microseconds) and `hrtime` on a per-request `TurnContext`. Nothing else. | After the response has gone out: build the event, hand it to the transport. Never throws. |
 | `GateTurn` | Appended to the `web` and `api` groups; added to middleware priority before `SubstituteBindings` (after `Authenticate` and `StartSession`) so binding failures still probe; `TagTurn` reads ahead of the gate so the probe carries a valid `tag_id` | Sets `route` on the context, builds the probe, calls `RuleClient::check()` within the timeout, applies the verdict only when `mode == enforce`. | none |
 
 `TurnContext` is a scoped container binding (Octane-safe), reset by `begin()`
@@ -109,7 +109,8 @@ Example:
 ### The event, schema v2: surface, identifiers, tag, shape, flags
 
 As of 2026-10-31. Source: `docs/actor-identity.md`. v2 is v1 plus the fields
-below; every v1 field keeps its name and meaning. The package emits `v: 2`
+below; every v1 field keeps its name and meaning, except `ts`, which is
+integer microseconds on v2 (v1 keeps float seconds). The package emits `v: 2`
 once it fills these; leesided accepts v1 and v2 side by side and stores
 null for v2 columns on a v1 event. leesided must accept v2 before the
 package ships it.
@@ -144,7 +145,7 @@ resolves actors from them (`docs/actor-identity.md` section 8).
 | `ja4`, `ja4t`, `h2_fp` | string or null | copied from `X-Leeside-JA4`, `-JA4T`, `-H2` only when the hop was a trusted proxy; else null and the flag `proxy_header_untrusted`. No proxy produces them yet; leesided's passive tap (`leesided/docs/tap.md`) fills `ja4` and `ja4t` on its own side at ingest when the event brought null, and may add the flag `ua_vs_ja4_mismatch` to `flags` on the stored turn. `h2_fp` stays null until a proxy sends it |
 
 `auth_id` from the source brief is `principal`; `session_hash` is
-`session_key`; `ts_ms` is `ts`, which already carries microseconds.
+`session_key`; `ts_ms` is whole milliseconds derived from `ts`.
 
 **Tag cookie** (`web` surface only). Name `_lsd` (configurable). Value
 `base64url(id || issued_at) . "." . base64url(mac)`: `id` 16 random bytes,
@@ -199,7 +200,7 @@ never verdicts.
 
 | `turn_id` | 32 hex | minted by the package per request (16 random bytes), on the probe and the event; the join key between them and the seed of leesided's actor ids |
 | `remote_port` | int or null | the client source port, to tell users apart behind one NAT address |
-| `ts_ms` | int | request time in whole milliseconds; `ts` keeps the float with microseconds |
+| `ts_ms` | int | request time in whole milliseconds (`ts` divided by 1000); `ts` is integer microseconds |
 
 **What leesided does with v2.** `turns` gains the columns above
 (migrations 0002 to 0004). The probe gains `surface` so rules can match on
@@ -290,7 +291,7 @@ surface, count per credential, and leesided can find the actor at probe
 time by the highest-precedence identifier present:
 
 ```json
-{"v":2,"ts":1761600000.123,"turn_id":"3f9c2e71a0b4d6e8a1b2c3d4e5f60718","verb":"POST","route":"portal.login",
+{"v":2,"ts":1761600000123000,"turn_id":"3f9c2e71a0b4d6e8a1b2c3d4e5f60718","verb":"POST","route":"portal.login",
  "surface":"web","session_key":"a1b2c3d4e5f60718","peer_key":"0f1e2d3c4b5a6978","principal":"anon",
  "credential_hash":null,"credential_status":null,"tag_id":"7d2b9e4c1a6f0e3b"}
 ```

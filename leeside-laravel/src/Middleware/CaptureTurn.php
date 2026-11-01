@@ -37,7 +37,7 @@ class CaptureTurn
                 return;
             }
 
-            if ($this->context->ts === null) {
+            if ($this->context->tsUs === null) {
                 return;
             }
 
