@@ -691,13 +691,19 @@ Environment variables, read once at start; no config file in v1.
 | `LEESIDED_SOCKET_MODE` | `660` (octal) | permission bits on both sockets |
 | `LEESIDED_SOCKET_GID` | unset | numeric group to chown the sockets to (www-data's gid on the sample host); numeric so the daemon never reads `/etc/group` |
 | `LEESIDED_HASH_KEY` | unset | the package's `LEESIDE_HASH_KEY`; enables `ip_hash`/`net_hash` on ingest |
+| `LEESIDED_HONEYTOKEN_ROUTES` | empty | comma-separated route names that are honeytokens: a hit labels the actor's windows malicious for the following hour (windside section 3) |
+| `LEESIDED_BUSINESS_ROUTES` | empty | comma-separated app-defined route names counting as completed business actions: with a verified credential and a sub-400 status they label the actor's window benign |
 
 Socket paths count against the 108-byte `sun_path` limit; keep
 `LEESIDED_SOCKET_DIR` short.
 
 Subcommands: `leesided serve` (default), `leesided rules schema`, `leesided
-rules export`, `leesided rules validate <file>`. `serve` stops on SIGINT
-after flushing stats and draining the writer (`StoreOp::Shutdown`).
+rules export`, `leesided rules validate <file>`, `leesided label-import
+<manifest>` (labels a generator run's windows from its manifest's warmup
+watermark; needs `LEESIDED_DB` on the run database), `leesided export
+--since <unix_s> --run-id <id> --out <csv>` (one CSV row per labeled
+window plus a manifest). `serve` stops on SIGINT after flushing stats
+and draining the writer (`StoreOp::Shutdown`).
 
 The install set is imported as `active` in **shadow** regardless of the mode
 its file says, so a git-tracked `enforce` never goes live on first start;
@@ -711,7 +717,9 @@ window, `is_anon`) plus `cluster_actors_net`, `shape_cluster_size`,
 `tag_dropped`, `credential_moved` and four surface indicators. Ingest
 writes one `feature_vectors` row per **confirmed** actor window and one per
 cluster window at every turn that touched them (a provisional actor is one
-turn and noise; cookie-less traffic scores through its cluster). Two rules
+turn and noise; cookie-less traffic scores through its cluster), each row
+carrying the triggering turn's `surface` (migration 0008) for per-surface
+eval. Two rules
 hold for every name: rule outcomes are never features, raw identifiers are
 never features (counts of distinct hashes are); `names_pass_the_denylist`
 enforces both. The repo's v1, per session into the `features` table, was the

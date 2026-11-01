@@ -31,9 +31,11 @@ fn main() {
         }
         ["rules", "export"] => run_export(),
         ["tap", rest @ ..] => run_tap(rest),
+        ["label-import", path] => run_label_import(path),
+        ["export", rest @ ..] => run_export_data(rest),
         _ => {
             eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH]]"
+                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv>]"
             );
             std::process::exit(2);
         }
@@ -111,6 +113,82 @@ fn run_serve() {
         running.abort();
         engine.shutdown().await;
     });
+}
+
+fn run_label_import(path: &str) {
+    let cfg = Config::from_env();
+    let Some(key) = cfg.hash_key.as_deref() else {
+        eprintln!(
+            "leesided label-import: LEESIDED_HASH_KEY must be set (labels join on the hashed source address)"
+        );
+        std::process::exit(1);
+    };
+    match leesided::labels::import(&cfg.db, std::path::Path::new(path), key) {
+        Ok(s) => println!(
+            "labels: {} (actor {}, cluster {})",
+            s.total(),
+            s.actor,
+            s.cluster
+        ),
+        Err(e) => {
+            eprintln!("leesided label-import: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_export_data(args: &[&str]) {
+    let mut since_s: i64 = 0;
+    let mut run_id: Option<&str> = None;
+    let mut out: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--since" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided export: --since needs a value");
+                    std::process::exit(2);
+                };
+                since_s = v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided export: --since is unix seconds, not {v}");
+                    std::process::exit(2);
+                });
+            }
+            "--run-id" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided export: --run-id needs a value");
+                    std::process::exit(2);
+                };
+                run_id = Some(v);
+            }
+            "--out" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided export: --out needs a value");
+                    std::process::exit(2);
+                };
+                out = Some(v);
+            }
+            _ => {
+                eprintln!("leesided export: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(out), Some(run_id)) = (out, run_id) else {
+        eprintln!("leesided export: --run-id <id> and --out <csv> are required");
+        std::process::exit(2);
+    };
+    let cfg = Config::from_env();
+    match leesided::export::export(&cfg.db, since_s, run_id, std::path::Path::new(out)) {
+        Ok(s) => println!(
+            "export: {} rows (actor {}, cluster {}) -> {out}",
+            s.rows, s.actor, s.cluster
+        ),
+        Err(e) => {
+            eprintln!("leesided export: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn run_export() {

@@ -17,10 +17,12 @@ use crate::rules::windows::{id8, is_hex, key16, principal_key, EventKeys, TurnSu
 use crate::store::{self, CheckRecord, FeatureRow, Store, StoreError, StoreOp, TurnRow};
 use crate::tap::classes::{is_browser_ua, Class, Ja4Classes};
 use crate::tap::conns::{Connections, Hit, Pending};
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,6 +35,10 @@ pub struct Counters {
     pub events: AtomicU64,
     pub bad_event: AtomicU64,
 }
+
+/// A honeytoken hit labels the actor's windows for the following hour
+/// (docs/windside.md section 3).
+const HONEYTOKEN_LABEL_US: i64 = 3_600 * 1_000_000;
 
 pub struct Engine {
     pub cfg: Config,
@@ -56,6 +62,10 @@ pub struct Engine {
     pub conns: Connections,
     /// JA4 to client class, for `ua_vs_ja4_mismatch`.
     pub ja4_classes: Ja4Classes,
+    /// Honeytoken hits by actor: `(hit_ts_us, until_us)`, write-through to
+    /// the `honeytoken_hits` table, so the hour survives a restart but a
+    /// burst of turns for one actor never waits on the writer.
+    honey_cache: Mutex<HashMap<u64, (i64, i64)>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -237,6 +247,7 @@ impl Engine {
             enrich,
             conns: Connections::default(),
             ja4_classes,
+            honey_cache: Mutex::new(HashMap::new()),
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -543,6 +554,23 @@ impl Engine {
         line_of(&Verdict::allow(rs, global))
     }
 
+    /// A live honeytoken hit for this actor returns its hit timestamp.
+    /// The cache is write-through: a hit lands here before its `StoreOp`
+    /// reaches the writer, so a burst never misses its own hour, and a
+    /// cache miss falls back to the table, so the hour survives a restart.
+    fn honey_live(&self, actor: u64, ts_us: i64) -> Option<i64> {
+        if let Some((hit, until)) = self.honey_cache.lock().get(&actor) {
+            return (*until >= ts_us).then_some(*hit);
+        }
+        let (hit, until) = self.store.honeytoken_hit(&format!("{actor:016x}")).ok()??;
+        if until >= ts_us {
+            self.honey_cache.lock().insert(actor, (hit, until));
+            Some(hit)
+        } else {
+            None
+        }
+    }
+
     /// One event datagram: validate, feed the windows, write the turn and
     /// its feature row. Rejected events are counted, never logged in full.
     pub fn ingest(&self, data: &[u8]) -> Result<(), IngestError> {
@@ -768,8 +796,10 @@ impl Engine {
             shape_cluster_size: shape_ident
                 .map_or(0, |i| self.resolver.cluster_size(i, around, ts_us)),
         };
+        let mut actor_row = None;
         if let Some(a) = actor.filter(|a| self.resolver.actor(*a).is_some_and(|x| x.confirmed)) {
             if let Some(w) = self.windows.actor(a) {
+                actor_row = Some(a);
                 let p = self.windows.peer(peer);
                 let values = features::extract(
                     &w,
@@ -779,14 +809,18 @@ impl Engine {
                     syms,
                     context(a),
                 );
+                let clock_anomalies = w.clock_anomalies();
                 drop(p);
                 drop(w);
                 self.store.send(StoreOp::Feature(FeatureRow {
                     scope: "actor",
                     key: format!("{a:016x}"),
+                    turn_id: seed.clone(),
                     ts_us,
                     version: features::VERSION,
                     values: values.to_vec(),
+                    surface: surface.map(|s| s.as_str().to_string()),
+                    clock_anomalies,
                 }));
             }
         }
@@ -801,15 +835,78 @@ impl Engine {
                     syms,
                     context(actor.unwrap_or(0)),
                 );
+                let clock_anomalies = w.clock_anomalies();
                 drop(p);
                 drop(w);
                 self.store.send(StoreOp::Feature(FeatureRow {
                     scope: "cluster",
                     key: format!("{c:016x}"),
+                    turn_id: seed.clone(),
                     ts_us,
                     version: features::VERSION,
                     values: values.to_vec(),
+                    surface: surface.map(|s| s.as_str().to_string()),
+                    clock_anomalies,
                 }));
+            }
+        }
+
+        // Auto-labelers (docs/windside.md section 3): honeytoken and
+        // verified_business label the actor's own window only. The
+        // rule_decision labeler lives in the writer, on the check join.
+        if let Some(a) = actor_row {
+            let surface_name = surface.map(|s| s.as_str().to_string());
+            let label = |label: &'static str,
+                         source: &'static str,
+                         confidence: f64,
+                         note: Option<String>| {
+                self.store.send(StoreOp::Label(store::LabelRow {
+                    scope: "actor",
+                    scope_id: format!("{a:016x}"),
+                    surface: surface_name.clone(),
+                    window_end_ts: ts_us,
+                    label,
+                    source,
+                    confidence,
+                    kind: None,
+                    note,
+                    created_at: store::now_s(),
+                }));
+            };
+            if self.cfg.honeytoken_routes.iter().any(|r| r == &ev.route) {
+                let until_us = ts_us + HONEYTOKEN_LABEL_US;
+                self.honey_cache.lock().insert(a, (ts_us, until_us));
+                self.store.send(StoreOp::HoneytokenHit {
+                    actor_id: format!("{a:016x}"),
+                    hit_ts_us: ts_us,
+                    until_us,
+                });
+                label("malicious", "honeytoken", 0.9, Some(ev.route.clone()));
+            } else if let Some(hit_ts) = self.honey_live(a, ts_us) {
+                label(
+                    "malicious",
+                    "honeytoken",
+                    0.9,
+                    Some(format!("hit:{hit_ts}")),
+                );
+            } else if credential_verified
+                && ev.status < 400
+                && self.cfg.business_routes.iter().any(|r| r == &ev.route)
+            {
+                label("benign", "verified_business", 0.8, Some(ev.route.clone()));
+            }
+        } else if let Some(a) = actor {
+            if self.cfg.honeytoken_routes.iter().any(|r| r == &ev.route) {
+                // A honeytoken hit by a provisional actor still opens the
+                // hour: the actor's later rows, once confirmed, label from
+                // the hit.
+                let until_us = ts_us + HONEYTOKEN_LABEL_US;
+                self.honey_cache.lock().insert(a, (ts_us, until_us));
+                self.store.send(StoreOp::HoneytokenHit {
+                    actor_id: format!("{a:016x}"),
+                    hit_ts_us: ts_us,
+                    until_us,
+                });
             }
         }
 

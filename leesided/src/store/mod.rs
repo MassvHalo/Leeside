@@ -36,6 +36,12 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0006_cluster_and_provisional.sql"),
     ),
     (7, include_str!("../../migrations/0007_feature_vectors.sql")),
+    (8, include_str!("../../migrations/0008_feature_surface.sql")),
+    (9, include_str!("../../migrations/0009_labels.sql")),
+    (
+        10,
+        include_str!("../../migrations/0010_clock_hardening.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -136,9 +142,33 @@ pub struct StatRow {
 pub struct FeatureRow {
     pub scope: &'static str,
     pub key: String,
+    /// The triggering turn's id (the v1 `peer_key:ts_us` seed when the
+    /// turn has none): the row's identity, unaffected by clock steps.
+    pub turn_id: String,
     pub ts_us: i64,
     pub version: u32,
     pub values: Vec<f32>,
+    /// The triggering turn's surface (`web`, `api`, …); None for v1 turns.
+    pub surface: Option<String>,
+    /// Negative inter-request intervals in the window: provenance on the
+    /// row, never a feature.
+    pub clock_anomalies: u32,
+}
+
+/// One `labels` row (docs/windside.md section 3): a label on one feature
+/// row, written by the auto-labelers, the check join, or label-import.
+#[derive(Debug, Clone)]
+pub struct LabelRow {
+    pub scope: &'static str,
+    pub scope_id: String,
+    pub surface: Option<String>,
+    pub window_end_ts: i64,
+    pub label: &'static str,
+    pub source: &'static str,
+    pub confidence: f64,
+    pub kind: Option<String>,
+    pub note: Option<String>,
+    pub created_at: i64,
 }
 
 // `Turn` carries the whole row by value: one hop through the channel per
@@ -179,6 +209,13 @@ pub enum StoreOp {
         ja4: Option<String>,
         ja4t: Option<String>,
         mismatch: bool,
+    },
+    Label(LabelRow),
+    /// A honeytoken hit: the actor's windows label malicious until `until_us`.
+    HoneytokenHit {
+        actor_id: String,
+        hit_ts_us: i64,
+        until_us: i64,
     },
     /// Commit everything queued before this and reply.
     Flush(oneshot::Sender<()>),
@@ -684,7 +721,7 @@ impl Store {
             let mut stmt = c.prepare(
                 "SELECT session_key, peer_key, principal, credential_hash, credential_status, actor_id, ts_us, \
                  route, verb, status, validation_failed, exception, auth_event, req_shape, bound, bytes_out, \
-                 latency_ms, ua_hash, cluster_key, surface, tag_status, net_hash FROM turns WHERE ts_us >= ?1 ORDER BY ts_us ASC",
+                 latency_ms, ua_hash, cluster_key, surface, tag_status, net_hash FROM turns WHERE ts_us >= ?1 ORDER BY ingest_seq ASC",
             )?;
             let rows = stmt.query_map(params![since_us], |r| {
                 Ok(ReplayRow {
@@ -782,9 +819,26 @@ impl Store {
         let sql = format!("SELECT count(*) FROM {table}");
         self.with_reader(|c| c.query_row(&sql, [], |r| r.get(0)))
     }
+
+    /// The live honeytoken hit for an actor, if any: `(hit_ts_us, until_us)`.
+    /// The engine's auto-labeler reads this through a write-through cache.
+    pub fn honeytoken_hit(&self, actor_id: &str) -> Result<Option<(i64, i64)>, StoreError> {
+        self.with_reader(|c| {
+            c.query_row(
+                "SELECT hit_ts_us, until_us FROM honeytoken_hits WHERE actor_id = ?1",
+                params![actor_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })
+        })
+    }
 }
 
-fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")?;
     let current: i64 = conn.query_row(
         "SELECT coalesce(max(version), 0) FROM schema_version",

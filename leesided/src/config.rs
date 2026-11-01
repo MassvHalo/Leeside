@@ -26,6 +26,13 @@ pub struct Config {
     pub geoip_country: Option<PathBuf>,
     /// `data/ja4-classes.json`: JA4 to browser/library, for `ua_vs_ja4_mismatch` (docs/tap.md).
     pub ja4_classes: Option<PathBuf>,
+    /// Route names that are honeytokens (docs/windside.md section 3): a hit
+    /// labels the actor's windows malicious for the following hour.
+    pub honeytoken_routes: Vec<String>,
+    /// App-defined route names that count as completed business actions:
+    /// with a verified credential and a sub-400 status they label the
+    /// actor's window benign (`verified_business`).
+    pub business_routes: Vec<String>,
 }
 
 impl Default for Config {
@@ -43,6 +50,8 @@ impl Default for Config {
             geoip_asn: None,
             geoip_country: None,
             ja4_classes: Some(default_ja4_classes()),
+            honeytoken_routes: Vec::new(),
+            business_routes: Vec::new(),
         }
     }
 }
@@ -128,6 +137,12 @@ impl Config {
         if let Ok(v) = std::env::var("LEESIDED_JA4_CLASSES") {
             cfg.ja4_classes = (!v.is_empty()).then(|| PathBuf::from(v));
         }
+        if let Ok(v) = std::env::var("LEESIDED_HONEYTOKEN_ROUTES") {
+            cfg.honeytoken_routes = split_routes(&v);
+        }
+        if let Ok(v) = std::env::var("LEESIDED_BUSINESS_ROUTES") {
+            cfg.business_routes = split_routes(&v);
+        }
         cfg
     }
 
@@ -143,4 +158,13 @@ impl Config {
     pub fn fp_sock(&self) -> PathBuf {
         self.socket_dir.join("fp.sock")
     }
+}
+
+/// Comma-separated route names; empty entries dropped.
+fn split_routes(v: &str) -> Vec<String> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }

@@ -3,8 +3,8 @@
 //! theirs (the event beat the tap's datagram).
 //!
 //! Key: a keyed hash of `ip:port`, so the map holds no address. A turn joins
-//! the connection whose `[syn_ts - slack, close_ts + grace]` holds its
-//! `ts_ms`; that is what makes port reuse behind a NAT harmless. Entries
+//! the connection whose `[syn_ts - slack, close_ts + grace + slack]` holds
+//! its `ts_ms`; that is what makes port reuse behind a NAT harmless. Entries
 //! live until FIN or RST plus 30 s, or 5 min idle, under a size cap with
 //! oldest-first eviction. A deferred turn waits 60 s, then its columns stay
 //! null and `missed` counts it.
@@ -39,7 +39,7 @@ impl Conn {
         ts_ms + SLACK_MS >= self.syn_ts
             && self
                 .close_ts
-                .is_none_or(|c| ts_ms <= c.saturating_add(GRACE_MS))
+                .is_none_or(|c| ts_ms <= c.saturating_add(GRACE_MS).saturating_add(SLACK_MS))
     }
 }
 
@@ -381,6 +381,35 @@ mod tests {
         assert_eq!(c.stats().missed, 0);
         c.sweep(3_000 + DEFER_MS + 1);
         assert_eq!((c.stats().missed, c.stats().pending), (1, 0));
+    }
+
+    #[test]
+    fn join_tolerates_a_second_of_skew_on_both_bounds() {
+        let c = Connections::default();
+        // A tap message stamped 500 ms after the request still joins it.
+        c.defer(
+            7,
+            Pending {
+                turn_id: "t1".into(),
+                ts_ms: 10_000,
+                since: 10_000,
+                browser_ua: true,
+                need_ja4: true,
+                need_ja4t: false,
+            },
+        );
+        let mut m = msg(10_500);
+        m.ja4 = Some("J".into());
+        m.tls = Some(true);
+        let fills = c.observe(7, &m);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].turn_id, "t1");
+        // And a turn 500 ms past close-plus-grace still joins.
+        let mut close = msg(11_000);
+        close.close = true;
+        c.observe(7, &close);
+        assert!(c.lookup(7, 11_000 + GRACE_MS + 500).found);
+        assert!(!c.lookup(7, 11_000 + GRACE_MS + SLACK_MS + 1).found);
     }
 
     #[test]

@@ -116,6 +116,17 @@ impl Window {
         self.turns.is_empty()
     }
 
+    /// Negative inter-request intervals between consecutive turns in
+    /// ingest order: how many times the wall clock stepped backward
+    /// inside this window. Provenance for the row, never a feature.
+    pub fn clock_anomalies(&self) -> u32 {
+        self.turns
+            .iter()
+            .zip(self.turns.iter().skip(1))
+            .filter(|(prev, next)| next.ts_ms < prev.ts_ms)
+            .count() as u32
+    }
+
     fn distinct_routes(&self) -> u32 {
         let mut seen: SmallVec<[Sym; 16]> = SmallVec::new();
         for t in &self.turns {

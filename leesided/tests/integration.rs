@@ -33,11 +33,41 @@ impl Harness {
         Harness::open(dir).await
     }
 
+    async fn start_with_routes(honeytoken_routes: &[&str], business_routes: &[&str]) -> Harness {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Harness::open_with_routes(
+            dir,
+            honeytoken_routes.iter().map(|s| s.to_string()).collect(),
+            business_routes.iter().map(|s| s.to_string()).collect(),
+        )
+        .await
+    }
+
     async fn open(dir: PathBuf) -> Harness {
         Harness::open_with(dir, None).await
     }
 
     async fn open_with(dir: PathBuf, api_token: Option<&str>) -> Harness {
+        Harness::open_full(dir, api_token, Vec::new(), Vec::new()).await
+    }
+
+    async fn open_with_routes(
+        dir: PathBuf,
+        honeytoken_routes: Vec<String>,
+        business_routes: Vec<String>,
+    ) -> Harness {
+        Harness::open_full(dir, None, honeytoken_routes, business_routes).await
+    }
+
+    async fn open_full(
+        dir: PathBuf,
+        api_token: Option<&str>,
+        honeytoken_routes: Vec<String>,
+        business_routes: Vec<String>,
+    ) -> Harness {
         let cfg = Config {
             socket_dir: dir.clone(),
             db: dir.join("leesided.sqlite"),
@@ -54,6 +84,8 @@ impl Harness {
                 env!("CARGO_MANIFEST_DIR"),
                 "/data/ja4-classes.json"
             ))),
+            honeytoken_routes,
+            business_routes,
         };
         let engine = Engine::open(cfg).await.expect("engine open");
         let running = serve(engine.clone()).await.expect("serve");
@@ -580,6 +612,8 @@ async fn api_validate_schema_export_and_pinned_mode() {
         geoip_asn: None,
         geoip_country: None,
         ja4_classes: None,
+        honeytoken_routes: Vec::new(),
+        business_routes: Vec::new(),
     };
     let engine = Engine::open(cfg).await.unwrap();
     let running = serve(engine.clone()).await.unwrap();
@@ -766,14 +800,19 @@ async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
         1,
         "a credential window was opened"
     );
-    h.engine.store.flush().await;
+    // Windows update before the turn op is queued (engine::ingest), so a
+    // windows wait alone can flush before the row lands. settle() waits on
+    // the events counter, which increments after the op is sent.
+    h.settle(2).await;
     let row = h
         .engine
         .store
         .with_reader(|c| {
             c.query_row(
+                // ±1µs: the ts crosses a JSON float hop whose parse can
+                // slip 1 ulp (see the actor-row ts assert below).
                 "SELECT surface, credential_kind, credential_hash, tag_id, ip_hash, net_hash, ua_class, flags, ja4 \
-                 FROM turns WHERE session_key = ?1 AND ts_us = ?2",
+                 FROM turns WHERE session_key = ?1 AND ts_us BETWEEN ?2 - 1 AND ?2 + 1",
                 rusqlite::params![SESSION, ts_us(now)],
                 |r| {
                     Ok((
@@ -818,7 +857,9 @@ async fn v2_events_are_stored_with_hashed_ip_and_v1_still_accepted() {
         .store
         .with_reader(|c| {
             c.query_row(
-                "SELECT surface FROM turns WHERE ts_us = ?1",
+                // ±1µs for the JSON float hop (see above); without the
+                // range a 1-ulp slip would pass vacuously via no row.
+                "SELECT surface FROM turns WHERE ts_us BETWEEN ?1 - 1 AND ?1 + 1",
                 rusqlite::params![ts_us(now + 1.0)],
                 |r| r.get(0),
             )
@@ -1648,7 +1689,16 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
         "the first window already covers the provisional turn"
     );
     assert_eq!(at(&v, "distinct_routes"), 2.0);
-    assert_eq!(actors[0].1, ts_us(now - 10.0));
+    // ±1µs: the ts crosses a JSON float hop and serde_json's parser can
+    // return the 1-ulp neighbor, so the stored ts_us can differ by 1µs
+    // from the pre-hop value. Production never needs bitwise ts across
+    // the hop (order is ingest_seq; joins reuse same-hop values).
+    assert!(
+        (actors[0].1 - ts_us(now - 10.0)).abs() <= 1,
+        "row ts {} is the confirming turn's {}",
+        actors[0].1,
+        ts_us(now - 10.0)
+    );
     let version: i64 = h
         .engine
         .store
@@ -1659,6 +1709,95 @@ async fn features_v2_rows_per_confirmed_actor_and_per_cluster() {
         })
         .unwrap();
     assert_eq!(version as u32, VERSION);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_65th_turn_evicts_the_first() {
+    use leesided::rules::features::NAMES;
+    let h = Harness::start().await;
+    let now = now_f64();
+    // One cluster, 65 turns: the window holds the newest 64, the total counts all.
+    for i in 0..65u64 {
+        h.event(&tagless_event(
+            now - 300.0 + i as f64,
+            &format!("{i:032x}"),
+            &format!("{:016x}", 0x6000 + i),
+        ))
+        .await;
+    }
+    h.wait_for("65 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 65
+    })
+    .await;
+    h.engine.store.flush().await;
+    let clusters = feature_rows(&h, "cluster");
+    assert_eq!(clusters.len(), 65, "a row per turn");
+    let at = |v: &[f32], name: &str| v[NAMES.iter().position(|n| *n == name).unwrap()];
+    let first: Vec<f32> = serde_json::from_str(&clusters.first().unwrap().2).unwrap();
+    assert_eq!(at(&first, "turns_held"), 1.0);
+    assert_eq!(at(&first, "turns_total"), 1.0);
+    let last: Vec<f32> = serde_json::from_str(&clusters.last().unwrap().2).unwrap();
+    assert_eq!(at(&last, "turns_held"), 64.0, "the window holds 64");
+    assert_eq!(
+        at(&last, "turns_total"),
+        65.0,
+        "the total counts the evicted one"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_s_surface_is_its_turn_s() {
+    use leesided::rules::features::NAMES;
+    let h = Harness::start().await;
+    let now = now_f64();
+    // One cluster across three surfaces; the window mixes them, each row
+    // carries the surface of the turn that triggered it.
+    for (i, surface) in ["web", "api", "webhook"].iter().enumerate() {
+        let ev = tagless_event(
+            now - 10.0 + i as f64,
+            &format!("{i:032x}"),
+            &format!("{:016x}", 0x7000 + i),
+        )
+        .replace(r#""surface":"web""#, &format!(r#""surface":"{surface}""#));
+        h.event(&ev).await;
+    }
+    h.settle(3).await;
+    let surfaces: Vec<Option<String>> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            let mut st = c.prepare(
+                "SELECT surface FROM feature_vectors WHERE scope = 'cluster' ORDER BY ts_us",
+            )?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+        .unwrap();
+    assert_eq!(
+        surfaces,
+        vec![
+            Some("web".to_string()),
+            Some("api".to_string()),
+            Some("webhook".to_string())
+        ]
+    );
+    let clusters = feature_rows(&h, "cluster");
+    assert_eq!(clusters.len(), 3, "mixed surfaces share one window");
+    let at = |v: &[f32], name: &str| v[NAMES.iter().position(|n| *n == name).unwrap()];
+    let last: Vec<f32> = serde_json::from_str(&clusters.last().unwrap().2).unwrap();
+    assert_eq!(
+        (
+            at(&last, "surface_web"),
+            at(&last, "surface_api"),
+            at(&last, "surface_webhook")
+        ),
+        (0.0, 0.0, 1.0),
+        "the indicators name the newest turn's surface"
+    );
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -1827,11 +1966,20 @@ async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
     h.event(&fp_event(now, &"c".repeat(32), 51234, None, "library"))
         .await;
     // Another port the tap never saw: nothing to join, the turn waits.
-    h.event(&fp_event(now + 0.1, &"d".repeat(32), 51235, None, "library"))
-        .await;
+    h.event(&fp_event(
+        now + 0.1,
+        &"d".repeat(32),
+        51235,
+        None,
+        "library",
+    ))
+    .await;
     h.settle(2).await;
     assert_eq!(
-        (h.engine.store.dropped(), h.engine.store.count("turns").unwrap()),
+        (
+            h.engine.store.dropped(),
+            h.engine.store.count("turns").unwrap()
+        ),
         (0, 2),
         "bad_event {}",
         h.engine.counters.bad_event.load(Ordering::Relaxed)
@@ -1846,6 +1994,23 @@ async fn tap_fingerprints_join_the_turn_by_connection_and_time() {
     );
     let (ja4, ja4t, _) = h.turn_fp(&"d".repeat(32));
     assert!(ja4.is_none() && ja4t.is_none());
+    // The tap's JA4 feeds the weak ja4+asn binding at ingest (docs/tap.md).
+    // Actor 0 exists nowhere, so cluster_size counts every actor recorded
+    // under this fingerprint; asn is 0 without GeoIP databases.
+    use leesided::actors::{Ident, Kind};
+    let ja4_ident = Ident::pair(
+        Kind::Ja4Asn,
+        h.engine
+            .resolver
+            .key("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1"),
+        0,
+    );
+    assert_eq!(
+        h.engine
+            .resolver
+            .cluster_size(ja4_ident, 0, (now * 1e6) as i64),
+        1
+    );
     let s = h.engine.conns.stats();
     assert_eq!(
         (s.matched, s.unknown, s.deferred, s.missed),
@@ -1965,6 +2130,290 @@ async fn a_trusted_proxy_ja4_on_the_event_is_kept_and_a_mismatch_flags_at_ingest
         .await;
     h.wait_for("bad message", || h.engine.conns.stats().bad_message == 1)
         .await;
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+fn cred_event(
+    ts: f64,
+    turn_id: &str,
+    session: &str,
+    tag: &str,
+    route: &str,
+    status: u16,
+    cred_status: &str,
+) -> String {
+    json!({"v":2,"ts":ts,"turn_id":turn_id,"session_key":session,"peer_key":PEER,"principal":"anon","verb":"GET",
+        "route":route,"status":status,"latency_ms":1.0,"bytes_in":0,"bytes_out":100,"req_shape":"[]","resp_shape":"html",
+        "bound":[],"validation_failed":null,"exception":null,"auth_event":null,"gate":null,
+        "ua_hash":"9c8b7a6f9c8b7a6f","dropped_since_last":0,"surface":"web","tag_id":tag,"tag_status":"valid",
+        "credential_kind":"api_key","credential_hash":"0011223344556677","credential_status":cred_status,
+        "ip":"203.0.113.7","ip_trust":"direct","ua_class":"chromium"})
+    .to_string()
+}
+
+fn all_labels(h: &Harness) -> Vec<(String, String, String, f64, Option<String>)> {
+    h.engine
+        .store
+        .with_reader(|c| {
+            let mut st = c.prepare(
+                "SELECT scope, label, source, confidence, note FROM labels ORDER BY window_end_ts",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            rows.collect()
+        })
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn honeytoken_labels_the_hit_and_the_following_hour() {
+    let h = Harness::start_with_routes(&["admin.backup"], &[]).await;
+    let now = now_f64();
+    // Provisional first sighting: no actor row, no label.
+    h.event(&tagged_event(
+        now,
+        "00000000000000000000000000000b01",
+        SESSION,
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    // The hit confirms the actor: row plus label.
+    h.event(&tagged_event(
+        now + 60.0,
+        "00000000000000000000000000000b02",
+        SESSION,
+        "anon",
+        TAG,
+        "admin.backup",
+    ))
+    .await;
+    // Inside the hour: chained label pointing at the hit.
+    h.event(&tagged_event(
+        now + 1800.0,
+        "00000000000000000000000000000b03",
+        SESSION,
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    // Past the hour: row, no label.
+    h.event(&tagged_event(
+        now + 3700.0,
+        "00000000000000000000000000000b04",
+        SESSION,
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    h.wait_for("4 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 4
+    })
+    .await;
+    h.engine.store.flush().await;
+    let labels = all_labels(&h);
+    assert_eq!(labels.len(), 2, "{labels:?}");
+    assert_eq!(labels[0].0, "actor");
+    assert_eq!(labels[0].1, "malicious");
+    assert_eq!(labels[0].2, "honeytoken");
+    assert_eq!(labels[0].3, 0.9);
+    assert_eq!(labels[0].4.as_deref(), Some("admin.backup"));
+    assert_eq!(labels[1].2, "honeytoken");
+    assert!(
+        labels[1]
+            .4
+            .as_deref()
+            .is_some_and(|n| n.starts_with("hit:")),
+        "{labels:?}"
+    );
+    let orphans: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT count(*) FROM labels l LEFT JOIN feature_vectors fv \
+                 ON fv.scope = l.scope AND fv.key = l.scope_id AND fv.ts_us = l.window_end_ts \
+                 WHERE fv.ts_us IS NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(orphans, 0, "every label sits on a real row");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verified_business_labels_completed_actions_only() {
+    let h = Harness::start_with_routes(&[], &["portal.login"]).await;
+    let now = now_f64();
+    // A verified credential is a strong ident: confirmed on first sight.
+    h.event(&cred_event(
+        now,
+        "00000000000000000000000000000c01",
+        SESSION,
+        TAG,
+        "portal.login",
+        200,
+        "verified",
+    ))
+    .await;
+    // Rejected, off-list, and unverified turns: rows, no labels.
+    h.event(&cred_event(
+        now + 1.0,
+        "00000000000000000000000000000c02",
+        SESSION,
+        TAG,
+        "portal.login",
+        403,
+        "verified",
+    ))
+    .await;
+    h.event(&cred_event(
+        now + 2.0,
+        "00000000000000000000000000000c03",
+        SESSION,
+        TAG,
+        "home",
+        200,
+        "verified",
+    ))
+    .await;
+    h.event(&cred_event(
+        now + 3.0,
+        "00000000000000000000000000000c04",
+        SESSION,
+        TAG,
+        "portal.login",
+        200,
+        "unverified",
+    ))
+    .await;
+    h.wait_for("4 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 4
+    })
+    .await;
+    h.engine.store.flush().await;
+    let labels = all_labels(&h);
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert_eq!(labels[0].0, "actor");
+    assert_eq!(labels[0].1, "benign");
+    assert_eq!(labels[0].2, "verified_business");
+    assert_eq!(labels[0].3, 0.8);
+    assert_eq!(labels[0].4.as_deref(), Some("portal.login"));
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rule_decision_labels_blocks_and_nothing_else() {
+    let h = Harness::start().await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let burst: Rule = serde_json::from_value(json!({
+        "id": "label-burst", "note": "three home loads by one actor", "mode": "enforce", "action": "block",
+        "match": {"route": ["home"], "verb": ["GET"], "principal": "any", "surface": ["web"]},
+        "when": {"scope": "actor", "window_s": 600, "count": {}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(burst, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let watch: Rule = serde_json::from_value(json!({
+        "id": "label-watch", "note": "about loads are watched", "mode": "enforce", "action": "watch",
+        "match": {"route": ["about"], "verb": ["GET"], "principal": "any", "surface": ["web"]},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(watch, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_f64();
+    for (i, turn) in ["d01", "d02", "d03"].iter().enumerate() {
+        h.event(&tagged_event(
+            now - 30.0 + i as f64,
+            &format!("00000000000000000000000000000{turn}"),
+            SESSION,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("3 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 3
+    })
+    .await;
+    // The probe matches the block rule; the event joins the check to the turn.
+    let v = h
+        .probe(&tagged_probe(
+            now,
+            "00000000000000000000000000000d04",
+            "3333333333333333",
+            Some(TAG),
+            "home",
+        ))
+        .await;
+    assert_eq!(v["action"], "block", "{v}");
+    h.event(&tagged_event(
+        now,
+        "00000000000000000000000000000d04",
+        "3333333333333333",
+        "anon",
+        TAG,
+        "home",
+    ))
+    .await;
+    // A fresh actor on the watched route: watch verdict, no label.
+    let v = h
+        .probe(&tagged_probe(
+            now,
+            "00000000000000000000000000000d05",
+            "4444444444444444",
+            Some("aaaaaaaaaaaaaaaa"),
+            "about",
+        ))
+        .await;
+    assert_eq!(v["action"], "watch", "{v}");
+    h.event(&tagged_event(
+        now,
+        "00000000000000000000000000000d05",
+        "4444444444444444",
+        "anon",
+        "aaaaaaaaaaaaaaaa",
+        "about",
+    ))
+    .await;
+    h.wait_for("5 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 5
+    })
+    .await;
+    h.engine.store.flush().await;
+    let labels = all_labels(&h);
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert_eq!(labels[0].0, "actor");
+    assert_eq!(labels[0].1, "malicious");
+    assert_eq!(labels[0].2, "rule_decision");
+    assert_eq!(labels[0].3, 0.5);
+    assert_eq!(labels[0].4.as_deref(), Some("label-burst"));
+    let eligible: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row("SELECT count(*) FROM labels_test_eligible", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(eligible, 0, "rule_decision rows never enter a test set");
     h.running.abort();
     h.engine.shutdown().await;
 }

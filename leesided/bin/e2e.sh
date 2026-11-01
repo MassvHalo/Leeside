@@ -8,10 +8,19 @@
 # Sockets go under /tmp because sun_path is capped at 108 bytes.
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-SAMPLE="$HERE/../leeside-sample"
+# Normalised: the private nginx's root must not contain a .., php-fpm answers
+# "Primary script unknown" for a SCRIPT_FILENAME with one in it.
+SAMPLE="$(cd "$HERE/../leeside-sample" && pwd)"
 WORK="${E2E_DIR:-/tmp/leeside-e2e}"
 API=127.0.0.1:7391
 PORT=8765
+# One hash key per install (docs/brief.md). The e2e pins a fixed test value so
+# ip/net hashes and cluster keys exist and are deterministic, whatever the
+# operator's environment holds. Never a production key.
+E2E_HASH_KEY="${E2E_HASH_KEY:-leeside-e2e-test-key-do-not-use-in-production}"
+# Collect failures and report them all at the end; the script exits 1 naming
+# each one, so a green run means every assert below held.
+FAIL=""
 rm -rf "$WORK"; mkdir -p "$WORK/run"
 if curl -sf "http://$API/health" >/dev/null 2>&1; then
   echo "something already answers on $API (a previous run?); stop it first: pgrep -a leesided" >&2
@@ -22,14 +31,14 @@ cleanup() { kill "${PPID_:-}" "${TPID:-}" "${NGX_PID:-}" "${FPM_PID:-}" 2>/dev/n
 trap cleanup EXIT
 
 LEESIDED_SOCKET_DIR="$WORK/run" LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_API="$API" \
-LEESIDED_RULES_DIR="$HERE/rules/install" RUST_LOG=info \
+LEESIDED_RULES_DIR="$HERE/rules/install" LEESIDED_HASH_KEY="$E2E_HASH_KEY" RUST_LOG=info \
   "$HERE/target/release/leesided" serve >"$WORK/leesided.log" 2>&1 &
 LPID=$!
 for _ in $(seq 1 50); do curl -sf "http://$API/health" >/dev/null && break; sleep 0.1; done
 echo "== leesided up"; curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("mode", h["mode"], "| rules", h["rules"]["loaded"], "| hash", h["rules"]["hash"][:12])'
 
 cd "$SAMPLE"
-LEESIDE_TRANSPORT=udg LEESIDE_EVENTS_SOCKET="$WORK/run/events.sock" LEESIDE_CHECK_SOCKET="$WORK/run/check.sock" \
+LEESIDE_TRANSPORT=udg LEESIDE_EVENTS_SOCKET="$WORK/run/events.sock" LEESIDE_CHECK_SOCKET="$WORK/run/check.sock" LEESIDE_HASH_KEY="$E2E_HASH_KEY" \
   php artisan serve --host 127.0.0.1 --port $PORT >"$WORK/php.log" 2>&1 &
 PPID_=$!
 for _ in $(seq 1 100); do curl -sf -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.1; done
@@ -48,9 +57,10 @@ for k in wrong-1 wrong-2 wrong-3; do
   curl -s -o /dev/null -w "  api/ping $k -> %{http_code}\n" -H "X-Api-Key: $k" "http://127.0.0.1:$PORT/api/ping"
 done
 sleep 11   # one stats flush
-echo "== what leesided saw"
+echo "== what leesided saw: traffic script + machine surfaces only (OTP, tag, tap acts still to come)"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("checks", h["check"]["total"], "| events", h["ingest"]["total"], "| sessions", h["windows"]["sessions"], "| unjoined", h["check"]["unjoined"], "| dropped", h["store"]["dropped"])'
 sqlite3 "$WORK/leesided.sqlite" "select 'turns', count(*) from turns union all select 'joined to a verdict', count(*) from turns where verdict is not null union all select 'feature rows (actor)', count(*) from feature_vectors where scope='actor' union all select 'feature rows (cluster)', count(*) from feature_vectors where scope='cluster';"
+sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (binding 404s never probe: GateTurn runs after SubstituteBindings): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
 
 echo "== promote: global enforce, portal-otp-burst to enforce"
 curl -s -X PUT "http://$API/mode" -H 'content-type: application/json' -d '{"mode":"enforce"}'; echo
@@ -130,17 +140,32 @@ http {
     }
 }
 CONF
-  LEESIDE_TRANSPORT=udg LEESIDE_EVENTS_SOCKET="$WORK/run/events.sock" LEESIDE_CHECK_SOCKET="$WORK/run/check.sock" \
+  LEESIDE_TRANSPORT=udg LEESIDE_EVENTS_SOCKET="$WORK/run/events.sock" LEESIDE_CHECK_SOCKET="$WORK/run/check.sock" LEESIDE_HASH_KEY="$E2E_HASH_KEY" \
     "$FPM_BIN" -y "$WORK/tls/php-fpm.conf" -F >/dev/null 2>&1 & FPM_PID=$!
   nginx -c "$WORK/tls/nginx.conf" -p "$WORK/tls" -g 'daemon off;' >/dev/null 2>&1 & NGX_PID=$!
   LEESIDED_SOCKET_DIR="$WORK/run" "$TAP_BIN" tap --iface lo --ports 18443 --tls-ports 18443 >"$WORK/tap.log" 2>&1 & TPID=$!
+  BEFORE_TAP=$(sqlite3 "$WORK/leesided.sqlite" "select coalesce(max(ts_ms),0) from turns;")
   for _ in $(seq 1 50); do curl -skf -o /dev/null "https://127.0.0.1:18443/" >/dev/null 2>&1 && break; sleep 0.1; done
   sleep 0.5
-  curl -sk -o /dev/null -w "  curl   GET / -> %{http_code} (%{http_version})\n" "https://127.0.0.1:18443/"
-  python3 -c 'import ssl,urllib.request; c=ssl.create_default_context(); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE; r=urllib.request.urlopen("https://127.0.0.1:18443/",context=c,timeout=5); print("  python GET / ->", r.status)'
-  sleep 2
-  sqlite3 "$WORK/leesided.sqlite" "select '  ' || coalesce(ua_class,'-'), coalesce(ja4,'null'), coalesce(ja4t,'null'), coalesce(flags,'[]') from turns where remote_port is not null and ts_ms >= (select max(ts_ms) from turns) - 15000 order by ts_ms;"
+  CURL_W=$(curl -sk -o /dev/null -w "%{http_code} %{http_version}" "https://127.0.0.1:18443/"); echo "  curl   GET / -> $CURL_W"
+  PY_CODE=$(python3 -c 'import ssl,urllib.request,urllib.error
+c=ssl.create_default_context(); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE
+try:
+    r=urllib.request.urlopen("https://127.0.0.1:18443/",context=c,timeout=5); print(r.status)
+except urllib.error.HTTPError as e: print(e.code)'); echo "  python GET / -> $PY_CODE"
+  [ "${CURL_W%% *}" = "200" ] || FAIL="$FAIL curl:$CURL_W"
+  [ "$PY_CODE" = "200" ] || FAIL="$FAIL python:$PY_CODE"
+  for _ in $(seq 1 10); do
+    JA4_NOW=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from turns where ts_ms > $BEFORE_TAP and ja4 is not null;")
+    [ "$JA4_NOW" = "3" ] && break; sleep 1
+  done
+  echo "  TLS-act turns (past the pre-tap watermark: warmup curl + curl + python):"
+  sqlite3 "$WORK/leesided.sqlite" "select '  ' || status || ' ' || coalesce(ua_class,'-'), coalesce(ja4,'null'), coalesce(ja4t,'null'), coalesce(flags,'[]') from turns where ts_ms > $BEFORE_TAP order by ts_ms;"
+  TLS_TURNS=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) || '|' || count(ja4) || '|' || count(ja4t) from turns where ts_ms > $BEFORE_TAP;")
+  echo "  tls turns|with ja4|with ja4t: $TLS_TURNS"
+  [ "$TLS_TURNS" = "3|3|3" ] || FAIL="$FAIL tls:$TLS_TURNS"
   curl -s "http://$API/health" | python3 -c 'import sys,json; t=json.load(sys.stdin)["tap"]; print("  tap:", "messages", t["messages"], "| matched", t["matched"], "| deferred", t["deferred"], "| filled_late", t["filled_late"], "| unknown", t["unknown"])'
+  echo "  (only these TLS turns can match: the tap watches 18443, artisan serve is on $PORT)"
   kill "$TPID" "$NGX_PID" "$FPM_PID" 2>/dev/null; wait "$TPID" "$NGX_PID" "$FPM_PID" 2>/dev/null
 else
   echo "  skipped: this binary may not capture. Once: sudo setcap cap_net_raw+ep $TAP_BIN  (redo after each build)"
@@ -149,7 +174,13 @@ echo "== every turn, by surface, credential status and verdict (events, not prob
 sqlite3 "$WORK/leesided.sqlite" "select coalesce(surface,'v1'), coalesce(credential_status,'-'), coalesce(verdict,'no check'), count(*) from turns group by 1,2,3 order by 4 desc;"
 echo "== the decision in SQLite"
 sqlite3 "$WORK/leesided.sqlite" "select scope, action, mode, rule, expires_at - strftime('%s','now') || 's left' from decisions;"
-echo "== totals over every act (the earlier line counted the traffic script only)"
+echo "== totals over every act (the mid-run line above covered the traffic script and machine surfaces only)"
 curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("  checks", h["check"]["total"], "| events", h["ingest"]["total"], "| unjoined", h["check"]["unjoined"], "| bad events", h["ingest"]["bad_event"], "| dropped", h["store"]["dropped"])'
 sqlite3 "$WORK/leesided.sqlite" "select '  turns ' || count(*) || ' | joined to a verdict ' || count(verdict) || ' | with actor ' || count(actor_id) || ' | with cluster ' || count(cluster_key) || ' | with ja4 ' || count(ja4) from turns;"
+sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (binding 404s never probe: GateTurn runs after SubstituteBindings): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
 echo "== logs: $WORK/leesided.log, $WORK/php.log, $WORK/tap.log; db: $WORK/leesided.sqlite"
+echo "== asserts"
+CLUSTERLESS=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from turns where cluster_key is null;")
+[ "$CLUSTERLESS" = "0" ] || FAIL="$FAIL clusterless:$CLUSTERLESS"
+if [ -n "$FAIL" ]; then echo "E2E FAILED:$FAIL"; exit 1; fi
+echo "E2E OK"

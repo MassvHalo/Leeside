@@ -135,7 +135,10 @@ pub fn extract(
     let mut cred_nets: Vec<(u64, u64)> = Vec::with_capacity(4);
     let mut credential_moved = false;
 
-    // Oldest to newest, so gaps, repeats and "issued then absent" read in time order.
+    // Oldest-ingested to newest: ingest order, not stamp order, so a
+    // backward step cannot reorder gaps, repeats or "issued then absent".
+    // Gaps clamp at zero (saturating_sub); the step itself is counted by
+    // Window::clock_anomalies and rides the row as provenance.
     let turns: Vec<&TurnSummary> = window.newest().collect();
     for t in turns.iter().rev() {
         let age = now_ms.saturating_sub(t.ts_ms);
@@ -238,11 +241,13 @@ pub fn extract(
     f[25] = repeat as f32 / heldf;
     f[26] = uas.len().saturating_sub(1) as f32;
     if let Some(p) = peer {
+        // The whole window, not until the first old turn: ingest order is
+        // not time order under a clock step, so a break would miscount.
         let mut n = 0u32;
         let mut p4 = 0u32;
         for t in p.newest() {
             if now_ms.saturating_sub(t.ts_ms) > 600_000 {
-                break;
+                continue;
             }
             n += 1;
             if (400..500).contains(&t.status) {
@@ -284,7 +289,7 @@ fn push_if_absent64(v: &mut Vec<u64>, x: u64) {
 /// Name tokens that would make a feature a rule outcome or a raw identifier.
 /// A name is split on `_` and no token may be one of these; counts of
 /// distinct values ("distinct_bound_ids", "cluster_actors_net") are fine.
-pub const DENYLIST: [&str; 20] = [
+pub const DENYLIST: [&str; 21] = [
     "rule",
     "rules",
     "verdict",
@@ -305,6 +310,7 @@ pub const DENYLIST: [&str; 20] = [
     "asn",
     "country",
     "actor",
+    "anomalies",
 ];
 
 #[cfg(test)]
@@ -331,6 +337,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn provenance_columns_fail_the_denylist() {
+        // clock_anomalies rides on the row as provenance; it must never be
+        // usable as a feature name.
+        assert!(!NAMES.contains(&"clock_anomalies"));
+        assert!(
+            "clock_anomalies".split('_').any(|t| DENYLIST.contains(&t)),
+            "clock_anomalies must fail the denylist"
+        );
     }
 
     #[test]
@@ -411,6 +428,88 @@ mod tests {
             (0.0, 1.0),
             "the newest turn is api"
         );
+    }
+
+    #[test]
+    fn a_backward_step_changes_only_the_clamped_gap_and_the_anomaly_count() {
+        let syms = Symbols::default();
+        let keys = EventKeys {
+            session: 1,
+            peer: 2,
+            principal: None,
+            credential: None,
+            actor: None,
+            cluster: None,
+        };
+        let home = syms.intern("home");
+        let fill = |w: &Windows, stamps: &[u64]| {
+            for (i, ts) in stamps.iter().enumerate() {
+                let mut t = turn(*ts, home, 200);
+                t.bytes_out = 100 * (i as i64 + 1);
+                w.record(&keys, t);
+            }
+        };
+        let mono = Windows::default();
+        fill(&mono, &[1_000, 2_000, 3_000, 4_000, 5_000]);
+        let stepped = Windows::default();
+        fill(&stepped, &[1_000, 2_000, 3_000, 2_300, 5_000]);
+        let a = mono.session(1).unwrap();
+        let b = stepped.session(1).unwrap();
+        // The same window: same turns in the same ingest order.
+        assert_eq!(a.len(), b.len());
+        let held = |w: &Window| {
+            w.newest()
+                .map(|t| (t.route, t.status, t.verb, t.bytes_out))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(held(&a), held(&b));
+        assert_eq!(a.clock_anomalies(), 0);
+        assert_eq!(b.clock_anomalies(), 1);
+        let fa = extract(&a, None, 6_000, true, &syms, Context::default());
+        let fb = extract(&b, None, 6_000, true, &syms, Context::default());
+        let at = |f: &[f32; N], name: &str| f[NAMES.iter().position(|n| *n == name).unwrap()];
+        // Gaps clamp at zero: [1000,1000,1000,1000] vs [1000,1000,0,2700].
+        assert_eq!(at(&fa, "gap_mean_ms"), 1000.0);
+        assert_eq!(at(&fb, "gap_mean_ms"), 1175.0);
+        assert_eq!(at(&fa, "gap_cv"), 0.0);
+        assert!(at(&fb, "gap_cv") > 0.0);
+        // Everything else identical.
+        for name in NAMES {
+            if name == "gap_mean_ms" || name == "gap_cv" {
+                continue;
+            }
+            assert_eq!(
+                at(&fa, name),
+                at(&fb, name),
+                "feature {name} moved under a clock step"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_counts_scan_the_whole_window_despite_stamp_order() {
+        let syms = Symbols::default();
+        let keys = EventKeys {
+            session: 1,
+            peer: 2,
+            principal: None,
+            credential: None,
+            actor: None,
+            cluster: None,
+        };
+        let home = syms.intern("home");
+        let w = Windows::default();
+        // Two fresh turns, then a turn stamped 1000 s earlier ingested
+        // last: newest-first meets the ancient stamp first.
+        for ts in [1_000_000u64, 1_001_000, 1_000] {
+            w.record(&keys, turn(ts, home, 200));
+        }
+        let s = w.session(1).unwrap();
+        let p = w.peer(2).unwrap();
+        let f = extract(&s, Some(&p), 1_001_000, true, &syms, Context::default());
+        let at = |name: &str| f[NAMES.iter().position(|n| *n == name).unwrap()];
+        assert_eq!(at("peer_turns_600s"), 2.0);
+        assert_eq!(w.session(1).unwrap().clock_anomalies(), 1);
     }
 
     #[test]

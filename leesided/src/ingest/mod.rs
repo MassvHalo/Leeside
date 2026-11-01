@@ -10,12 +10,34 @@ use tokio::net::UnixDatagram;
 /// A datagram larger than this is not a v1 event (shapes cap at 2 KB each).
 pub const MAX_DATAGRAM: usize = 65_536;
 
+/// Receive buffer for the datagram sockets. Bursts of concurrent senders
+/// (a 40-thread scanner) overrun the 208 KB default and the kernel drops
+/// silently, so ask for 4 MB; the kernel clamps to net.core.rmem_max.
+pub const RECV_BUFFER: libc::c_int = 4 * 1024 * 1024;
+
 pub fn bind(path: &Path, mode: u32, gid: Option<u32>) -> std::io::Result<UnixDatagram> {
     crate::check::prepare(path, mode, gid, |p| {
         let std_sock = std::os::unix::net::UnixDatagram::bind(p)?;
+        set_recv_buffer(&std_sock);
         std_sock.set_nonblocking(true)?;
         UnixDatagram::from_std(std_sock)
     })
+}
+
+fn set_recv_buffer(sock: &std::os::unix::net::UnixDatagram) {
+    use std::os::unix::io::AsRawFd;
+    let ret = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &RECV_BUFFER as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        tracing::warn!("SO_RCVBUF unrealised; bursts may drop datagrams");
+    }
 }
 
 /// The tap's socket: one fingerprint message per datagram, no reply.
