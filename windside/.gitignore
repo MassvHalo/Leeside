@@ -1,3 +1,10 @@
 .venv/
 __pycache__/
-models/
+# Shipped models stay in the repo so a fresh clone can run the deploy
+# runbook's step 0; regenerated artifacts (CSVs, eval reports, the unused
+# ONNX) stay out.
+models/*
+!models/0.1.0/
+models/0.1.0/*
+!models/0.1.0/manifest.json
+!models/0.1.0/model.txt

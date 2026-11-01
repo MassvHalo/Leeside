@@ -1,0 +1,225 @@
+{
+  "model_version": "0.1.0",
+  "features_version": 2,
+  "feature_names": [
+    "turns_total",
+    "turns_held",
+    "age_s",
+    "idle_s",
+    "turns_last_60s",
+    "turns_last_600s",
+    "gap_mean_ms",
+    "gap_cv",
+    "ratio_4xx",
+    "ratio_5xx",
+    "ratio_404",
+    "ratio_422",
+    "count_not_found_exc",
+    "login_failed_total",
+    "login_ok_total",
+    "distinct_routes",
+    "distinct_routes_ratio",
+    "distinct_bound_ids",
+    "unrouted_ratio",
+    "distinct_req_shapes",
+    "bytes_out_mean",
+    "bytes_out_max",
+    "latency_mean_ms",
+    "latency_max_ms",
+    "verb_post_ratio",
+    "repeat_route_ratio",
+    "ua_changes",
+    "peer_turns_600s",
+    "peer_ratio_4xx",
+    "is_anon",
+    "cluster_actors_net",
+    "shape_cluster_size",
+    "tag_dropped",
+    "credential_moved",
+    "surface_web",
+    "surface_api",
+    "surface_webhook",
+    "surface_honeypot"
+  ],
+  "cap_per_kind": 250,
+  "kinds": {
+    "attack-ffuf": {
+      "train_run": "attack-ffuf-20261101T043825Z",
+      "holdout_runs": [
+        "attack-ffuf-20261031T193745Z"
+      ],
+      "pool": 414,
+      "train_before_cap": 166,
+      "train_after_cap": 166
+    },
+    "attack-forgery": {
+      "train_run": "attack-forgery-20261101T043652Z",
+      "holdout_runs": [
+        "attack-forgery-20261031T190226Z"
+      ],
+      "pool": 200,
+      "train_before_cap": 80,
+      "train_after_cap": 80
+    },
+    "attack-honeytoken": {
+      "train_run": "attack-honeytoken-20261101T043638Z",
+      "holdout_runs": [
+        "attack-honeytoken-20261031T190232Z"
+      ],
+      "pool": 238,
+      "train_before_cap": 95,
+      "train_after_cap": 95
+    },
+    "attack-nuclei": {
+      "train_run": "attack-nuclei-20261101T043840Z",
+      "holdout_runs": [
+        "attack-nuclei-20261031T193800Z"
+      ],
+      "pool": 3429,
+      "train_before_cap": 1372,
+      "train_after_cap": 250
+    },
+    "attack-scraper": {
+      "train_run": "attack-scraper-20261101T043658Z",
+      "holdout_runs": [
+        "attack-scraper-20261031T193822Z"
+      ],
+      "pool": 478,
+      "train_before_cap": 191,
+      "train_after_cap": 191
+    },
+    "attack-scraper-nocookie": {
+      "train_run": "attack-scraper-nocookie-20261101T043742Z",
+      "holdout_runs": [
+        "attack-scraper-nocookie-20261031T193906Z"
+      ],
+      "pool": 240,
+      "train_before_cap": 96,
+      "train_after_cap": 96
+    },
+    "attack-sqlmap": {
+      "train_run": "attack-sqlmap-20261101T043832Z",
+      "holdout_runs": [
+        "attack-sqlmap-20261031T193752Z"
+      ],
+      "pool": 178,
+      "train_before_cap": 71,
+      "train_after_cap": 71
+    },
+    "attack-stuffing": {
+      "train_run": "attack-stuffing-20261101T043907Z",
+      "holdout_runs": [
+        "attack-stuffing-20261031T190207Z"
+      ],
+      "pool": 200,
+      "train_before_cap": 80,
+      "train_after_cap": 80
+    },
+    "benign-api": {
+      "train_run": "benign-api-20261101T043921Z",
+      "holdout_runs": [
+        "benign-api-20261031T193243Z"
+      ],
+      "pool": 840,
+      "train_before_cap": 336,
+      "train_after_cap": 250
+    },
+    "benign-chromium": {
+      "train_run": "benign-chromium-20261031T201953Z",
+      "holdout_runs": [],
+      "pool": 203,
+      "train_before_cap": 163,
+      "train_after_cap": 163
+    },
+    "benign-firefox": {
+      "train_run": "benign-firefox-20261031T203801Z",
+      "holdout_runs": [],
+      "pool": 203,
+      "train_before_cap": 163,
+      "train_after_cap": 163
+    },
+    "benign-webhook": {
+      "train_run": "benign-webhook-20261101T044409Z",
+      "holdout_runs": [
+        "benign-webhook-20261031T193606Z"
+      ],
+      "pool": 816,
+      "train_before_cap": 326,
+      "train_after_cap": 250
+    },
+    "benign-webkit": {
+      "train_run": "benign-webkit-20261031T204553Z",
+      "holdout_runs": [],
+      "pool": 227,
+      "train_before_cap": 181,
+      "train_after_cap": 181
+    }
+  },
+  "scale_pos_weight": 0.9786200194363459,
+  "params": {
+    "objective": "binary",
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "n_estimators": 300,
+    "min_child_samples": 20,
+    "scale_pos_weight": 0.9786200194363459,
+    "deterministic": true,
+    "seed": 7,
+    "num_threads": 1
+  },
+  "split": {
+    "rule": "per (run, scope), cut rows by ingest_seq at the 80th percentile; test strictly later",
+    "test_fraction": 0.2,
+    "train_rows": 2036,
+    "test_rows": 830,
+    "holdout_rows": 3516,
+    "spanning_scope_ids": {
+      "attack-ffuf-20261101T043825Z/cluster": 1,
+      "attack-forgery-20261101T043652Z/cluster": 1,
+      "attack-honeytoken-20261101T043638Z/cluster": 1,
+      "attack-honeytoken-20261101T043638Z/actor": 1,
+      "attack-nuclei-20261101T043840Z/cluster": 1,
+      "attack-nuclei-20261101T043840Z/actor": 1,
+      "attack-scraper-20261101T043658Z/cluster": 1,
+      "attack-scraper-20261101T043658Z/actor": 1,
+      "attack-scraper-nocookie-20261101T043742Z/cluster": 1,
+      "attack-sqlmap-20261101T043832Z/cluster": 1,
+      "attack-stuffing-20261101T043907Z/cluster": 1,
+      "benign-api-20261101T043921Z/actor": 1,
+      "benign-api-20261101T043921Z/cluster": 1,
+      "benign-chromium-20261031T201953Z/cluster": 1,
+      "benign-chromium-20261031T201953Z/actor": 1,
+      "benign-firefox-20261031T203801Z/cluster": 1,
+      "benign-firefox-20261031T203801Z/actor": 1,
+      "benign-webhook-20261101T044409Z/actor": 1,
+      "benign-webhook-20261101T044409Z/cluster": 1,
+      "benign-webkit-20261031T204553Z/cluster": 1,
+      "benign-webkit-20261031T204553Z/actor": 1
+    }
+  },
+  "thresholds": {
+    "api": {
+      "threshold": 0.7852341120811722,
+      "precision": 1.0,
+      "recall": 1.0,
+      "met": true,
+      "support": 667
+    },
+    "web": {
+      "threshold": 0.5,
+      "precision": null,
+      "recall": null,
+      "met": false,
+      "support": 2339,
+      "note": "single-class holdout slice"
+    },
+    "webhook": {
+      "threshold": 0.79688639144735,
+      "precision": 1.0,
+      "recall": 1.0,
+      "met": true,
+      "support": 510
+    }
+  },
+  "seed": 7
+}
