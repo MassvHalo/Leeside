@@ -43,6 +43,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0010_clock_hardening.sql"),
     ),
     (11, include_str!("../../migrations/0011_scores.sql")),
+    (12, include_str!("../../migrations/0012_scores_scope.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -283,10 +284,11 @@ impl BindingRow {
     }
 }
 
-/// A `scores` row: one actor feature row's Windside score.
+/// A `scores` row: one feature row's Windside score, actor or cluster.
 #[derive(Debug, Clone)]
 pub struct ScoreRow {
-    pub actor_id: String,
+    pub scope: String,
+    pub scope_id: String,
     pub surface: Option<String>,
     pub ts_us: i64,
     pub score: f64,
@@ -733,6 +735,17 @@ impl Store {
                     ))
                 })
                 .collect())
+        })
+    }
+
+    /// The highest applied migration, for `/health`.
+    pub fn migration_version(&self) -> Result<i64, StoreError> {
+        self.with_reader(|c| {
+            c.query_row(
+                "SELECT coalesce(max(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
         })
     }
 

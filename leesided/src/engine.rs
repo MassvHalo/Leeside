@@ -69,6 +69,8 @@ pub struct Engine {
     /// The Windside scorer (docs/windside.md section 6): loaded once at
     /// start, read-only after.
     pub windside: WindsideState,
+    /// The highest migration applied at open, for `/health`.
+    pub migration_version: i64,
 }
 
 /// What `WINDSIDE_MODEL` gave: the loaded model, or the refusal reason
@@ -77,6 +79,18 @@ pub struct WindsideState {
     pub mode: WindsideMode,
     pub loaded: Option<crate::windside::Loaded>,
     pub error: Option<String>,
+    pub scored_actor: AtomicU64,
+    pub scored_cluster: AtomicU64,
+    pub skipped_actor: AtomicU64,
+    pub skipped_cluster: AtomicU64,
+}
+
+/// One row's scoring outcome: scored, below the cold-start floor, or
+/// Windside off/unloaded.
+pub enum ScoreOutcome {
+    Scored(f64, String),
+    Skipped,
+    Inactive,
 }
 
 impl WindsideState {
@@ -85,6 +99,10 @@ impl WindsideState {
             mode: cfg.windside_mode,
             loaded: None,
             error: None,
+            scored_actor: AtomicU64::new(0),
+            scored_cluster: AtomicU64::new(0),
+            skipped_actor: AtomicU64::new(0),
+            skipped_cluster: AtomicU64::new(0),
         };
         let Some(dir) = cfg.windside_model.as_deref() else {
             return st;
@@ -106,13 +124,17 @@ impl WindsideState {
         st
     }
 
-    /// Score one actor feature row, or `None` when off, unloaded, or
-    /// below the cold-start floor.
-    fn score_actor(&self, values: &[f32]) -> Option<(f64, String)> {
+    /// Score one feature row, actor or cluster: the floor applies per
+    /// scope, and only actor rows feed rule matching downstream.
+    fn score_row(&self, values: &[f32]) -> ScoreOutcome {
         if self.mode == WindsideMode::Off {
-            return None;
+            return ScoreOutcome::Inactive;
         }
-        self.loaded.as_ref().and_then(|l| l.score_row(values))
+        match self.loaded.as_ref().and_then(|l| l.score_row(values)) {
+            Some((p, top3)) => ScoreOutcome::Scored(p, top3),
+            None if self.loaded.is_none() => ScoreOutcome::Inactive,
+            None => ScoreOutcome::Skipped,
+        }
     }
 }
 
@@ -310,6 +332,7 @@ impl Engine {
         resolver.load(store.load_actors()?, store.load_bindings(now_us)?);
         resolver.load_scores(store.load_scores()?);
         let windside = WindsideState::open(&cfg);
+        let migration_version = store.migration_version()?;
         let enrich = Enricher::open(cfg.geoip_asn.as_deref(), cfg.geoip_country.as_deref());
         let ja4_classes = Ja4Classes::load(cfg.ja4_classes.as_deref());
         let (actors, strong, weak) = resolver.len();
@@ -340,6 +363,7 @@ impl Engine {
             ja4_classes,
             honey_cache: Mutex::new(HashMap::new()),
             windside,
+            migration_version,
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -920,38 +944,46 @@ impl Engine {
                     surface: surface.map(|s| s.as_str().to_string()),
                     clock_anomalies,
                 }));
-                // Shadow and active score the actor row; cluster rows stay
-                // unscored until a rule can read them.
-                if let Some((p, top3)) = self.windside.score_actor(&values) {
-                    let id_hex = format!("{a:016x}");
-                    self.resolver.set_score(
-                        a,
-                        ActorScore {
-                            score: p as f32,
+                // Shadow and active score the row; only actor rows feed
+                // rule matching (cluster scores wait on H).
+                match self.windside.score_row(&values) {
+                    ScoreOutcome::Scored(p, top3) => {
+                        self.windside.scored_actor.fetch_add(1, Ordering::Relaxed);
+                        let id_hex = format!("{a:016x}");
+                        self.resolver.set_score(
+                            a,
+                            ActorScore {
+                                score: p as f32,
+                                ts_us,
+                                top3: top3.clone(),
+                            },
+                        );
+                        let version = self
+                            .windside
+                            .loaded
+                            .as_ref()
+                            .map(|l| l.manifest.model_version.clone())
+                            .unwrap_or_default();
+                        self.store.send(StoreOp::Score(ScoreRow {
+                            scope: "actor".to_string(),
+                            scope_id: id_hex.clone(),
+                            surface: surface.map(|s| s.as_str().to_string()),
                             ts_us,
+                            score: p,
+                            model_version: version,
                             top3: top3.clone(),
-                        },
-                    );
-                    let version = self
-                        .windside
-                        .loaded
-                        .as_ref()
-                        .map(|l| l.manifest.model_version.clone())
-                        .unwrap_or_default();
-                    self.store.send(StoreOp::Score(ScoreRow {
-                        actor_id: id_hex.clone(),
-                        surface: surface.map(|s| s.as_str().to_string()),
-                        ts_us,
-                        score: p,
-                        model_version: version,
-                        top3: top3.clone(),
-                    }));
-                    self.store.send(StoreOp::ActorScore {
-                        id: id_hex,
-                        score: p,
-                        ts_us,
-                        top3,
-                    });
+                        }));
+                        self.store.send(StoreOp::ActorScore {
+                            id: id_hex,
+                            score: p,
+                            ts_us,
+                            top3,
+                        });
+                    }
+                    ScoreOutcome::Skipped => {
+                        self.windside.skipped_actor.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ScoreOutcome::Inactive => {}
                 }
             }
         }
@@ -979,6 +1011,32 @@ impl Engine {
                     surface: surface.map(|s| s.as_str().to_string()),
                     clock_anomalies,
                 }));
+                match self.windside.score_row(&values) {
+                    ScoreOutcome::Scored(p, top3) => {
+                        self.windside.scored_cluster.fetch_add(1, Ordering::Relaxed);
+                        let version = self
+                            .windside
+                            .loaded
+                            .as_ref()
+                            .map(|l| l.manifest.model_version.clone())
+                            .unwrap_or_default();
+                        self.store.send(StoreOp::Score(ScoreRow {
+                            scope: "cluster".to_string(),
+                            scope_id: format!("{c:016x}"),
+                            surface: surface.map(|s| s.as_str().to_string()),
+                            ts_us,
+                            score: p,
+                            model_version: version,
+                            top3: top3.clone(),
+                        }));
+                    }
+                    ScoreOutcome::Skipped => {
+                        self.windside
+                            .skipped_cluster
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    ScoreOutcome::Inactive => {}
+                }
             }
         }
 
@@ -1183,11 +1241,20 @@ impl Engine {
                          "dropped_for_cap": self.windows.dropped_for_cap() },
             "schema_versions": SCHEMA_VERSIONS,
             "features_version": features::VERSION,
+            "migration_version": self.migration_version,
             "windside": {
                 "mode": self.windside.mode.as_str(),
                 "model_version": self.windside.loaded.as_ref().map(|l| l.manifest.model_version.clone()),
                 "features_version": self.windside.loaded.as_ref().map(|l| l.manifest.features_version),
                 "error": self.windside.error.clone(),
+                "scored": {
+                    "actor": self.windside.scored_actor.load(Ordering::Relaxed),
+                    "cluster": self.windside.scored_cluster.load(Ordering::Relaxed),
+                },
+                "skipped": {
+                    "actor": self.windside.skipped_actor.load(Ordering::Relaxed),
+                    "cluster": self.windside.skipped_cluster.load(Ordering::Relaxed),
+                },
             },
             "ip_hashing": self.hasher.is_some(),
             "decisions": self.decisions.len(),

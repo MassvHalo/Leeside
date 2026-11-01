@@ -2550,22 +2550,23 @@ async fn shadow_mode_writes_scores_and_changes_no_decision() {
     })
     .await;
     h.engine.store.flush().await;
-    let scores: Vec<(String, f64, String)> = h
+    let scores: Vec<(String, String, f64, String)> = h
         .engine
         .store
         .with_reader(|c| {
             let mut stmt = c
-                .prepare("SELECT actor_id, score, top3 FROM scores")
+                .prepare("SELECT scope, scope_id, score, top3 FROM scores")
                 .unwrap();
             Ok(stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                 .unwrap()
                 .filter_map(|r| r.ok())
-                .collect::<Vec<(String, f64, String)>>())
+                .collect::<Vec<(String, String, f64, String)>>())
         })
         .unwrap();
-    assert_eq!(scores.len(), 2, "{scores:?}");
-    for (_, p, top3) in &scores {
+    let actor_scores: Vec<_> = scores.iter().filter(|(s, _, _, _)| s == "actor").collect();
+    assert_eq!(actor_scores.len(), 2, "{scores:?}");
+    for (_, _, p, top3) in &actor_scores {
         assert!((p - 0.8807970779778823).abs() < 1e-9, "{p}");
         assert_eq!(top3, "[]");
     }
@@ -2580,7 +2581,7 @@ async fn shadow_mode_writes_scores_and_changes_no_decision() {
             )
         })
         .unwrap();
-    assert!(scores.iter().all(|(a, _, _)| a == &actor1));
+    assert!(actor_scores.iter().all(|(_, a, _, _)| a == &actor1));
     let actor_score: Option<f64> = h
         .engine
         .store
@@ -2606,15 +2607,17 @@ async fn shadow_mode_writes_scores_and_changes_no_decision() {
         .await;
     assert_eq!(v["action"], "allow", "{v}");
     assert!(h.engine.decisions.is_empty());
-    // The report agrees with the store: two rows scored, the rest skipped.
+    // The report agrees with the store, split by scope: two actor rows
+    // scored, five skipped. The tagged helper carries no ip, so no
+    // cluster resolves and the cluster scope is absent.
     let report = leesided::report::shadow(&h.dir.join("leesided.sqlite"), Some(&model), 0).unwrap();
-    assert_eq!(report.scored, 2);
-    assert_eq!(report.feature_rows, 7);
-    assert_eq!(report.skipped, 5);
+    let actor = &report.by_scope["actor"];
+    assert_eq!((actor.feature_rows, actor.scored, actor.skipped), (7, 2, 5));
+    assert!(!report.by_scope.contains_key("cluster"));
     assert_eq!(report.agreement, (0, 1));
     assert_eq!(report.above_without_block, 1);
     assert_eq!(report.disagreements.len(), 1);
-    assert_eq!(report.disagreements[0].actor_id, actor1);
+    assert_eq!(report.disagreements[0].scope_id, actor1);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -2655,6 +2658,163 @@ async fn model_with_wrong_features_version_refuses_to_load() {
         .with_reader(|c| c.query_row("SELECT count(*) FROM scores", [], |r| r.get(0)))
         .unwrap();
     assert_eq!(scored, 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
+    use leesided::config::WindsideMode;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    let h = Harness::open_windside(dir, Some(model), WindsideMode::Shadow).await;
+    let now = now_us();
+    // Six tagless turns with fresh sessions (a client that returns no
+    // cookie): one cluster window, no confirmed actor anywhere.
+    for i in 0..6u64 {
+        h.event(&tagless_event(
+            now + (i as i64) * 1_000_000,
+            &format!("{i:032x}"),
+            &format!("{:016x}", 0x5000 + i),
+        ))
+        .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let scores: Vec<(String, f64)> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            let mut stmt = c.prepare("SELECT scope, score FROM scores").unwrap();
+            Ok(stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect::<Vec<(String, f64)>>())
+        })
+        .unwrap();
+    // Held five and six clear the floor; nothing actor-scoped exists.
+    assert_eq!(scores.len(), 2, "{scores:?}");
+    assert!(scores.iter().all(|(s, _)| s == "cluster"));
+    for (_, p) in &scores {
+        assert!((p - 0.8807970779778823).abs() < 1e-9, "{p}");
+    }
+    let actor_rows: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT count(*) FROM feature_vectors WHERE scope = 'actor'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(actor_rows, 0);
+    let (_, health) = h.http("GET", "/health", None).await;
+    assert_eq!(health["windside"]["scored"]["cluster"], 2);
+    assert_eq!(health["windside"]["skipped"]["cluster"], 4);
+    assert_eq!(health["windside"]["scored"]["actor"], 0);
+    assert_eq!(health["migration_version"], 12);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_labels_the_highest_scored_actor() {
+    use leesided::config::WindsideMode;
+    use std::io::Cursor;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    // Empty store first: nothing to review.
+    let h0 = Harness::open_windside(dir.join("empty"), None, WindsideMode::Off).await;
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(
+        &dir.join("empty").join("leesided.sqlite"),
+        20,
+        &mut Cursor::new(""),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(labeled, 0);
+    assert!(String::from_utf8(out).unwrap().contains("no scored actors"));
+    h0.running.abort();
+    h0.engine.shutdown().await;
+
+    let h = Harness::open_windside(dir, Some(model), WindsideMode::Shadow).await;
+    let now = now_us();
+    let t1 = tagged_event(now, &"a".repeat(32), SESSION, "anon", TAG, "home")
+        .replace("\"tag_status\":\"valid\"", "\"tag_status\":\"issued\"");
+    h.event(&t1).await;
+    for i in 1..6i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("{i:032x}"),
+            SESSION,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = h.dir.join("leesided.sqlite");
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("m\n"), &mut out).unwrap();
+    assert_eq!(labeled, 1);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("score=0.8808"), "{text}");
+    assert!(text.contains("held=6"), "{text}");
+    let label: (String, String, f64, Option<String>) = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT label, source, confidence, kind FROM labels",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        label,
+        ("malicious".to_string(), "operator".to_string(), 1.0, None)
+    );
+    // Re-reviewing updates the label: the latest judgment stands.
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("b\n"), &mut out).unwrap();
+    assert_eq!(labeled, 1);
+    let label: String = h
+        .engine
+        .store
+        .with_reader(|c| c.query_row("SELECT label FROM labels", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(label, "benign");
+    let count: i64 = h
+        .engine
+        .store
+        .with_reader(|c| c.query_row("SELECT count(*) FROM labels", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(count, 1, "upsert, not a second row");
+    // Skipping writes nothing.
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("\n"), &mut out).unwrap();
+    assert_eq!(labeled, 0);
     h.running.abort();
     h.engine.shutdown().await;
 }

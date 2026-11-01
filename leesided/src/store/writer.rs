@@ -175,8 +175,8 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                     }
                     StoreOp::Score(s) => {
                         tx.execute(
-                            "INSERT INTO scores (actor_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            params![s.actor_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
+                            "INSERT INTO scores (scope, scope_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![s.scope, s.scope_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
                         )?;
                     }
                     StoreOp::ActorScore {

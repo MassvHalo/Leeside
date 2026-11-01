@@ -34,9 +34,10 @@ fn main() {
         ["label-import", path] => run_label_import(path),
         ["export", rest @ ..] => run_export_data(rest),
         ["report", "shadow", rest @ ..] => run_report_shadow(rest),
+        ["review", rest @ ..] => run_review(rest),
         _ => {
             eprintln!(
-                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s>]"
+                "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>]]"
             );
             std::process::exit(2);
         }
@@ -218,6 +219,42 @@ fn run_report_shadow(args: &[&str]) {
         Ok(r) => println!("{r}"),
         Err(e) => {
             eprintln!("leesided report: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_review(args: &[&str]) {
+    let mut top: usize = 20;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--top" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided review: --top needs a value");
+                    std::process::exit(2);
+                };
+                top = v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided review: --top is a row count, not {v}");
+                    std::process::exit(2);
+                });
+            }
+            _ => {
+                eprintln!("leesided review: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let cfg = Config::from_env();
+    let stdin = std::io::stdin();
+    let mut input = std::io::BufReader::new(stdin.lock());
+    let mut output = std::io::stdout();
+    match leesided::review::run_review(&cfg.db, top, &mut input, &mut output) {
+        Ok(n) => {
+            println!("review: {n} labeled");
+        }
+        Err(e) => {
+            eprintln!("leesided review: {e}");
             std::process::exit(1);
         }
     }

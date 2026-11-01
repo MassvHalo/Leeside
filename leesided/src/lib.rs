@@ -12,6 +12,7 @@ pub mod hash;
 pub mod ingest;
 pub mod labels;
 pub mod report;
+pub mod review;
 pub mod rules;
 pub mod store;
 pub mod tap;

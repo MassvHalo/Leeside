@@ -27,15 +27,24 @@ pub enum ReportError {
     Windside(String),
 }
 
-/// One disagreement between the score and the rules.
+/// One disagreement between the score and the rules (actor scope: only
+/// actors take decisions and hold credentials).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Disagreement {
-    pub actor_id: String,
+    pub scope_id: String,
     pub surface: Option<String>,
     pub score: f64,
     /// `true` when the score was above threshold but no block decided.
     pub above_without_block: bool,
     pub rule: Option<String>,
+}
+
+/// Feature rows vs scores per scope, from the data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScopeCounts {
+    pub feature_rows: usize,
+    pub scored: usize,
+    pub skipped: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -61,9 +70,7 @@ pub struct ShadowReport {
     pub disagreements_total: usize,
     /// Per-surface decile counts over score rows.
     pub distribution: BTreeMap<String, [usize; 10]>,
-    pub feature_rows: usize,
-    pub scored: usize,
-    pub skipped: usize,
+    pub by_scope: BTreeMap<String, ScopeCounts>,
 }
 
 /// How many disagreements print; the report says how many more exist.
@@ -94,9 +101,11 @@ fn shadow_on(
     since_us: i64,
     since_s: i64,
 ) -> Result<ShadowReport, ReportError> {
-    let scores: Vec<(String, Option<String>, f64)> = conn
-        .prepare("SELECT actor_id, surface, score FROM scores WHERE ts_us >= ?1")?
-        .query_map(params![since_us], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let scores: Vec<(String, String, Option<String>, f64)> = conn
+        .prepare("SELECT scope, scope_id, surface, score FROM scores WHERE ts_us >= ?1")?
+        .query_map(params![since_us], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
     let verified: HashSet<String> = conn
@@ -127,16 +136,21 @@ fn shadow_on(
     let mut fp_by_surface: BTreeMap<String, SurfaceFp> = BTreeMap::new();
     let mut rows_without_threshold = 0usize;
     let mut distribution: BTreeMap<String, [usize; 10]> = BTreeMap::new();
+    let mut by_scope: BTreeMap<String, ScopeCounts> = BTreeMap::new();
     // Actor's max score and surface in the window, for the agreement.
     let mut actor_max: HashMap<&str, (f64, Option<&str>)> = HashMap::new();
-    for (actor, surface, score) in &scores {
+    for (scope, id, surface, score) in &scores {
+        by_scope.entry(scope.clone()).or_default().scored += 1;
         let bucket = surface.clone().unwrap_or_else(|| "none".to_string());
         let decile = (score.clamp(0.0, 1.0) * 10.0) as usize;
         distribution.entry(bucket.clone()).or_insert([0; 10])[decile.min(9)] += 1;
         match threshold(surface.as_deref()) {
             None => rows_without_threshold += 1,
             Some(t) => {
-                if verified.contains(actor) {
+                // The headline stays actor-only: credentials are actor
+                // bindings, so only actor rows can be verified-credential
+                // false positives.
+                if scope == "actor" && verified.contains(id) {
                     let fp = fp_by_surface.entry(bucket).or_insert(SurfaceFp {
                         threshold: Some(t),
                         ..Default::default()
@@ -148,10 +162,12 @@ fn shadow_on(
                 }
             }
         }
-        actor_max
-            .entry(actor)
-            .and_modify(|(m, _)| *m = m.max(*score))
-            .or_insert((*score, surface.as_deref()));
+        if scope == "actor" {
+            actor_max
+                .entry(id)
+                .and_modify(|(m, _)| *m = m.max(*score))
+                .or_insert((*score, surface.as_deref()));
+        }
     }
 
     let mut agree = 0usize;
@@ -169,7 +185,7 @@ fn shadow_on(
             (true, None) => {
                 above_without_block += 1;
                 disagreements.push(Disagreement {
-                    actor_id: (*actor).to_string(),
+                    scope_id: (*actor).to_string(),
                     surface: surface.map(str::to_string),
                     score: *max,
                     above_without_block: true,
@@ -179,7 +195,7 @@ fn shadow_on(
             (false, Some(rule)) => {
                 below_with_block += 1;
                 disagreements.push(Disagreement {
-                    actor_id: (*actor).to_string(),
+                    scope_id: (*actor).to_string(),
                     surface: surface.map(str::to_string),
                     score: *max,
                     above_without_block: false,
@@ -208,23 +224,21 @@ fn shadow_on(
     disagreements.truncate(DISAGREEMENTS_SHOWN);
 
     let held_idx = features::NAMES.iter().position(|n| *n == "turns_held");
-    let mut feature_rows = 0usize;
-    let mut skipped = 0usize;
     if let Some(idx) = held_idx {
         let mut stmt = conn.prepare(
-            "SELECT vector FROM feature_vectors \
-             WHERE scope = 'actor' AND ts_us >= ?1 AND version = ?2",
+            "SELECT scope, vector FROM feature_vectors WHERE ts_us >= ?1 AND version = ?2",
         )?;
         let rows = stmt.query_map(params![since_us, features::VERSION], |r| {
-            r.get::<_, String>(0)
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
-        for row in rows.filter_map(|r| r.ok()) {
-            feature_rows += 1;
+        for (scope, row) in rows.filter_map(|r| r.ok()) {
+            let counts = by_scope.entry(scope).or_default();
+            counts.feature_rows += 1;
             let held: Option<f32> = serde_json::from_str::<Vec<f32>>(&row)
                 .ok()
                 .and_then(|v| v.get(idx).copied());
             if held.is_none_or(|h| h < crate::windside::TURNS_HELD_FLOOR) {
-                skipped += 1;
+                counts.skipped += 1;
             }
         }
     }
@@ -240,9 +254,7 @@ fn shadow_on(
         disagreements,
         disagreements_total,
         distribution,
-        feature_rows,
-        scored: scores.len(),
-        skipped,
+        by_scope,
     })
 }
 
@@ -292,7 +304,7 @@ impl std::fmt::Display for ShadowReport {
                 writeln!(
                     f,
                     "  {} {} score={:.4} above threshold, no block",
-                    d.actor_id,
+                    d.scope_id,
                     d.surface.as_deref().unwrap_or("none"),
                     d.score
                 )?;
@@ -300,7 +312,7 @@ impl std::fmt::Display for ShadowReport {
                 writeln!(
                     f,
                     "  {} {} score={:.4} below threshold, blocked by {}",
-                    d.actor_id,
+                    d.scope_id,
                     d.surface.as_deref().unwrap_or("none"),
                     d.score,
                     d.rule.as_deref().unwrap_or("?")
@@ -328,11 +340,16 @@ impl std::fmt::Display for ShadowReport {
         }
         writeln!(
             f,
-            "rows: {} actor feature rows, {} scored, {} skipped (turns_held < {})",
-            self.feature_rows,
-            self.scored,
-            self.skipped,
+            "rows by scope (floor: turns_held >= {}):",
             crate::windside::TURNS_HELD_FLOOR
-        )
+        )?;
+        for (scope, c) in &self.by_scope {
+            writeln!(
+                f,
+                "  {scope}: {} feature rows, {} scored, {} skipped",
+                c.feature_rows, c.scored, c.skipped
+            )?;
+        }
+        Ok(())
     }
 }
