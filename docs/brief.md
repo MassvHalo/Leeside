@@ -536,7 +536,7 @@ the agent, whose sandbox cannot write `/etc` or `/var/www` anyway.
 | `deploy/install.sh` | Idempotent root script, `set -euo pipefail`: apt nginx, php8.3-fpm and the sqlite3, mbstring, xml, curl, zip, intl, bcmath extensions, certbot, python3-certbot-nginx, git, unzip, ufw; Composer if missing; the production checkout cloned from the working copy if `/var/www/leeside` is absent, with `safe.directory` set for root; tmpfiles entry `d /run/leeside 0770 www-data www-data -` applied with `systemd-tmpfiles --create`; `/var/log/leeside` owned by www-data; `ufw allow OpenSSH`, `ufw allow 'Nginx Full'`, enable; nginx site linked into sites-enabled, default site removed, `nginx -t`, reload; certbot run (below) plus a renewal deploy hook that reloads nginx; logrotate file installed; tap service enabled and started; finally calls deploy.sh |
 | `deploy/deploy.sh` | Root script, never touches `/etc`: `git -C /var/www/leeside pull` from the working copy, `chown -R www-data:www-data /var/www/leeside`, then as www-data (`sudo -u www-data`) in `leeside-sample`: `composer install --no-dev --optimize-autoloader`, copy `.env.production.example` to `.env` only if `.env` is absent (then `php artisan key:generate`), `php artisan migrate --force` (`--seed` on first run), `php artisan optimize:clear` then `php artisan optimize`; storage and bootstrap/cache writable |
 | `deploy/nginx/webapp.leeside.halowifi.com.conf` | Port 80 block only; certbot adds 443 and the redirect. `root .../public`, `index index.php`, `try_files $uri $uri/ /index.php?$query_string`, PHP via the FPM socket with `fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name` and `include fastcgi_params`, `fastcgi_hide_header X-Powered-By`, `client_max_body_size 10m`, headers `X-Frame-Options SAMEORIGIN`, `X-Content-Type-Options nosniff`, `Referrer-Policy strict-origin-when-cross-origin`, `location ~ /\.(?!well-known) { deny all; }`, own access and error logs |
-| `deploy/systemd/leeside-tap.service` | `php artisan leeside:tap --raw` as www-data from the sample dir, stdout appended to `/var/log/leeside/events.ndjson`, `Restart=always`, `After=php8.3-fpm.service`; disabled the day leesided listens on the same paths |
+| `deploy/systemd/leeside-artisan-tap.service` | `php artisan leeside:tap --raw` as www-data from the sample dir, stdout appended to `/var/log/leeside/events.ndjson`, `Restart=always`, `After=php8.3-fpm.service`; disabled the day leesided listens on the same paths |
 | `deploy/logrotate/leeside` | daily, 14 rotations, copytruncate |
 | `deploy/.env.production.example` | `APP_ENV=production`, `APP_DEBUG=false`, `APP_URL=https://webapp.leeside.halowifi.com`, `LOG_LEVEL=warning`, `SESSION_SECURE_COOKIE=true`, SQLite at the sample's `database/database.sqlite`, `LEESIDE_EVENTS_SOCKET=/run/leeside/events.sock`, `LEESIDE_CHECK_SOCKET=/run/leeside/check.sock`, `LEESIDE_HASH_KEY=` (generate 32 random bytes), `LEESIDE_SAMPLE_RATE=1.0` |
 
@@ -563,7 +563,7 @@ proxied through Cloudflare.
 - `POST /portal/login` with a bad OTP returns 422 JSON.
 - `/var/log/leeside/events.ndjson` grows with every request and a grep for
   the values sent is empty.
-- `systemctl status leeside-tap` is active; a reboot brings back
+- `systemctl status leeside-artisan-tap` is active; a reboot brings back
   `/run/leeside` and the tap.
 
 ## Done when

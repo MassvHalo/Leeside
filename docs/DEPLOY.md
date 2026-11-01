@@ -132,8 +132,10 @@ directory needs the same writability when the tap runs as another user.
 
 ## Passive fingerprint tap
 
-`leesided-tap.service` runs `leesided tap` as www-data with
-`CAP_NET_RAW` (the unit grants it; no setcap on the binary). It captures
+`leesided-tap.service` — the fingerprint tap unit, not to be confused
+with the artisan stand-in `leeside-artisan-tap.service` — runs
+`leesided tap` as www-data with `CAP_NET_RAW` (the unit grants it; no
+setcap on the binary). It captures
 SYNs and ClientHellos on ports 80 and 443 of the default-route interface and
 sends JA4T and JA4 to leesided over `/run/leeside/fp.sock`; leesided fills
 the turn columns. Nothing changes for nginx or the package, and stopping
@@ -209,26 +211,39 @@ generators use (`bin/gen-lib.sh`); restart leesided after changing them.
 
 ## First v2 deploy
 
-This deploy crosses migrations 0005 to 0011 and the v2 `ts` change
+This deploy crosses migrations 0005 to 0012 and the v2 `ts` change
 (integer microseconds; v1 keeps float seconds and its `(peer_key, ts_us)`
-join). The old and new versions are mutually incompatible on v2 traffic,
-in both directions: the old daemon reads an integer `ts` as float
-seconds and saturates `ts_us` (silent corruption, including joining
-everything onto one key), while the new daemon rejects the old package's
-float `ts` lines (loud: `bad_probe`/`bad_event` climb, checks fail open,
-events drop). Stopping the daemon first is what makes the window safe:
-with nothing listening, checks fail open and events drop counted, and no
-corrupt row can land. `deploy.sh` then installs the app and restarts the
-daemon in one run; do not start the new binary by hand ahead of it.
+join). **Daemon first, package second, never the reverse:** the old and
+new versions are mutually incompatible on v2 traffic, and the reverse
+order corrupts silently — the old daemon reads an integer `ts` as float
+seconds and saturates `ts_us` to i64::MAX on every turn (joining
+everything onto one key), while the new daemon at least rejects the old
+package's float `ts` lines loudly (`bad_probe`/`bad_event` climb, checks
+fail open, events drop). Stopping the daemon first is what makes the
+window safe: with nothing listening, checks fail open and events drop
+counted, and no corrupt row can land. `deploy.sh` then installs the app
+and restarts the daemon in one run; do not start the new binary by hand
+ahead of it.
 
 ```bash
-# 0. Prerequisites, as the deploy user: build both artifacts, and fill
+# 0. Prerequisites, as the deploy user: build both artifacts, fill
 # /etc/leeside/leesided.env (LEESIDED_HASH_KEY = the app's
-# LEESIDE_HASH_KEY; GeoIP credentials; the route lists above).
+# LEESIDE_HASH_KEY; GeoIP credentials; the route lists above; the
+# shadow model below), and copy the model files onto the box. The
+# loader reads manifest.json and model.txt only.
 (cd leesided && cargo build --release)
 (cd leesided/ui && npm ci && npm run build)
+sudo mkdir -p /var/lib/leeside/windside-model
+sudo cp windside/models/0.1.0/manifest.json windside/models/0.1.0/model.txt \
+  /var/lib/leeside/windside-model/
+sudo chown -R www-data:www-data /var/lib/leeside/windside-model
+# /etc/leeside/leesided.env:
+#   LEESIDED_WINDSIDE_MODEL=/var/lib/leeside/windside-model
+#   LEESIDED_WINDSIDE_MODE=shadow
 
-# 1. Stop the daemon.
+# 1. Pre-flight: record the old daemon's /health for the rollback
+# comparison, then stop the daemon.
+curl -s 127.0.0.1:7390/health | sudo tee /var/lib/leeside/health.pre-v2.json > /dev/null
 sudo systemctl stop leesided
 
 # 2. Back up the store and the binary. A clean shutdown checkpoints the
@@ -238,18 +253,20 @@ sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
 
 # 3. Deploy (app first, then the new binary) and watch the migrations.
 sudo bash leeside-sample/deploy/deploy.sh
-journalctl -u leesided -f   # expect: migrated version=5 .. version=11
+journalctl -u leesided -f   # expect: migrated version=5 .. version=12
 
 # 4. Verify /health.
 curl -s 127.0.0.1:7390/health | python3 -m json.tool
-# schema_versions [1, 2]; features_version 2; ip_hashing true;
-# geoip true; tap counters zero (its unit is not started yet);
-# windside mode off with null versions.
+# schema_versions [1, 2]; features_version 2; migration_version 12;
+# ip_hashing true; geoip true; tap counters zero (its unit is not
+# started yet); windside mode shadow, model_version 0.1.0, no error.
 
 # 5. The package is live with the deploy. Confirm the new wire: no
 # bad_probe or bad_event climb on the next requests.
 
-# 6. Start the tap unit, then watch matched climb with traffic.
+# 6. Start the fingerprint tap unit, leesided-tap.service (not the
+# artisan stand-in, leeside-artisan-tap.service), then watch matched
+# climb with traffic.
 sudo systemctl start leesided-tap
 
 # 7. One real request, checked in the store.
@@ -260,4 +277,5 @@ sudo sqlite3 /var/lib/leeside/leesided.sqlite \
 ```
 
 Rollback: stop leesided, copy the `.pre-v2` files back over the store
-and `/usr/local/bin/leesided`, start, re-check /health.
+and `/usr/local/bin/leesided`, start, and re-check /health against
+`/var/lib/leeside/health.pre-v2.json` (same shape, old versions).
