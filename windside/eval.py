@@ -211,6 +211,7 @@ def main() -> None:
             print(f"  holdout {run_id} ({m['kind']}): fp={m['fp']}/{m['support']} fpr={m['fp'] / m['support']:.4f} n={m['support']}")
         else:
             print(f"  holdout {run_id} ({m['kind']}): P={m['precision']} R={m['recall']} PR-AUC={m['pr_auc']} n={m['support']}")
+    print("  note: the api and webhook thresholds were chosen on the holdouts that contained the false positives, so the zero fp counts above are not estimates; the shadow report is.")
     print("  in-run test, leaky by construction (sliding windows); smoke check only:")
     for surface, m in surfaces.items():
         print(f"  surface {surface}: P={m['precision']} R={m['recall']} PR-AUC={m['pr_auc']} n={m['support']}")
