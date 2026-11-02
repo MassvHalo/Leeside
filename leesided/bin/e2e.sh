@@ -18,6 +18,8 @@ PORT=8765
 # ip/net hashes and cluster keys exist and are deterministic, whatever the
 # operator's environment holds. Never a production key.
 E2E_HASH_KEY="${E2E_HASH_KEY:-leeside-e2e-test-key-do-not-use-in-production}"
+# The API answers 503 off /health without a token; the harness pins its own.
+E2E_API_TOKEN="${E2E_API_TOKEN:-leeside-e2e-api-token}"
 # Collect failures and report them all at the end; the script exits 1 naming
 # each one, so a green run means every assert below held.
 FAIL=""
@@ -40,9 +42,13 @@ trap cleanup EXIT
 LEESIDED_SOCKET_DIR="$WORK/run" LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_API="$API" \
 LEESIDED_RULES_DIR="$HERE/rules/install" LEESIDED_HASH_KEY="$E2E_HASH_KEY" RUST_LOG=info \
 LEESIDED_WINDSIDE_MODE=shadow LEESIDED_WINDSIDE_MODEL="$HERE/../windside/models/0.1.0" \
+LEESIDED_API_TOKEN="$E2E_API_TOKEN" \
   "$BIN" serve >"$WORK/leesided.log" 2>&1 &
 echo $! >"$PIDFILE"
 for _ in $(seq 1 50); do curl -sf "http://$API/health" >/dev/null && break; sleep 0.1; done
+echo "== api token: health open, the rest bearer-gated"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$API/rules")" = "401" ] || FAIL="$FAIL rules-noauth"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $E2E_API_TOKEN" "http://$API/rules")" = "200" ] || FAIL="$FAIL rules-bearer"
 echo "== leesided up"; curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("mode", h["mode"], "| rules", h["rules"]["loaded"], "| hash", h["rules"]["hash"][:12])'
 
 cd "$SAMPLE"

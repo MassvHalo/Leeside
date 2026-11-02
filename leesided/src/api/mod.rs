@@ -1,6 +1,7 @@
 //! The local HTTP API on 127.0.0.1: rules, mode, decisions, turns, health.
-//! With `LEESIDED_API_TOKEN` set, every route but `/health` needs
-//! `Authorization: Bearer <token>`; the UI reaches it through nginx.
+//! With `LEESIDED_API_TOKEN` unset, every route but `/health` answers 503;
+//! with it set, those routes need `Authorization: Bearer <token>`. The UI
+//! reaches it through nginx.
 
 use crate::engine::Engine;
 use crate::rules::compile::State;
@@ -86,7 +87,11 @@ pub fn router(engine: Arc<Engine>) -> Router {
 
 async fn authorize(token: Option<&str>, req: Request, next: Next) -> Response {
     let Some(want) = token else {
-        return next.run(req).await;
+        return ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "error": "api token not configured" }),
+        )
+        .into_response();
     };
     let got = req
         .headers()

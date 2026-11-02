@@ -17,7 +17,8 @@ pub struct Config {
     pub socket_mode: u32,
     /// Numeric group to chown the sockets to (www-data on the sample host), when set.
     pub socket_gid: Option<u32>,
-    /// When set, every API route but `/health` needs `Authorization: Bearer <token>`.
+    /// When unset, every API route but `/health` answers 503; when set, those
+    /// routes need `Authorization: Bearer <token>`.
     pub api_token: Option<String>,
     /// The package's `LEESIDE_HASH_KEY`, so `ip_hash`/`net_hash` join with its values.
     pub hash_key: Option<String>,

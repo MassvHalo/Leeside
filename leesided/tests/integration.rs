@@ -47,7 +47,7 @@ impl Harness {
     }
 
     async fn open(dir: PathBuf) -> Harness {
-        Harness::open_with(dir, None).await
+        Harness::open_with(dir, Some(TEST_TOKEN)).await
     }
 
     async fn open_with(dir: PathBuf, api_token: Option<&str>) -> Harness {
@@ -353,6 +353,9 @@ async fn ui_llm_harness(token: Option<&str>) -> Harness {
 
 const SESSION: &str = "a1b2c3d4e5f60718";
 const PEER: &str = "0f1e2d3c4b5a6978";
+/// The API token on the default harness: without it every route but
+/// `/health` answers 503, so authenticated calls send this.
+const TEST_TOKEN: &str = "test-token";
 
 fn now_f64() -> f64 {
     std::time::SystemTime::now()
@@ -445,10 +448,17 @@ async fn contract_probe_and_event_from_the_brief() {
 async fn otp_burst_rate_limits_sticks_and_survives_restart() {
     let h = Harness::start().await;
     let (st, _) = h
-        .http("PUT", "/mode", Some(&json!({"mode": "enforce"})))
+        .http_as(
+            Some(TEST_TOKEN),
+            "PUT",
+            "/mode",
+            Some(&json!({"mode": "enforce"})),
+        )
         .await;
     assert_eq!(st, 200);
-    let (st, shown) = h.http("GET", "/rules/portal-otp-burst", None).await;
+    let (st, shown) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/portal-otp-burst", None)
+        .await;
     assert_eq!(st, 200);
     assert_eq!(
         shown["rule"]["mode"], "shadow",
@@ -456,7 +466,14 @@ async fn otp_burst_rate_limits_sticks_and_survives_restart() {
     );
     let mut rule = shown["rule"].clone();
     rule["mode"] = "enforce".into();
-    let (st, upd) = h.http("PUT", "/rules/portal-otp-burst", Some(&rule)).await;
+    let (st, upd) = h
+        .http_as(
+            Some(TEST_TOKEN),
+            "PUT",
+            "/rules/portal-otp-burst",
+            Some(&rule),
+        )
+        .await;
     assert_eq!(st, 200, "{upd}");
     assert_eq!(upd["version"], 2);
 
@@ -507,7 +524,9 @@ async fn otp_burst_rate_limits_sticks_and_survives_restart() {
 
     h.engine.flush_stats();
     h.engine.store.flush().await;
-    let (_, shown) = h.http("GET", "/rules/portal-otp-burst", None).await;
+    let (_, shown) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/portal-otp-burst", None)
+        .await;
     let stats = shown["stats_24h"].as_array().unwrap();
     assert!(!stats.is_empty());
     assert!(
@@ -557,7 +576,9 @@ async fn proposed_rule_counts_but_never_wins_until_accepted() {
         )
         .await
         .unwrap();
-    let (st, list) = h.http("GET", "/rules?state=proposed", None).await;
+    let (st, list) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules?state=proposed", None)
+        .await;
     assert_eq!(st, 200);
     assert_eq!(list["rules"][0]["id"], "spark-home-block");
 
@@ -569,7 +590,9 @@ async fn proposed_rule_counts_but_never_wins_until_accepted() {
     }
     h.engine.flush_stats();
     h.engine.store.flush().await;
-    let (_, shown) = h.http("GET", "/rules/spark-home-block", None).await;
+    let (_, shown) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/spark-home-block", None)
+        .await;
     let stats = shown["stats_24h"].as_array().unwrap();
     assert_eq!(
         stats
@@ -587,7 +610,12 @@ async fn proposed_rule_counts_but_never_wins_until_accepted() {
     );
 
     let (st, acc) = h
-        .http("POST", "/rules/spark-home-block/accept", Some(&json!({})))
+        .http_as(
+            Some(TEST_TOKEN),
+            "POST",
+            "/rules/spark-home-block/accept",
+            Some(&json!({})),
+        )
         .await;
     assert_eq!(st, 200, "{acc}");
     let v = h
@@ -611,7 +639,14 @@ async fn proposed_rule_counts_but_never_wins_until_accepted() {
         (Some("block"), Some("shadow"))
     );
 
-    let (st, _) = h.http("POST", "/rules/spark-home-block/retire", None).await;
+    let (st, _) = h
+        .http_as(
+            Some(TEST_TOKEN),
+            "POST",
+            "/rules/spark-home-block/retire",
+            None,
+        )
+        .await;
     assert_eq!(st, 200);
     assert_eq!(h.http("GET", "/health", None).await.1["rules"]["loaded"], 3);
     h.running.abort();
@@ -688,6 +723,24 @@ async fn bearer_token_guards_everything_but_health() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unset_api_token_serves_health_and_503s_the_rest() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let h = Harness::open_with(dir, None).await;
+
+    assert_eq!(h.http("GET", "/health", None).await.0, 200);
+    for path in ["/rules", "/mode", "/decisions", "/turns"] {
+        let (st, body) = h.http("GET", path, None).await;
+        assert_eq!(st, 503, "{path} without a configured token");
+        assert_eq!(body["error"], "api token not configured", "{path} body");
+    }
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decisions_list_and_unblock_and_turns() {
     let h = Harness::start().await;
     h.engine.set_mode(Mode::Enforce).unwrap();
@@ -704,7 +757,7 @@ async fn decisions_list_and_unblock_and_turns() {
         "block"
     );
 
-    let (st, body) = h.http("GET", "/decisions", None).await;
+    let (st, body) = h.http_as(Some(TEST_TOKEN), "GET", "/decisions", None).await;
     assert_eq!(st, 200);
     let list = body["decisions"].as_array().unwrap();
     assert_eq!(list.len(), 1);
@@ -712,10 +765,21 @@ async fn decisions_list_and_unblock_and_turns() {
     assert_eq!(list[0]["key"], SESSION);
     assert_eq!(list[0]["rule"], "home-block");
 
-    assert_eq!(h.http("DELETE", "/decisions/session/zz", None).await.0, 400);
+    assert_eq!(
+        h.http_as(Some(TEST_TOKEN), "DELETE", "/decisions/session/zz", None)
+            .await
+            .0,
+        400
+    );
     let gone = format!("/decisions/session/{SESSION}");
-    assert_eq!(h.http("DELETE", &gone, None).await.0, 204);
-    assert_eq!(h.http("DELETE", &gone, None).await.0, 404);
+    assert_eq!(
+        h.http_as(Some(TEST_TOKEN), "DELETE", &gone, None).await.0,
+        204
+    );
+    assert_eq!(
+        h.http_as(Some(TEST_TOKEN), "DELETE", &gone, None).await.0,
+        404
+    );
     assert!(h.engine.decisions.is_empty());
 
     h.event(&login_failed_event(ts, SESSION)).await;
@@ -724,14 +788,26 @@ async fn decisions_list_and_unblock_and_turns() {
     })
     .await;
     let (st, body) = h
-        .http("GET", &format!("/turns?peer={PEER}&limit=5"), None)
+        .http_as(
+            Some(TEST_TOKEN),
+            "GET",
+            &format!("/turns?peer={PEER}&limit=5"),
+            None,
+        )
         .await;
     assert_eq!(st, 200);
     let turns = body["turns"].as_array().unwrap();
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0]["route"], "portal.login");
     assert_eq!(turns[0]["auth_event"], "login_failed");
-    let (_, body) = h.http("GET", "/turns?peer=0000000000000000", None).await;
+    let (_, body) = h
+        .http_as(
+            Some(TEST_TOKEN),
+            "GET",
+            "/turns?peer=0000000000000000",
+            None,
+        )
+        .await;
     assert!(body["turns"].as_array().unwrap().is_empty());
     h.running.abort();
     h.engine.shutdown().await;
@@ -741,25 +817,36 @@ async fn decisions_list_and_unblock_and_turns() {
 async fn api_validate_schema_export_and_pinned_mode() {
     let h = Harness::start().await;
     let (st, v) = h
-        .http("POST", "/rules/validate", Some(&json!({"id": "x"})))
+        .http_as(
+            Some(TEST_TOKEN),
+            "POST",
+            "/rules/validate",
+            Some(&json!({"id": "x"})),
+        )
         .await;
     assert_eq!(st, 200);
     assert_eq!(v["ok"], false);
     let (_, v) = h
-        .http(
+        .http_as(
+            Some(TEST_TOKEN),
             "POST",
             "/rules/validate",
             Some(&rule_json("fine-rule", "shadow", "watch", "home")),
         )
         .await;
     assert_eq!(v["ok"], true);
-    let (st, schema) = h.http("GET", "/rules/schema", None).await;
+    let (st, schema) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/schema", None)
+        .await;
     assert_eq!(st, 200);
     assert_eq!(schema["title"], "Rule");
-    let (_, export) = h.http("GET", "/rules/export", None).await;
+    let (_, export) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/export", None)
+        .await;
     assert_eq!(export.as_array().unwrap().len(), 3);
     let (st, created) = h
-        .http(
+        .http_as(
+            Some(TEST_TOKEN),
             "POST",
             "/rules",
             Some(&rule_json("fine-rule", "shadow", "watch", "home")),
@@ -767,7 +854,8 @@ async fn api_validate_schema_export_and_pinned_mode() {
         .await;
     assert_eq!(st, 201, "{created}");
     let (st, _) = h
-        .http(
+        .http_as(
+            Some(TEST_TOKEN),
             "POST",
             "/rules",
             Some(&rule_json("fine-rule", "shadow", "watch", "home")),
@@ -775,16 +863,21 @@ async fn api_validate_schema_export_and_pinned_mode() {
         .await;
     assert_eq!(st, 409);
     let (st, bad) = h
-        .http(
+        .http_as(
+            Some(TEST_TOKEN),
             "POST",
             "/rules",
             Some(&rule_json("ab", "shadow", "watch", "home")),
         )
         .await;
     assert_eq!(st, 422, "{bad}");
-    let (_, export) = h.http("GET", "/rules/export", None).await;
+    let (_, export) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/export", None)
+        .await;
     assert_eq!(export.as_array().unwrap().len(), 4);
-    let (st, _) = h.http("GET", "/rules/nope", None).await;
+    let (st, _) = h
+        .http_as(Some(TEST_TOKEN), "GET", "/rules/nope", None)
+        .await;
     assert_eq!(st, 404);
     h.running.abort();
     h.engine.shutdown().await;
@@ -800,7 +893,7 @@ async fn api_validate_schema_export_and_pinned_mode() {
         rules_dir: dir.clone(),
         socket_mode: 0o600,
         socket_gid: None,
-        api_token: None,
+        api_token: Some(TEST_TOKEN.to_string()),
         hash_key: None,
         geoip_asn: None,
         geoip_country: None,
@@ -819,14 +912,27 @@ async fn api_validate_schema_export_and_pinned_mode() {
         running,
     };
     let (st, _) = h
-        .http("PUT", "/mode", Some(&json!({"mode": "enforce"})))
+        .http_as(
+            Some(TEST_TOKEN),
+            "PUT",
+            "/mode",
+            Some(&json!({"mode": "enforce"})),
+        )
         .await;
     assert_eq!(st, 409);
     let (st, _) = h
-        .http("PUT", "/mode", Some(&json!({"mode": "shadow"})))
+        .http_as(
+            Some(TEST_TOKEN),
+            "PUT",
+            "/mode",
+            Some(&json!({"mode": "shadow"})),
+        )
         .await;
     assert_eq!(st, 200);
-    assert_eq!(h.http("GET", "/mode", None).await.1["mode"], "shadow");
+    assert_eq!(
+        h.http_as(Some(TEST_TOKEN), "GET", "/mode", None).await.1["mode"],
+        "shadow"
+    );
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -1608,7 +1714,14 @@ async fn tag_links_sessions_into_one_actor_and_an_actor_block_survives_session_c
         .await;
     assert_eq!(v["action"], "allow", "{v}");
     // The API shows the actor with its bindings, by any merged id.
-    let (st, detail) = h.http("GET", &format!("/actors/{actor:016x}"), None).await;
+    let (st, detail) = h
+        .http_as(
+            Some(TEST_TOKEN),
+            "GET",
+            &format!("/actors/{actor:016x}"),
+            None,
+        )
+        .await;
     assert_eq!(st, 200, "{detail}");
     let kinds: Vec<&str> = detail["detail"]["bindings"]
         .as_array()
