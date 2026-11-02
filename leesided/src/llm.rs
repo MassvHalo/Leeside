@@ -256,6 +256,104 @@ pub fn parse_subject(s: &str) -> Result<Subject, LlmError> {
     })
 }
 
+/// One row of `leesided llm subjects`: every canonical actor and every
+/// cluster key, with its turn count, latest score, and whether a
+/// proposal still pends (a proposal newer than any operator verdict).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectRow {
+    pub scope: String,
+    pub id: String,
+    pub rows: i64,
+    pub score: Option<f64>,
+    pub proposal_pending: bool,
+}
+
+/// Subjects by latest score, unscored last, then id.
+pub fn subjects(db: &Path, scope: Option<&str>, top: usize) -> Result<Vec<SubjectRow>, LlmError> {
+    let conn = open_db(db)?;
+    let mut ids: Vec<(String, String)> = Vec::new();
+    if scope.is_none_or(|s| s == "actor") {
+        let mut stmt = conn.prepare("SELECT id FROM actors WHERE merged_into IS NULL")?;
+        for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            ids.push(("actor".to_string(), id?));
+        }
+    }
+    if scope.is_none_or(|s| s == "cluster") {
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT cluster_key FROM turns WHERE cluster_key IS NOT NULL")?;
+        for key in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            ids.push(("cluster".to_string(), key?));
+        }
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for (scope, id) in &ids {
+        let rows: i64 = if scope == "actor" {
+            conn.query_row(
+                "SELECT count(*) FROM turns WHERE actor_id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT count(*) FROM turns WHERE cluster_key = ?1",
+                params![id],
+                |r| r.get(0),
+            )?
+        };
+        let score: Option<f64> = conn
+            .query_row(
+                "SELECT score FROM scores WHERE scope = ?1 AND scope_id = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(LlmError::Sqlite(e)),
+            })?;
+        let proposed: Option<i64> = conn
+            .query_row(
+                "SELECT created_at FROM labels WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+                 ORDER BY created_at DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(LlmError::Sqlite(e)),
+            })?;
+        let operator: Option<i64> = conn
+            .query_row(
+                "SELECT created_at FROM labels WHERE scope = ?1 AND scope_id = ?2 AND source = 'operator' \
+                 ORDER BY created_at DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(LlmError::Sqlite(e)),
+            })?;
+        out.push(SubjectRow {
+            scope: scope.clone(),
+            id: id.clone(),
+            rows,
+            score,
+            proposal_pending: proposed.is_some_and(|p| operator.is_none_or(|o| p > o)),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.scope.cmp(&b.scope))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out.truncate(top);
+    Ok(out)
+}
+
 /// What the envelope was built from, for the label the worker writes.
 pub struct LabelMeta {
     pub window_end_ts: i64,
@@ -2524,6 +2622,34 @@ mod tests {
         assert!(matches!(out, DrainOutcome::Done { .. }));
         assert_eq!(mode.json, Some(JsonMode::Prompt));
         assert_eq!(mode.effort, Some(true));
+    }
+
+    #[test]
+    fn subjects_lists_scored_first_with_pending_flags() {
+        let db = tmp_db("subjects");
+        fixture(&db);
+        let rows = subjects(&db, None, 20).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].scope, "actor");
+        assert_eq!(rows[0].id, "aa");
+        assert_eq!(rows[0].rows, 3);
+        assert_eq!(rows[0].score, Some(0.91));
+        assert!(!rows[0].proposal_pending);
+        assert_eq!(rows[1].scope, "cluster");
+        assert_eq!(rows[1].score, None);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
+             confidence, kind, note, created_at) \
+             VALUES ('actor', 'aa', 'web', 3000000, 'malicious', 'llm_proposed', 0.9, \
+             NULL, 'p [llm_call:3]', 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let rows = subjects(&db, Some("actor"), 20).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].proposal_pending);
     }
 
     #[test]

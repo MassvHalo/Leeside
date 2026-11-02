@@ -3025,6 +3025,7 @@ fn every_subcommand_answers_help() {
         ["llm", "--help"].as_slice(),
         ["llm", "show", "--help"].as_slice(),
         ["llm", "send", "--help"].as_slice(),
+        ["llm", "subjects", "--help"].as_slice(),
     ] {
         let out = std::process::Command::new(bin).args(args).output().unwrap();
         assert!(out.status.success(), "{args:?}: {out:?}");

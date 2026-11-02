@@ -41,6 +41,7 @@ fn main() {
         ["review", rest @ ..] => run_review(rest),
         ["llm", "show", rest @ ..] => run_llm_show(rest),
         ["llm", "send", rest @ ..] => run_llm_send(rest),
+        ["llm", "subjects", rest @ ..] => run_llm_subjects(rest),
         _ => {
             eprintln!("{FULL_USAGE}");
             std::process::exit(2);
@@ -48,7 +49,7 @@ fn main() {
     }
 }
 
-const FULL_USAGE: &str = "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>]";
+const FULL_USAGE: &str = "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id> | llm subjects [--scope actor|cluster] [--top <n>]]";
 
 /// Every subcommand answers `--help` (or `-h`) with its usage line.
 fn print_help(words: &[&str]) {
@@ -62,7 +63,10 @@ fn print_help(words: &[&str]) {
         ["review", ..] => "usage: leesided review [--top <n>]",
         ["llm", "show", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id>",
         ["llm", "send", ..] => "usage: leesided llm send --point label --subject <actor|cluster>:<id>",
-        ["llm", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id>",
+        ["llm", "subjects", ..] => {
+            "usage: leesided llm subjects [--scope actor|cluster] [--top <n>]"
+        }
+        ["llm", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id> | llm subjects [--scope actor|cluster] [--top <n>]",
         _ => FULL_USAGE,
     };
     println!("{line}");
@@ -268,6 +272,67 @@ fn run_report_shadow(args: &[&str]) {
         Ok(r) => println!("{r}"),
         Err(e) => {
             eprintln!("leesided report: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_llm_subjects(args: &[&str]) {
+    let mut top: usize = 20;
+    let mut scope: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--top" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided llm subjects: --top needs a value");
+                    std::process::exit(2);
+                };
+                top = v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided llm subjects: --top is a row count, not {v}");
+                    std::process::exit(2);
+                });
+            }
+            "--scope" => {
+                let Some(v) = it.next() else {
+                    eprintln!("leesided llm subjects: --scope needs a value");
+                    std::process::exit(2);
+                };
+                if *v != "actor" && *v != "cluster" {
+                    eprintln!("leesided llm subjects: --scope is actor or cluster, not {v}");
+                    std::process::exit(2);
+                }
+                scope = Some(v.to_string());
+            }
+            _ => {
+                eprintln!("leesided llm subjects: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let cfg = Config::from_env();
+    match leesided::llm::subjects(&cfg.db, scope.as_deref(), top) {
+        Ok(rows) => {
+            let head = ["scope", "id", "rows", "score", "proposal"];
+            println!(
+                "{:<8} {:<16} {:>6} {:>8}  {}",
+                head[0], head[1], head[2], head[3], head[4]
+            );
+            for r in rows {
+                println!(
+                    "{:<8} {:<16} {:>6} {:>8}  {}",
+                    r.scope,
+                    r.id,
+                    r.rows,
+                    r.score
+                        .map(|s| format!("{s:.4}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    if r.proposal_pending { "pending" } else { "-" },
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("leesided llm subjects: {e}");
             std::process::exit(1);
         }
     }
