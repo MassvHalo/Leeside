@@ -48,6 +48,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (14, include_str!("../../migrations/0014_llm.sql")),
     (15, include_str!("../../migrations/0015_llm_reasoning.sql")),
     (16, include_str!("../../migrations/0016_llm_resend.sql")),
+    (17, include_str!("../../migrations/0017_rule_state.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -267,6 +268,15 @@ pub enum StoreOp {
     },
     /// A logged model exchange: the inspector's re-send, or a test seed.
     LlmCallInsert(LlmCallRow),
+    /// A reversible per-app rule flag plus its audit row. Absent means
+    /// enabled; the reload drops disabled rules from the compiled set.
+    RuleState {
+        rule_id: String,
+        app_id: String,
+        enabled: bool,
+        by: String,
+        at_s: i64,
+    },
     /// A honeytoken hit: the actor's windows label malicious until `until_us`.
     HoneytokenHit {
         actor_id: String,
@@ -554,6 +564,22 @@ impl Store {
 
     pub fn rules_count(&self) -> Result<i64, StoreError> {
         self.with_reader(|c| c.query_row("SELECT count(*) FROM rules", [], |r| r.get(0)))
+    }
+
+    /// The per-app enable flags: rule id to enabled. Absent means
+    /// enabled, so this only ever lists explicit rows.
+    pub fn rule_states(
+        &self,
+        app: &str,
+    ) -> Result<std::collections::HashMap<String, bool>, StoreError> {
+        self.with_reader(|c| {
+            let mut stmt =
+                c.prepare("SELECT rule_id, enabled FROM rule_state WHERE app_id = ?1")?;
+            let rows = stmt.query_map(params![app], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
+            })?;
+            rows.collect::<Result<std::collections::HashMap<_, _>, _>>()
+        })
     }
 
     pub fn load_rules(&self, states: &[State]) -> Result<Vec<StoredRule>, StoreError> {

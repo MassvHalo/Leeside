@@ -56,7 +56,13 @@ pub struct Config {
     /// Per-point daily budgets in calls and tokens.
     pub llm_daily_calls: u32,
     pub llm_daily_tokens: u32,
+    /// The app this daemon serves; rule enable flags are per app.
+    pub app_id: String,
 }
+
+/// The app id until multi-app lands: every rule flag, decision and
+/// console session is scoped to it.
+pub const DEFAULT_APP: &str = "default";
 
 /// What the loaded model may do. Shadow writes scores and changes no
 /// decision; only active lets score rules fire.
@@ -145,6 +151,7 @@ impl Default for Config {
             llm_mode: LlmMode::Off,
             llm_daily_calls: 500,
             llm_daily_tokens: 500_000,
+            app_id: DEFAULT_APP.to_string(),
         }
     }
 }
@@ -210,6 +217,11 @@ impl Config {
         if let Ok(v) = std::env::var("LEESIDED_API_TOKEN") {
             if !v.is_empty() {
                 cfg.api_token = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_APP_ID") {
+            if !v.is_empty() {
+                cfg.app_id = v;
             }
         }
         if let Ok(v) = std::env::var("LEESIDED_HASH_KEY") {

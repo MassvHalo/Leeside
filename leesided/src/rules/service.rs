@@ -28,14 +28,17 @@ pub struct RulesService {
     /// The bodies behind the compiled set, for the sweep and the API.
     loaded: Mutex<Vec<(Rule, RuleMeta)>>,
     invalid: Mutex<Vec<InvalidRule>>,
+    /// The app this set compiles for; the enable flags are per app.
+    app_id: String,
 }
 
 impl RulesService {
-    pub fn new(symbols: Arc<Symbols>, store: Arc<Store>) -> RulesService {
+    pub fn new(symbols: Arc<Symbols>, store: Arc<Store>, app_id: String) -> RulesService {
         RulesService {
             set: ArcSwap::from_pointee(RuleSet::empty(0)),
             symbols,
             store,
+            app_id,
             generation: AtomicU64::new(0),
             loaded: Mutex::new(Vec::new()),
             invalid: Mutex::new(Vec::new()),
@@ -53,12 +56,18 @@ impl RulesService {
     }
 
     /// Read `active` and `proposed` rows, validate and compile every body,
-    /// swap the set. A body that fails is logged and listed.
+    /// swap the set. A body that fails is logged and listed. Disabled
+    /// rules never reach the set: the probe path reads the in-memory
+    /// set, so exclusion here is the enforcement.
     pub fn load(&self) -> Result<(), StoreError> {
         let rows = self.store.load_rules(&[State::Active, State::Proposed])?;
+        let states = self.store.rule_states(&self.app_id)?;
         let mut entries: Vec<(Rule, RuleMeta)> = Vec::with_capacity(rows.len());
         let mut invalid = Vec::new();
-        for row in rows {
+        for row in rows
+            .into_iter()
+            .filter(|r| states.get(&r.id).copied().unwrap_or(true))
+        {
             match parse_stored(&row) {
                 Ok((rule, meta)) => entries.push((rule, meta)),
                 Err(errors) => {

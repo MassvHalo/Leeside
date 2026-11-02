@@ -277,6 +277,26 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                             ],
                         )?;
                     }
+                    StoreOp::RuleState {
+                        rule_id,
+                        app_id,
+                        enabled,
+                        by,
+                        at_s,
+                    } => {
+                        tx.execute(
+                            "INSERT INTO rule_state (rule_id, app_id, enabled, updated_at) \
+                             VALUES (?1, ?2, ?3, ?4) \
+                             ON CONFLICT(rule_id, app_id) DO UPDATE SET enabled = excluded.enabled, \
+                             updated_at = excluded.updated_at",
+                            params![rule_id, app_id, i64::from(enabled), at_s],
+                        )?;
+                        tx.execute(
+                            "INSERT INTO rule_state_audit (rule_id, app_id, enabled, at_s, by) \
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![rule_id, app_id, i64::from(enabled), at_s, by],
+                        )?;
+                    }
                     StoreOp::HoneytokenHit {
                         actor_id,
                         hit_ts_us,

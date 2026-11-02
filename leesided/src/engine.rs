@@ -314,7 +314,7 @@ impl Engine {
     pub async fn open(cfg: Config) -> Result<Arc<Engine>, StoreError> {
         let store = Arc::new(Store::open(&cfg.db)?);
         let symbols = Arc::new(Symbols::default());
-        let rules = RulesService::new(symbols.clone(), store.clone());
+        let rules = RulesService::new(symbols.clone(), store.clone(), cfg.app_id.clone());
         rules.import_install(&cfg.rules_dir).await?;
         rules.load()?;
         let decisions = Decisions::default();
