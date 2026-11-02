@@ -33,16 +33,58 @@ pub enum ReviewError {
     MissingDb(String),
 }
 
-/// One review candidate: the actor's latest score plus its window.
+/// Why a subject is queued (docs/llm-evals.md section 4): the
+/// first matching tier, in order. The uncertain band is 0.3 to 0.7,
+/// the brief's borderline band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhyInQueue {
+    RuleBelowThreshold,
+    ObserveBelowThreshold,
+    AboveThresholdNoRule,
+    Uncertain,
+    UnlabelledProposal,
+    Score,
+}
+
+impl WhyInQueue {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WhyInQueue::RuleBelowThreshold => "rule_below_threshold",
+            WhyInQueue::ObserveBelowThreshold => "observe_below_threshold",
+            WhyInQueue::AboveThresholdNoRule => "above_threshold_no_rule",
+            WhyInQueue::Uncertain => "uncertain",
+            WhyInQueue::UnlabelledProposal => "unlabelled_proposal",
+            WhyInQueue::Score => "score",
+        }
+    }
+
+    fn tier(self) -> u8 {
+        match self {
+            WhyInQueue::RuleBelowThreshold
+            | WhyInQueue::ObserveBelowThreshold
+            | WhyInQueue::AboveThresholdNoRule => 1,
+            WhyInQueue::Uncertain => 2,
+            WhyInQueue::UnlabelledProposal => 3,
+            WhyInQueue::Score => 4,
+        }
+    }
+}
+
+/// One review candidate: the subject's latest score with its window,
+/// threshold, rule hits and proposal, plus why it is queued.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReviewRow {
+    pub scope: String,
     pub scope_id: String,
     pub score: f64,
     pub surface: Option<String>,
+    pub threshold: f64,
     pub top: Vec<String>,
     pub held: u32,
     pub window_end_ts: i64,
+    pub rule_hits: Vec<String>,
     pub proposal: Option<Proposal>,
+    pub why: WhyInQueue,
 }
 
 /// The latest `llm_proposed` label for the actor, if any.
@@ -76,23 +118,135 @@ fn open_db(db: &Path) -> Result<Connection, ReviewError> {
     Ok(conn)
 }
 
-/// The highest-scored actors, latest score each, with window summaries.
-pub fn review_rows(conn: &Connection, top: usize) -> Result<Vec<ReviewRow>, ReviewError> {
+/// A rule or observe hit on the subject: the rule name and when
+/// (unix seconds).
+struct Hit {
+    rule: String,
+    ts: i64,
+}
+
+fn acting(action: &str) -> bool {
+    matches!(action, "block" | "rate_limit" | "challenge")
+}
+
+/// Rule hits from three places: `rule_decision` labels (install-set
+/// blocks), live sticky decisions, and the subject's recent turns'
+/// `rules_matched` (enforce-mode acting matches). Observe hits are
+/// matches in monitor or shadow mode. Turn scans cap at 64 rows.
+fn subject_hits(
+    conn: &Connection,
+    scope: &str,
+    scope_id: &str,
+    now_s: i64,
+) -> Result<(Vec<Hit>, Vec<Hit>), ReviewError> {
+    let mut rules: Vec<Hit> = Vec::new();
+    let mut observe: Vec<Hit> = Vec::new();
     let mut stmt = conn.prepare(
-        "SELECT scope_id, surface, ts_us, score, top3 FROM ( \
-           SELECT *, ROW_NUMBER() OVER (PARTITION BY scope_id ORDER BY ts_us DESC) AS rn \
-           FROM scores WHERE scope = 'actor' \
-         ) WHERE rn = 1 ORDER BY score DESC LIMIT ?1",
+        "SELECT note, created_at FROM labels \
+         WHERE scope = ?1 AND scope_id = ?2 AND source = 'rule_decision' \
+         ORDER BY created_at DESC LIMIT 16",
     )?;
-    let latest: Vec<(String, Option<String>, i64, f64, String)> = stmt
-        .query_map(params![top as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+    for row in stmt.query_map(params![scope, scope_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (rule, ts) = row?;
+        rules.push(Hit { rule, ts });
+    }
+    if scope == "actor" {
+        let mut stmt = conn.prepare(
+            "SELECT rule, created_at FROM decisions \
+             WHERE scope = 'actor' AND key = ?1 AND expires_at > ?2 \
+             ORDER BY created_at DESC LIMIT 16",
+        )?;
+        for row in stmt.query_map(params![scope_id, now_s], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })? {
+            let (rule, ts) = row?;
+            rules.push(Hit { rule, ts });
+        }
+    }
+    let turn_col = if scope == "actor" {
+        "actor_id"
+    } else {
+        "cluster_key"
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT rules_matched, ts_us FROM turns \
+         WHERE {turn_col} = ?1 AND rules_matched IS NOT NULL \
+         AND rules_matched != '[]' ORDER BY rowid DESC LIMIT 64"
+    ))?;
+    let rows: Vec<(String, i64)> = stmt
+        .query_map(params![scope_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    for (matched, ts_us) in rows {
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&matched).unwrap_or_default();
+        for e in entries {
+            let rule = e.get("rule").and_then(|v| v.as_str()).unwrap_or("?");
+            let action = e.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let mode = e.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+            let hit = Hit {
+                rule: rule.to_string(),
+                ts: ts_us / 1_000_000,
+            };
+            if mode == "enforce" && acting(action) {
+                rules.push(hit);
+            } else if mode == "monitor" || mode == "shadow" {
+                observe.push(hit);
+            }
+        }
+    }
+    Ok((rules, observe))
+}
+
+fn latest_label_ts(
+    conn: &Connection,
+    scope: &str,
+    scope_id: &str,
+    source: &str,
+) -> Result<i64, ReviewError> {
+    let mut stmt = conn.prepare(
+        "SELECT created_at FROM labels \
+         WHERE scope = ?1 AND scope_id = ?2 AND source = ?3 \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![scope, scope_id, source], |r| r.get(0))?;
+    Ok(rows.next().transpose()?.unwrap_or(0))
+}
+
+/// The review queue (docs/llm-evals.md section 4): every scored
+/// subject, newest evidence first. A decided subject leaves the queue
+/// and re-enters only on a newer rule or observe hit or a newer
+/// proposal; scores alone do not re-queue. Thresholds come from the
+/// loaded model manifest, 0.5 when none is loaded for the surface.
+pub fn review_rows(
+    conn: &Connection,
+    top: usize,
+    thresholds: &std::collections::HashMap<String, f64>,
+) -> Result<Vec<ReviewRow>, ReviewError> {
+    let mut stmt = conn.prepare(
+        "SELECT scope, scope_id, surface, ts_us, score, top3 FROM ( \
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY ts_us DESC) AS rn \
+           FROM scores WHERE scope IN ('actor', 'cluster') \
+         ) WHERE rn = 1",
+    )?;
+    let latest: Vec<(String, String, Option<String>, i64, f64, String)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .filter_map(|r| r.ok())
         .collect();
     let held_idx = features::NAMES.iter().position(|n| *n == "turns_held");
+    let now_s = crate::store::now_s();
     let mut out = Vec::with_capacity(latest.len());
-    for (scope_id, surface, _ts, score, top3) in latest {
+    for (scope, scope_id, surface, _ts, score, top3) in latest {
         let top: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(&top3)
             .map(|v| {
                 v.iter()
@@ -103,8 +257,8 @@ pub fn review_rows(conn: &Connection, top: usize) -> Result<Vec<ReviewRow>, Revi
         let (held, window_end_ts): (u32, i64) = conn
             .query_row(
                 "SELECT vector, ts_us FROM feature_vectors \
-                 WHERE scope = 'actor' AND key = ?1 ORDER BY ts_us DESC LIMIT 1",
-                params![scope_id],
+                 WHERE scope = ?1 AND key = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, scope_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
             .ok()
@@ -119,17 +273,24 @@ pub fn review_rows(conn: &Connection, top: usize) -> Result<Vec<ReviewRow>, Revi
                     .map(|h| (h as u32, ts))
             })
             .unwrap_or((0, 0));
-        let proposal: Option<Proposal> = conn
-            .query_row(
-                "SELECT label, confidence, note, signals, cited_turns FROM labels \
-                 WHERE scope = 'actor' AND scope_id = ?1 AND source = 'llm_proposed' \
-                 ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
-                params![scope_id],
-                |r| {
-                    let note: Option<String> = r.get(2)?;
-                    let signals: Option<String> = r.get(3)?;
-                    let cited: Option<String> = r.get(4)?;
-                    Ok(Proposal {
+        let (rule_hits, observe_hits) = subject_hits(conn, &scope, &scope_id, now_s)?;
+        let last_hit = rule_hits
+            .iter()
+            .chain(observe_hits.iter())
+            .map(|h| h.ts)
+            .max()
+            .unwrap_or(0);
+        let (proposal, proposal_ts) = match conn.query_row(
+            "SELECT label, confidence, note, signals, cited_turns, created_at FROM labels \
+             WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+             ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
+            params![scope, scope_id],
+            |r| {
+                let note: Option<String> = r.get(2)?;
+                let signals: Option<String> = r.get(3)?;
+                let cited: Option<String> = r.get(4)?;
+                Ok((
+                    Proposal {
                         label: r.get(0)?,
                         confidence: r.get(1)?,
                         reason: Proposal::display(note.as_deref().unwrap_or("")),
@@ -139,21 +300,83 @@ pub fn review_rows(conn: &Connection, top: usize) -> Result<Vec<ReviewRow>, Revi
                         cited_turns: cited
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
-                    })
-                },
-            )
-            .ok();
-        out.push(ReviewRow {
-            scope_id,
-            score,
-            surface,
-            top,
-            held,
-            window_end_ts,
-            proposal,
-        });
+                    },
+                    r.get::<_, i64>(5)?,
+                ))
+            },
+        ) {
+            Ok((p, ts)) => (Some(p), ts),
+            Err(_) => (None, 0),
+        };
+        let operator_ts = latest_label_ts(conn, &scope, &scope_id, "operator")?;
+        if operator_ts > 0 && operator_ts >= proposal_ts.max(last_hit) {
+            continue;
+        }
+        let threshold = surface
+            .as_deref()
+            .and_then(|s| thresholds.get(s).copied())
+            .unwrap_or(0.5);
+        let has_rule = !rule_hits.is_empty();
+        let has_observe = !observe_hits.is_empty();
+        let why = if has_rule && score < threshold {
+            WhyInQueue::RuleBelowThreshold
+        } else if has_observe && score < threshold {
+            WhyInQueue::ObserveBelowThreshold
+        } else if score >= threshold && !has_rule && !has_observe {
+            WhyInQueue::AboveThresholdNoRule
+        } else if (0.3..=0.7).contains(&score) {
+            WhyInQueue::Uncertain
+        } else if proposal.is_some() && proposal_ts > operator_ts {
+            WhyInQueue::UnlabelledProposal
+        } else {
+            WhyInQueue::Score
+        };
+        let mut rules: Vec<String> = rule_hits
+            .iter()
+            .chain(observe_hits.iter())
+            .map(|h| h.rule.clone())
+            .collect();
+        rules.sort();
+        rules.dedup();
+        out.push((
+            ReviewRow {
+                scope,
+                scope_id,
+                score,
+                surface,
+                threshold,
+                top,
+                held,
+                window_end_ts,
+                rule_hits: rules,
+                proposal,
+                why,
+            },
+            proposal_ts,
+        ));
     }
-    Ok(out)
+    out.sort_by(|(a, pa), (b, pb)| {
+        a.why
+            .tier()
+            .cmp(&b.why.tier())
+            .then_with(|| match a.why.tier() {
+                1 => b
+                    .score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                2 => (a.score - 0.5)
+                    .abs()
+                    .partial_cmp(&(b.score - 0.5).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                3 => pb.cmp(pa),
+                _ => b
+                    .score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            })
+    });
+    out.truncate(top);
+    Ok(out.into_iter().map(|(r, _)| r).collect())
 }
 
 /// Write the operator's decision for the reviewed window. Every judgment
@@ -169,8 +392,9 @@ pub fn write_operator_label(
     conn.execute(
         "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
          confidence, kind, note, created_at) \
-         VALUES ('actor', ?1, ?2, ?3, ?4, 'operator', 1.0, NULL, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 'operator', 1.0, NULL, ?6, ?7)",
         params![
+            row.scope,
             row.scope_id,
             row.surface,
             row.window_end_ts,
@@ -188,6 +412,7 @@ pub fn write_operator_label(
 fn note_operator_label(
     conn: &Connection,
     exec: Option<&crate::llm::Exec>,
+    scope: &str,
     scope_id: &str,
     label: &str,
     now_s: i64,
@@ -200,7 +425,7 @@ fn note_operator_label(
     };
     crate::llm::maybe_enqueue_draft(
         conn,
-        "actor",
+        scope,
         scope_id,
         "review",
         now_s,
@@ -211,16 +436,19 @@ fn note_operator_label(
 }
 
 /// Run the interactive loop. Returns the number of labels written.
+/// Thresholds come from the loaded model manifest, empty when none is
+/// configured (every surface then compares against 0.5).
 pub fn run_review(
     db: &Path,
     top: usize,
+    thresholds: &std::collections::HashMap<String, f64>,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<usize, ReviewError> {
     let conn = open_db(db)?;
-    let rows = review_rows(&conn, top)?;
+    let rows = review_rows(&conn, top, thresholds)?;
     if rows.is_empty() {
-        writeln!(output, "review: no scored actors")?;
+        writeln!(output, "review: nothing to review")?;
         return Ok(0);
     }
     // Opening the review asks for proposals; the queue guard dedups,
@@ -231,7 +459,7 @@ pub fn run_review(
         for row in &rows {
             crate::llm::enqueue_label(
                 &conn,
-                "actor",
+                &row.scope,
                 &row.scope_id,
                 "review",
                 now,
@@ -245,11 +473,19 @@ pub fn run_review(
     for (n, row) in rows.iter().enumerate() {
         writeln!(
             output,
-            "{}. {} score={:.4} {} held={} top={}",
+            "{}. {} {} score={:.4} {} thr={:.2} why={} rules={} held={} top={}",
             n + 1,
             row.scope_id,
+            row.scope,
             row.score,
             row.surface.as_deref().unwrap_or("none"),
+            row.threshold,
+            row.why.as_str(),
+            if row.rule_hits.is_empty() {
+                "-".to_string()
+            } else {
+                row.rule_hits.join(",")
+            },
             row.held,
             if row.top.is_empty() {
                 "-".to_string()
@@ -302,7 +538,14 @@ pub fn run_review(
                 "c" if row.proposal.is_some() => {
                     let label = row.proposal.as_ref().expect("checked").label.clone();
                     write_operator_label(&conn, row, &label, "confirmed llm_proposed", now_s)?;
-                    note_operator_label(&conn, exec.as_ref(), &row.scope_id, &label, now_s)?;
+                    note_operator_label(
+                        &conn,
+                        exec.as_ref(),
+                        &row.scope,
+                        &row.scope_id,
+                        &label,
+                        now_s,
+                    )?;
                     writeln!(output, "  labeled {label} (confirmed proposal)")?;
                     labeled += 1;
                     break;
@@ -314,7 +557,14 @@ pub fn run_review(
                         _ => "unknown",
                     };
                     write_operator_label(&conn, row, label, "review CLI", now_s)?;
-                    note_operator_label(&conn, exec.as_ref(), &row.scope_id, label, now_s)?;
+                    note_operator_label(
+                        &conn,
+                        exec.as_ref(),
+                        &row.scope,
+                        &row.scope_id,
+                        label,
+                        now_s,
+                    )?;
                     if row.proposal.as_ref().is_some_and(|p| p.label != label) {
                         writeln!(output, "  labeled {label} (differs from proposal)")?;
                     } else {

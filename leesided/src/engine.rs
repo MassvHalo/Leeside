@@ -1351,6 +1351,19 @@ impl Engine {
             "classify": {"calls": today.classify.0, "tokens": today.classify.1},
             "draft": {"calls": today.draft.0, "tokens": today.draft.1},
         });
+        let mut evals = serde_json::Map::new();
+        for point in ["label", "explain", "classify", "draft"] {
+            let row = crate::llm::prompt_hash(point)
+                .ok()
+                .and_then(|h| {
+                    self.store
+                        .with_reader(|c| Ok(crate::llm_eval::eval_for_prompt(c, point, &h)))
+                        .unwrap_or(None)
+                })
+                .unwrap_or(serde_json::Value::Null);
+            evals.insert(point.to_string(), row);
+        }
+        v["evals"] = serde_json::Value::Object(evals);
         v
     }
 

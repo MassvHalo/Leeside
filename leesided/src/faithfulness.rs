@@ -3,12 +3,12 @@
 //! anything is written. A failed check downgrades the proposal to
 //! `unknown`, keeps the reason, and logs the signal.
 //!
-//! Name mappings from the brief to features v2, which has no `iri_cv`,
-//! `asset_ratio`, flag-rate or rejected-credential features: `iri_cv`
-//! reads `gap_cv`; asset and flag shares are computed over the
-//! envelope's turns; rejected credentials count distinct `cred`
-//! prefixes on rejected turns. Checks are pure over the envelope, so
-//! the worker and `llm eval` run the same code.
+//! The label envelope carries the brief's window names (`iri_cv`,
+//! `asset_ratio`) as aliases beside the raw v2 features; flag shares
+//! and rejected credentials have no window source, so those checks
+//! compute over the envelope's turns (`flags`, distinct `cred`
+//! prefixes). Checks are pure over the envelope, so the worker and
+//! `llm eval` run the same code.
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -171,8 +171,11 @@ pub fn check_proposal(
                     })
             }
             "high_404_rate" => share(&cited_turns, is_404) > 0.5,
-            "machine_cadence" => window_num(win, "gap_cv").is_some_and(|v| v < 0.15),
-            "no_assets" => share(&all, is_asset) < 0.05 && all.iter().any(|t| is_html_turn(t)),
+            "machine_cadence" => window_num(win, "iri_cv").is_some_and(|v| v < 0.15),
+            "no_assets" => {
+                window_num(win, "asset_ratio").is_some_and(|v| v < 0.05)
+                    && all.iter().any(|t| is_html_turn(t))
+            }
             "ua_inconsistent" => cited_turns.iter().any(|t| {
                 (str_field(t, "ua_class") == Some("browser")
                     && flags(t).contains(&"ua_chromium_no_ch"))
@@ -196,7 +199,10 @@ pub fn check_proposal(
                             .is_some_and(|o| o.rsplit(':').next() == Some("rejected"))
                     })
             }
-            "normal_browsing" => max_flag_rate(&all) <= 0.2 && share(&all, is_asset) > 0.1,
+            "normal_browsing" => {
+                max_flag_rate(&all) <= 0.2
+                    && window_num(win, "asset_ratio").is_some_and(|v| v > 0.1)
+            }
             "verified_partner" => {
                 all.iter()
                     .any(|t| str_field(t, "credential_status") == Some("verified"))
@@ -276,20 +282,22 @@ mod tests {
     #[test]
     fn machine_cadence_reads_gap_cv() {
         let ts = vec![turn("/", 200)];
-        assert!(check(ts.clone(), json!({"gap_cv": 0.02}), "machine_cadence", &[0]).is_ok());
-        assert!(check(ts.clone(), json!({"gap_cv": 0.9}), "machine_cadence", &[0]).is_err());
+        assert!(check(ts.clone(), json!({"iri_cv": 0.02}), "machine_cadence", &[0]).is_ok());
+        assert!(check(ts.clone(), json!({"iri_cv": 0.9}), "machine_cadence", &[0]).is_err());
         assert!(check(ts, json!({}), "machine_cadence", &[0]).is_err());
     }
 
     #[test]
     fn no_assets_needs_an_html_turn_and_almost_no_assets() {
-        let mut bot = vec![turn("/", 200)];
-        assert!(check(bot.clone(), json!({}), "no_assets", &[0]).is_ok());
-        bot[0]["is_asset"] = json!(1);
-        assert!(check(bot, json!({}), "no_assets", &[0]).is_err());
+        let win = json!({"asset_ratio": 0.0});
+        let bot = vec![turn("/", 200)];
+        assert!(check(bot, win.clone(), "no_assets", &[0]).is_ok());
+        let mut asset = turn("/", 200);
+        asset["is_asset"] = json!(1);
+        assert!(check(vec![asset], json!({"asset_ratio": 1.0}), "no_assets", &[0]).is_err());
         let mut t = turn("api.ping", 200);
         t["surface"] = json!("api");
-        assert!(check(vec![t], json!({}), "no_assets", &[0]).is_err());
+        assert!(check(vec![t], win, "no_assets", &[0]).is_err());
     }
 
     #[test]
@@ -377,11 +385,12 @@ mod tests {
         }
         ts.push(turn("/venues", 200));
         ts.push(turn("/venues/1", 200));
-        assert!(check(ts, json!({}), "normal_browsing", &[8, 9]).is_ok());
+        let win = json!({"asset_ratio": 0.8});
+        assert!(check(ts, win.clone(), "normal_browsing", &[8, 9]).is_ok());
         let mut flagged = turn("/", 200);
         flagged["flags"] = json!(["library_ua_on_web"]);
         let ts = vec![flagged.clone(), flagged];
-        assert!(check(ts, json!({}), "normal_browsing", &[0]).is_err());
+        assert!(check(ts, win, "normal_browsing", &[0]).is_err());
     }
 
     #[test]

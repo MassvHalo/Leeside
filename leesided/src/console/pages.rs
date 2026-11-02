@@ -1659,16 +1659,22 @@ pub fn cluster_detail_page(
 
 /// `/ui/review`: the queue in the CLI's order, with `why_in_queue`.
 pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf: &str) -> String {
-    let mut body = String::from("<h1>Review</h1><p class=\"sub\">Top 20 by score, as the CLI orders them. Decided rows keep their form: labels are append-only.</p>");
+    let mut body = String::from("<h1>Review</h1><p class=\"sub\">Disagreements first, then uncertain, unlabelled proposals, and the rest, as the CLI orders them. Decided rows leave until new evidence re-queues them.</p>");
     if rows.is_empty() {
         body.push_str("<p class=\"empty\">Nothing scored yet: no queue.</p>");
         return layout("Review", "/ui/review", &body);
     }
     for r in rows {
+        let subject = if r.row.scope == "cluster" {
+            cluster_link(&r.row.scope_id)
+        } else {
+            actor_link(&r.row.scope_id)
+        };
         let _ = write!(
             body,
-            "<h2>{}</h2><p class=\"sub\">{}</p>",
-            actor_link(&r.row.scope_id),
+            "<h2>{} <span class=\"mono\">{}</span></h2><p class=\"sub\">{}</p>",
+            subject,
+            esc(&r.row.scope),
             esc(&r.why.join(" · ")),
         );
         body.push_str("<dl class=\"kv\">");
@@ -1698,14 +1704,24 @@ pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf:
                     body,
                     "<dl class=\"kv\"><dt>Proposal</dt><dd>{} {:.2}</dd>\
                      <dt>Signals</dt><dd>{}</dd>\
+                     <dt>Cites</dt><dd class=\"mono\">{}</dd>\
                      <dt>Reason</dt><dd>{}</dd></dl>",
                     label_chip(&p.label),
                     p.confidence,
                     esc(&p.signals.join(", ")),
+                    if p.cited_turns.is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.cited_turns
+                            .iter()
+                            .map(usize::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    },
                     mono(&p.reason),
                 );
             }
-            None => body.push_str("<p class=\"empty\">No proposal for this actor.</p>"),
+            None => body.push_str("<p class=\"empty\">No proposal for this subject.</p>"),
         }
         if let Some(o) = &r.operator {
             let _ = write!(
@@ -1716,23 +1732,29 @@ pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf:
                 esc(&fmt_ts_s(o.created_at)),
             );
         }
-        let _ = write!(
-            body,
-            "<form method=\"post\" action=\"/ui/review/decide\">\
-             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-             <input type=\"hidden\" name=\"scope_id\" value=\"{}\">\
-             <input type=\"hidden\" name=\"window_end_ts\" value=\"{}\">",
-            esc(&r.row.scope_id),
-            r.row.window_end_ts,
-        );
-        if r.row.proposal.is_some() {
-            body.push_str("<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"confirm\">confirm</button> ");
+        // Decide is actor-only until the console round reworks it;
+        // cluster rows decide in the CLI.
+        if r.row.scope == "actor" {
+            let _ = write!(
+                body,
+                "<form method=\"post\" action=\"/ui/review/decide\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"scope_id\" value=\"{}\">\
+                 <input type=\"hidden\" name=\"window_end_ts\" value=\"{}\">",
+                esc(&r.row.scope_id),
+                r.row.window_end_ts,
+            );
+            if r.row.proposal.is_some() {
+                body.push_str("<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"confirm\">confirm</button> ");
+            }
+            body.push_str(
+                "<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"benign\">benign</button> \
+                 <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"malicious\">malicious</button> \
+                 <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"unknown\">unknown</button></form>",
+            );
+        } else {
+            body.push_str("<p class=\"empty\">Cluster rows decide in the CLI for now.</p>");
         }
-        body.push_str(
-            "<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"benign\">benign</button> \
-             <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"malicious\">malicious</button> \
-             <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"unknown\">unknown</button></form>",
-        );
     }
     layout("Review", "/ui/review", &body)
 }

@@ -2985,12 +2985,15 @@ async fn review_labels_the_highest_scored_actor() {
     let labeled = leesided::review::run_review(
         &dir.join("empty").join("leesided.sqlite"),
         20,
+        &std::collections::HashMap::new(),
         &mut Cursor::new(""),
         &mut out,
     )
     .unwrap();
     assert_eq!(labeled, 0);
-    assert!(String::from_utf8(out).unwrap().contains("no scored actors"));
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("nothing to review"));
     h0.running.abort();
     h0.engine.shutdown().await;
 
@@ -3017,7 +3020,14 @@ async fn review_labels_the_highest_scored_actor() {
     h.engine.store.flush().await;
     let db = h.dir.join("leesided.sqlite");
     let mut out = Vec::new();
-    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("m\n"), &mut out).unwrap();
+    let labeled = leesided::review::run_review(
+        &db,
+        20,
+        &std::collections::HashMap::new(),
+        &mut Cursor::new("m\n"),
+        &mut out,
+    )
+    .unwrap();
     assert_eq!(labeled, 1);
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("score=0.8808"), "{text}");
@@ -3037,17 +3047,74 @@ async fn review_labels_the_highest_scored_actor() {
         label,
         ("malicious".to_string(), "operator".to_string(), 1.0, None)
     );
-    // Re-reviewing appends: both judgments stay, the latest wins.
+    // Decided and quiet, the subject leaves the queue.
     let mut out = Vec::new();
-    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("b\n"), &mut out).unwrap();
+    let labeled = leesided::review::run_review(
+        &db,
+        20,
+        &std::collections::HashMap::new(),
+        &mut Cursor::new("b\n"),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(labeled, 0);
+    assert!(
+        String::from_utf8(out)
+            .unwrap()
+            .contains("nothing to review"),
+        "decided subjects leave"
+    );
+    // A newer proposal re-queues it; re-reviewing then appends, and
+    // both judgments stay with the latest winning.
+    let (scope_id, window_ts): (String, i64) = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT key, ts_us FROM feature_vectors WHERE scope = 'actor' \
+                 ORDER BY ts_us DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    h.engine
+        .store
+        .send(leesided::store::StoreOp::Label(leesided::store::LabelRow {
+            scope: "actor",
+            scope_id: scope_id.clone(),
+            surface: Some("web".to_string()),
+            window_end_ts: window_ts,
+            label: "benign",
+            source: "llm_proposed",
+            confidence: 0.6,
+            kind: None,
+            note: Some("calmer on reflection".to_string()),
+            created_at: now_us() / 1_000_000 + 100,
+            signals: None,
+            daily_calls: 0,
+            daily_tokens: 0,
+        }));
+    h.engine.store.flush().await;
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(
+        &db,
+        20,
+        &std::collections::HashMap::new(),
+        &mut Cursor::new("b\n"),
+        &mut out,
+    )
+    .unwrap();
     assert_eq!(labeled, 1);
     let rows: Vec<(String, i64)> = h
         .engine
         .store
         .with_reader(|c| {
-            c.prepare("SELECT label, created_at FROM labels ORDER BY id ASC")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()
+            c.prepare(
+                "SELECT label, created_at FROM labels WHERE source = 'operator' ORDER BY id ASC",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()
         })
         .unwrap();
     assert_eq!(rows.len(), 2, "append, not upsert");
@@ -3061,7 +3128,14 @@ async fn review_labels_the_highest_scored_actor() {
     assert_eq!(latest, "benign");
     // Skipping writes nothing.
     let mut out = Vec::new();
-    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("\n"), &mut out).unwrap();
+    let labeled = leesided::review::run_review(
+        &db,
+        20,
+        &std::collections::HashMap::new(),
+        &mut Cursor::new("\n"),
+        &mut out,
+    )
+    .unwrap();
     assert_eq!(labeled, 0);
     h.running.abort();
     h.engine.shutdown().await;
@@ -3128,7 +3202,14 @@ async fn review_confirm_writes_an_operator_label_the_export_carries() {
         }));
     h.engine.store.flush().await;
     let mut out = Vec::new();
-    let labeled = leesided::review::run_review(&db, 20, &mut Cursor::new("c\n"), &mut out).unwrap();
+    let labeled = leesided::review::run_review(
+        &db,
+        20,
+        &std::collections::HashMap::new(),
+        &mut Cursor::new("c\n"),
+        &mut out,
+    )
+    .unwrap();
     assert_eq!(labeled, 1);
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("llm proposes malicious (0.60)"), "{text}");
@@ -3841,8 +3922,8 @@ async fn ui_review_decide_writes_the_operator_label() {
     let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(
-        body.contains("confirmed llm_proposed"),
-        "decision reflected on reload"
+        !body.contains(&actor),
+        "a decided subject leaves the queue on reload"
     );
     // A second verdict appends beside the first; a bad one is refused.
     let (st, _, _) = h
@@ -4509,7 +4590,8 @@ async fn review_malicious_verdict_enqueues_draft() {
     })
     .await;
     h.engine.store.flush().await;
-    // Four operator malicious already; the review writes the fifth.
+    // Four hour-old operator malicious; a fresh rule hit re-queues
+    // the decided subject, and the review writes the fifth.
     // The env carries the LLM config only for this call: no other test
     // reads it, and a leak would only enqueue label jobs elsewhere.
     ui_seed(
@@ -4518,9 +4600,14 @@ async fn review_malicious_verdict_enqueues_draft() {
          INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
          confidence, kind, note, created_at) \
          SELECT 'actor', actor_id, 'web', 3000000, 'malicious', 'operator', 1.0, NULL, \
-         't', strftime('%s', 'now') FROM (SELECT DISTINCT actor_id FROM turns \
+         't', strftime('%s', 'now') - 3600 FROM (SELECT DISTINCT actor_id FROM turns \
          WHERE actor_id IS NOT NULL) \
-         CROSS JOIN (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4);",
+         CROSS JOIN (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4); \
+         INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
+         confidence, kind, note, created_at) \
+         SELECT 'actor', actor_id, 'web', 3000000, 'malicious', 'rule_decision', 0.5, NULL, \
+         'seed-block', strftime('%s', 'now') FROM (SELECT DISTINCT actor_id FROM turns \
+         WHERE actor_id IS NOT NULL) LIMIT 1;",
     );
     std::env::set_var("LEESIDED_LLM_URL", "http://127.0.0.1:9");
     std::env::set_var("LEESIDED_LLM_KEY", "test");
@@ -4529,6 +4616,7 @@ async fn review_malicious_verdict_enqueues_draft() {
     let labeled = leesided::review::run_review(
         &h.dir.join("leesided.sqlite"),
         20,
+        &std::collections::HashMap::new(),
         &mut Cursor::new("m\n"),
         &mut out,
     )
@@ -4549,6 +4637,128 @@ async fn review_malicious_verdict_enqueues_draft() {
         })
         .unwrap();
     assert_eq!(subject, "cc7");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+/// The golden sets (docs/llm-evals.md section 1) keep their shape:
+/// minimum counts, every row labelled, both scopes and the hard
+/// cases on the label set, half none on classify.
+#[test]
+fn golden_sets_keep_their_shape() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../windside/evals");
+    let read = |name: &str| {
+        let text =
+            std::fs::read_to_string(dir.join(name)).unwrap_or_else(|_| panic!("{name} readable"));
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("golden json"))
+            .collect::<Vec<_>>()
+    };
+    let label = read("label.jsonl");
+    assert!(label.len() >= 100, "label rows: {}", label.len());
+    let mut scopes = std::collections::HashSet::new();
+    let mut kinds = std::collections::HashSet::new();
+    let mut cold = 0;
+    let mut scraper = 0;
+    let mut api = 0;
+    for r in &label {
+        let exp = r.get("expected_label").and_then(|v| v.as_str());
+        assert!(
+            matches!(exp, Some("benign" | "malicious")),
+            "label row labelled: {r}"
+        );
+        let env = &r["envelope"];
+        scopes.insert(env["subject"]["scope"].as_str().unwrap().to_string());
+        kinds.insert(r["kind"].as_str().unwrap().to_string());
+        if env["window"]["turns_held"].as_f64().unwrap_or(99.0) < 10.0 {
+            cold += 1;
+        }
+        if r["kind"] == "attack-scraper" {
+            scraper += 1;
+        }
+        if r["kind"] == "benign-api" {
+            api += 1;
+        }
+        assert!(env.get("turns").and_then(|t| t.as_array()).is_some());
+    }
+    assert!(
+        scopes.contains("actor") && scopes.contains("cluster"),
+        "{scopes:?}"
+    );
+    assert!(kinds.len() >= 10, "{kinds:?}");
+    assert!(cold > 0 && scraper > 0 && api > 0, "hard cases present");
+
+    let classify = read("classify.jsonl");
+    assert!(classify.len() >= 200, "classify rows: {}", classify.len());
+    let mut cats = std::collections::HashSet::new();
+    let mut none = 0;
+    for r in &classify {
+        let cat = r["expected_category"].as_str().expect("classify labelled");
+        cats.insert(cat.to_string());
+        if cat == "none" {
+            none += 1;
+        }
+    }
+    assert!(cats.len() == 7, "{cats:?}");
+    let half = classify.len() as f64 / 2.0;
+    assert!((none as f64 - half).abs() <= 5.0, "half none: {none}");
+
+    let explain = read("explain.jsonl");
+    assert!(explain.len() >= 50, "explain rows: {}", explain.len());
+    for r in &explain {
+        assert!(r.get("must_mention").and_then(|v| v.as_array()).is_some());
+        assert!(r.get("top3").is_some() && r.get("window").is_some());
+    }
+
+    let draft = read("draft.jsonl");
+    assert!(draft.len() >= 20, "draft rows: {}", draft.len());
+    for r in &draft {
+        assert!(r["expected_scope"].as_str().is_some(), "draft scope: {r}");
+        assert!(r["expected_surface"].as_str().is_some());
+        assert!(!r["turns"].as_array().unwrap().is_empty());
+    }
+}
+
+/// The review queue order on a fixture store (docs/llm-evals.md
+/// section 4): disagreements first, then uncertain, then unlabelled
+/// proposals, then the rest; decided-and-quiet subjects leave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_queue_orders_four_tiers_and_drops_the_decided() {
+    let h = Harness::start().await;
+    ui_seed(
+        &h,
+        "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+         ('actor', 'a1', 't1', 'web', 1000, 0.95, 'm', '[]'), \
+         ('actor', 'a2', 't2', 'web', 1000, 0.20, 'm', '[]'), \
+         ('cluster', 'c1', 't3', 'web', 1000, 0.50, 'm', '[]'), \
+         ('actor', 'a3', 't4', 'web', 1000, 0.10, 'm', '[]'), \
+         ('actor', 'a4', 't5', 'web', 1000, 0.05, 'm', '[]'), \
+         ('actor', 'a5', 't6', 'web', 1000, 0.99, 'm', '[]'); \
+         INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, created_at) VALUES \
+         ('actor', 'a2', 'web', 0, 'malicious', 'rule_decision', 0.5, 'seed-block', 50), \
+         ('actor', 'a3', 'web', 0, 'benign', 'llm_proposed', 0.6, 'calm [llm_call:1]', 100), \
+         ('actor', 'a5', 'web', 0, 'malicious', 'operator', 1.0, 'review CLI', 200);",
+    );
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let thresholds = std::collections::HashMap::from([("web".to_string(), 0.79)]);
+    let rows = leesided::review::review_rows(&db, 20, &thresholds).unwrap();
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r.scope_id.as_str(), r.why.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("a1", "above_threshold_no_rule"),
+            ("a2", "rule_below_threshold"),
+            ("c1", "uncertain"),
+            ("a3", "unlabelled_proposal"),
+            ("a4", "score"),
+        ]
+    );
+    assert_eq!(rows[0].threshold, 0.79);
+    assert_eq!(rows[1].rule_hits, vec!["seed-block".to_string()]);
     h.running.abort();
     h.engine.shutdown().await;
 }

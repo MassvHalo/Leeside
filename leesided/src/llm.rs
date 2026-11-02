@@ -146,6 +146,8 @@ pub enum LlmError {
     Validate(String),
     #[error("the completion stayed empty at double budget (finish_reason length)")]
     LengthExhausted,
+    #[error("eval: {0}")]
+    Eval(String),
 }
 
 /// What a send runs with. No Debug: it holds the key.
@@ -387,6 +389,16 @@ pub struct LabelMeta {
     pub score: Option<f64>,
 }
 
+/// Which window a label envelope describes: the worker always takes
+/// the latest; `llm eval-build` samples early and spread windows for
+/// cold-start golden rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSel {
+    Latest,
+    Earliest,
+    At(i64),
+}
+
 /// The point-1 envelope of docs/llm.md section 8.1, built from the
 /// store. Thresholds come from the loaded model manifest, empty when no
 /// model is configured (threshold is then null, honestly).
@@ -397,18 +409,46 @@ pub fn build_label_envelope(
     thresholds: &HashMap<String, f64>,
     now_us: i64,
 ) -> Result<(serde_json::Value, LabelMeta), LlmError> {
+    build_label_envelope_at(
+        conn,
+        classes,
+        subject,
+        thresholds,
+        now_us,
+        WindowSel::Latest,
+    )
+}
+
+/// `build_label_envelope` for one window: the score is the latest at
+/// or before the window, so early windows honestly carry no score
+/// when the subject was unscored then.
+pub fn build_label_envelope_at(
+    conn: &Connection,
+    classes: &Ja4Classes,
+    subject: &Subject,
+    thresholds: &HashMap<String, f64>,
+    now_us: i64,
+    sel: WindowSel,
+) -> Result<(serde_json::Value, LabelMeta), LlmError> {
     let turn_col = if subject.scope == "actor" {
         "actor_id"
     } else {
         "cluster_key"
     };
+    let (order, at): (&str, i64) = match sel {
+        WindowSel::Latest => ("DESC", -1),
+        WindowSel::Earliest => ("ASC", -1),
+        WindowSel::At(ts) => ("DESC", ts),
+    };
     let (window_ts, vector, surface): (i64, String, Option<String>) = conn
         .query_row(
-            "SELECT fv.ts_us, fv.vector, fv.surface FROM feature_vectors fv \
-             JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
-             WHERE fv.scope = ?1 AND fv.key = ?2 AND fv.version = ?3 \
-             ORDER BY t.rowid DESC LIMIT 1",
-            params![subject.scope, subject.id, features::VERSION],
+            &format!(
+                "SELECT fv.ts_us, fv.vector, fv.surface FROM feature_vectors fv \
+                 JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
+                 WHERE fv.scope = ?1 AND fv.key = ?2 AND fv.version = ?3 \
+                 AND (?4 < 0 OR fv.ts_us = ?4) ORDER BY t.rowid {order} LIMIT 1",
+            ),
+            params![subject.scope, subject.id, features::VERSION, at],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|e| match e {
@@ -433,8 +473,17 @@ pub fn build_label_envelope(
         .query_row(
             "SELECT s.score, s.top3 FROM scores s \
              JOIN turns t ON s.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
-             WHERE s.scope = ?1 AND s.scope_id = ?2 ORDER BY t.rowid DESC LIMIT 1",
-            params![subject.scope, subject.id],
+             WHERE s.scope = ?1 AND s.scope_id = ?2 \
+             AND (?3 < 0 OR s.ts_us <= ?3) ORDER BY t.rowid DESC LIMIT 1",
+            params![
+                subject.scope,
+                subject.id,
+                if sel == WindowSel::Latest {
+                    -1
+                } else {
+                    window_ts
+                }
+            ],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map(Some)
@@ -535,11 +584,32 @@ pub fn build_label_envelope(
         );
     }
 
-    let mut window = serde_json::Map::with_capacity(features::NAMES.len() + 1);
+    let mut window = serde_json::Map::with_capacity(features::NAMES.len() + 3);
     window.insert("features_version".to_string(), features::VERSION.into());
     for (name, v) in features::NAMES.iter().zip(values.iter()) {
         window.insert((*name).to_string(), (*v).into());
     }
+    // Stable aliases under the brief's names (docs/llm-evals.md
+    // section 3 checks read these): the gap variation, and the asset
+    // share over the window's turns, as in the explain envelope.
+    if let Some(cv) = window.get("gap_cv").cloned() {
+        window.insert("iri_cv".to_string(), cv);
+    }
+    let asset_ratio: Option<f64> = conn
+        .query_row(
+            &format!(
+                "SELECT avg(is_asset = 1) FROM (SELECT is_asset FROM turns \
+                 WHERE {turn_col} = ?1 ORDER BY ts_us DESC LIMIT 64)"
+            ),
+            params![subject.id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    window.insert(
+        "asset_ratio".to_string(),
+        asset_ratio.map_or(serde_json::Value::Null, Into::into),
+    );
 
     let mut stmt = conn.prepare(&format!(
         "SELECT ts_us, verb, route, status, ua_class, flags, credential_status, tag_status, ja4, \
@@ -646,7 +716,22 @@ pub fn build_request(
     effort: Option<&str>,
     budget: Option<u32>,
 ) -> Result<serde_json::Value, LlmError> {
-    let (system, schema) = prompt_for(point)?;
+    let (system, _) = prompt_for(point)?;
+    build_request_with_system(model, point, system, envelope, json_mode, effort, budget)
+}
+
+/// The same request with an explicit system prompt, for `llm eval
+/// --prompt`: the schema stays the point's, only the prose varies.
+pub fn build_request_with_system(
+    model: &str,
+    point: &str,
+    system: &str,
+    envelope: &serde_json::Value,
+    json_mode: JsonMode,
+    effort: Option<&str>,
+    budget: Option<u32>,
+) -> Result<serde_json::Value, LlmError> {
+    let (_, schema) = prompt_for(point)?;
     let mut body = serde_json::json!({
         "model": model,
         "temperature": 0,
@@ -1258,6 +1343,33 @@ fn write_call(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Log one eval row's exchanges as jobless calls, like `send`.
+/// Returns the call ids; eval writes no product tables.
+#[allow(clippy::too_many_arguments)]
+pub fn log_exchanges(
+    conn: &Connection,
+    point: &str,
+    model: &str,
+    prompt_hash: &str,
+    json_mode: JsonMode,
+    summary: &str,
+    exchanges: &[Exchange],
+    now: i64,
+) -> Result<Vec<i64>, LlmError> {
+    write_exchanges(
+        conn,
+        None,
+        point,
+        model,
+        prompt_hash,
+        json_mode,
+        summary,
+        exchanges,
+        now,
+        None,
+    )
 }
 
 /// Write every exchange of an execution, in order; returns the call
@@ -1979,6 +2091,17 @@ pub struct Exchange {
     pub(crate) attempt: Attempt,
 }
 
+impl Exchange {
+    /// Tokens and latency for eval accounting; absent counts as zero.
+    pub fn cost(&self) -> (i64, i64, i64) {
+        (
+            self.attempt.prompt_tokens.unwrap_or(0),
+            self.attempt.completion_tokens.unwrap_or(0),
+            self.attempt.latency_ms.unwrap_or(0),
+        )
+    }
+}
+
 pub enum ExecutionOutcome {
     /// The completion validated: the parsed JSON, verbatim.
     Validated { parsed: String },
@@ -2069,6 +2192,22 @@ pub fn execute_call(
     json_mode: JsonMode,
     effort: Option<&str>,
 ) -> Result<Execution, LlmError> {
+    execute_call_with_system(url, key, model, point, None, envelope, json_mode, effort)
+}
+
+/// `execute_call` with an optional system-prompt override, for `llm
+/// eval --prompt`. `None` sends the registry prompt.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_call_with_system(
+    url: &str,
+    key: &str,
+    model: &str,
+    point: &str,
+    system: Option<&str>,
+    envelope: &serde_json::Value,
+    json_mode: JsonMode,
+    effort: Option<&str>,
+) -> Result<Execution, LlmError> {
     let base = max_tokens(point)?;
     let mut budget = base;
     let mut length_used = false;
@@ -2077,7 +2216,18 @@ pub fn execute_call(
     let mut suffix: Option<String> = None;
     let mut exchanges = Vec::new();
     loop {
-        let mut request = build_request(model, point, envelope, json_mode, effort, Some(budget))?;
+        let mut request = match system {
+            Some(s) => build_request_with_system(
+                model,
+                point,
+                s,
+                envelope,
+                json_mode,
+                effort,
+                Some(budget),
+            )?,
+            None => build_request(model, point, envelope, json_mode, effort, Some(budget))?,
+        };
         if let Some(s) = &suffix {
             let user = request
                 .pointer("/messages/1/content")
@@ -3052,8 +3202,10 @@ mod tests {
         assert_eq!(env["subject"]["asn"], 16509);
         assert_eq!(env["subject"]["country"], "US");
         assert_eq!(env["window"]["features_version"], 2);
-        assert_eq!(env["window"].as_object().unwrap().len(), 39);
+        assert_eq!(env["window"].as_object().unwrap().len(), 41);
         assert_eq!(env["window"]["turns_held"], 1.0);
+        assert_eq!(env["window"]["iri_cv"], 1.0);
+        assert!(env["window"]["asset_ratio"].is_null());
         let turns = env["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 3);
         assert_eq!(turns[0]["path"], "/");
@@ -3065,6 +3217,9 @@ mod tests {
         );
         assert_eq!(turns[0]["ja4_class"], "unknown");
         assert!(turns[0]["credential_status"].is_null());
+        assert_eq!(turns[0]["surface"], "web");
+        assert!(turns[0]["is_asset"].is_null());
+        assert!(turns[0]["cred"].is_null());
         assert_eq!(
             env["labels_so_far"],
             serde_json::json!([{"source": "rule_decision", "label": "malicious", "confidence": 0.5}])

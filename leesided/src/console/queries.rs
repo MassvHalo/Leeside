@@ -2586,21 +2586,26 @@ pub struct ReviewFull {
 }
 
 impl Ctx<'_> {
-    /// The review queue in the CLI's order: highest score first. Each
-    /// row says why it is queued; decided rows keep their form, since
-    /// labels are append-only and a correction is a new row.
+    /// The review queue in the CLI's order: disagreements first,
+    /// then uncertain, unlabelled proposals, and the rest. Each row
+    /// carries the queue reason and the rule hits; decided rows leave
+    /// until new evidence re-queues them.
     pub fn review_queue(
         &self,
         thresholds: &std::collections::HashMap<String, f64>,
         top: usize,
     ) -> Result<Vec<ReviewFull>, QueryError> {
-        let rows = crate::review::review_rows(self.conn(), top).map_err(|e| match e {
-            crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
-            e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
-        })?;
+        let rows =
+            crate::review::review_rows(self.conn(), top, thresholds).map_err(|e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            })?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let mut why = Vec::new();
+            let mut why = vec![format!("why_in_queue: {}", row.why.as_str())];
+            if !row.rule_hits.is_empty() {
+                why.push(format!("rule hits: {}", row.rule_hits.join(", ")));
+            }
             match row.surface.as_deref().and_then(|s| thresholds.get(s)) {
                 Some(t) if row.score >= *t => {
                     why.push(format!("p = {:.4} ≥ threshold {t}", row.score));
@@ -2623,9 +2628,9 @@ impl Ctx<'_> {
                 .conn()
                 .query_row(
                     "SELECT label, note, created_at FROM labels \
-                     WHERE scope = 'actor' AND scope_id = ?1 AND source = 'operator' \
+                     WHERE scope = ?1 AND scope_id = ?2 AND source = 'operator' \
                      ORDER BY created_at DESC, id DESC LIMIT 1",
-                    params![row.scope_id],
+                    params![row.scope, row.scope_id],
                     |r| {
                         Ok(OperatorMark {
                             label: r.get(0)?,
@@ -3026,5 +3031,293 @@ impl Ctx<'_> {
         let rows = stmt.query_map(params![i64::from(proposed_only), limit], label_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(QueryError::from)
+    }
+}
+
+/// The LLM dashboard numbers (docs/llm-evals.md section 5): proposal
+/// precision and coverage, queue speed, live calibration, failure
+/// rates, token cost, the classify golden agreement, and the draft
+/// funnel with shadow false positives for moved drafts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LlmMetrics {
+    pub proposals_decided: usize,
+    pub proposal_precision: Option<f64>,
+    pub coverage: Option<f64>,
+    pub seconds_per_label: Option<f64>,
+    pub calibration: Vec<CalBin>,
+    pub faithfulness_per_100: Option<f64>,
+    pub parse_per_100: Option<f64>,
+    pub tokens_per_label: Option<f64>,
+    pub classify_golden_agreement: Option<f64>,
+    pub drafts_parsed: usize,
+    pub drafts_moved: usize,
+    pub shadow_fp_moved_drafts: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CalBin {
+    pub lo: f64,
+    pub hi: f64,
+    pub n: usize,
+    pub correct: usize,
+}
+
+impl Ctx<'_> {
+    pub fn llm_metrics(&self) -> Result<LlmMetrics, QueryError> {
+        // Decided proposals: the earliest operator label at or after
+        // each proposal on the same window.
+        let mut stmt = self.conn().prepare(
+            "SELECT p.confidence, p.created_at, \
+             (SELECT o.label FROM labels o \
+              WHERE o.scope = p.scope AND o.scope_id = p.scope_id \
+              AND o.window_end_ts = p.window_end_ts AND o.source = 'operator' \
+              AND o.created_at >= p.created_at \
+              ORDER BY o.created_at ASC, o.id ASC LIMIT 1), \
+             (SELECT o.created_at FROM labels o \
+              WHERE o.scope = p.scope AND o.scope_id = p.scope_id \
+              AND o.window_end_ts = p.window_end_ts AND o.source = 'operator' \
+              AND o.created_at >= p.created_at \
+              ORDER BY o.created_at ASC, o.id ASC LIMIT 1), \
+             p.label \
+             FROM labels p WHERE p.source = 'llm_proposed'",
+        )?;
+        type FaithPair = (f64, i64, Option<String>, Option<i64>, String);
+        let pairs: Vec<FaithPair> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut decided = 0usize;
+        let mut agreed = 0usize;
+        let mut secs_total = 0i64;
+        let mut bins = [(0usize, 0usize); 5];
+        for (conf, created, label, o_created, proposed) in &pairs {
+            let (Some(got), Some(at)) = (label, o_created) else {
+                continue;
+            };
+            decided += 1;
+            let ok = got == proposed;
+            if ok {
+                agreed += 1;
+            }
+            secs_total += at - created;
+            let bin = ((conf * 5.0) as usize).min(4);
+            bins[bin].0 += 1;
+            if ok {
+                bins[bin].1 += 1;
+            }
+        }
+        let calibration = bins
+            .iter()
+            .enumerate()
+            .map(|(i, (n, c))| CalBin {
+                lo: i as f64 / 5.0,
+                hi: (i + 1) as f64 / 5.0,
+                n: *n,
+                correct: *c,
+            })
+            .collect();
+        let over_half: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM ( \
+                   SELECT scope, scope_id FROM scores \
+                   GROUP BY scope, scope_id \
+                   HAVING max(score) > 0.5 \
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let covered: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(DISTINCT p.scope || ':' || p.scope_id) FROM labels p \
+                 WHERE p.source = 'llm_proposed' AND EXISTS ( \
+                   SELECT 1 FROM scores s \
+                   WHERE s.scope = p.scope AND s.scope_id = p.scope_id AND s.score > 0.5 \
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let label_sent: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM llm_calls WHERE point = 'label' AND response IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let faith_fail: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM llm_calls \
+                 WHERE point = 'label' AND faithfulness_failed IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let sent: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM llm_calls WHERE response IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let parse_fail: i64 = self
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM llm_calls WHERE response IS NOT NULL AND parsed IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let label_tokens: i64 = self
+            .conn()
+            .query_row(
+                "SELECT coalesce(sum(coalesce(prompt_tokens, 0) + coalesce(completion_tokens, 0)), 0) \
+                 FROM llm_calls WHERE point = 'label'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let classify_golden: Option<f64> = self
+            .conn()
+            .query_row(
+                "SELECT agreement FROM llm_evals WHERE point = 'classify' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        // The draft funnel: parse every stored draft, count the moved,
+        // and sum shadow would-act for the moved rules' ids.
+        let drafts: Vec<(String, String)> = self
+            .conn()
+            .prepare("SELECT rule, status FROM rule_drafts")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let now = crate::store::now_s();
+        let mut parsed = 0usize;
+        let mut moved = 0usize;
+        let mut moved_ids: Vec<String> = Vec::new();
+        for (text, status) in &drafts {
+            if let Ok(rule) = crate::rules::model::Rule::parse(text, now) {
+                parsed += 1;
+                if status == "moved" {
+                    moved += 1;
+                    moved_ids.push(rule.id.clone());
+                }
+            } else if status == "moved" {
+                moved += 1;
+            }
+        }
+        let mut shadow_fp = 0i64;
+        for id in &moved_ids {
+            let n: i64 = self
+                .conn()
+                .query_row(
+                    "SELECT coalesce(sum(would_act), 0) FROM rule_stats \
+                     WHERE rule = ?1 AND mode = 'shadow'",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            shadow_fp += n;
+        }
+        let ratio = |n: usize, d: usize| {
+            if d > 0 {
+                Some(n as f64 / d as f64)
+            } else {
+                None
+            }
+        };
+        let per100 = |n: i64, d: i64| {
+            if d > 0 {
+                Some(n as f64 * 100.0 / d as f64)
+            } else {
+                None
+            }
+        };
+        Ok(LlmMetrics {
+            proposals_decided: decided,
+            proposal_precision: ratio(agreed, decided),
+            coverage: if over_half > 0 {
+                Some(covered as f64 / over_half as f64)
+            } else {
+                None
+            },
+            seconds_per_label: if decided > 0 {
+                Some(secs_total as f64 / decided as f64)
+            } else {
+                None
+            },
+            calibration,
+            faithfulness_per_100: per100(faith_fail, label_sent),
+            parse_per_100: per100(parse_fail, sent),
+            tokens_per_label: if agreed > 0 {
+                Some(label_tokens as f64 / agreed as f64)
+            } else {
+                None
+            },
+            classify_golden_agreement: classify_golden,
+            drafts_parsed: parsed,
+            drafts_moved: moved,
+            shadow_fp_moved_drafts: shadow_fp,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_db(name: &str) -> Connection {
+        let path = std::env::temp_dir().join(format!("leesided-q-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = Connection::open(&path).unwrap();
+        crate::store::migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+             ('actor', 'a1', 't1', 'web', 1000, 0.9, 'm', '[]'), \
+             ('actor', 'a2', 't2', 'web', 1000, 0.8, 'm', '[]'); \
+             INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, created_at) VALUES \
+             ('actor', 'a1', 'web', 9, 'malicious', 'llm_proposed', 0.9, 'r [llm_call:1]', 100), \
+             ('actor', 'a1', 'web', 9, 'malicious', 'operator', 1.0, 'review CLI', 160), \
+             ('actor', 'a2', 'web', 9, 'benign', 'llm_proposed', 0.7, 'r [llm_call:2]', 100), \
+             ('actor', 'a2', 'web', 9, 'malicious', 'operator', 1.0, 'review CLI', 220); \
+             INSERT INTO llm_calls (point, model, prompt_hash, json_mode, input_summary, request, response, parsed, \
+             faithfulness_failed, prompt_tokens, completion_tokens, created_at) VALUES \
+             ('label', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', '{\"label\":\"x\"}', NULL, 100, 50, 100), \
+             ('label', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', '{\"label\":\"x\"}', 'no_assets', 100, 50, 100), \
+             ('classify', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', NULL, NULL, 10, 5, 100); \
+             INSERT INTO llm_evals (created_at, point, prompt_hash, model, json_mode, rows, agreement) VALUES \
+             (100, 'classify', 'h', 'm', 'prompt', 10, 0.8);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn llm_metrics_reads_the_funnel() {
+        let conn = fixture_db("metrics");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let m = ctx.llm_metrics().unwrap();
+        assert_eq!(m.proposals_decided, 2);
+        assert_eq!(m.proposal_precision, Some(0.5));
+        assert_eq!(m.coverage, Some(1.0));
+        assert_eq!(m.seconds_per_label, Some(90.0));
+        assert_eq!(m.calibration.iter().map(|b| b.n).sum::<usize>(), 2);
+        assert_eq!(m.faithfulness_per_100, Some(50.0));
+        assert_eq!(m.parse_per_100, Some(100.0 / 3.0));
+        assert_eq!(m.tokens_per_label, Some(300.0));
+        assert_eq!(m.classify_golden_agreement, Some(0.8));
+        assert_eq!(m.drafts_parsed, 0);
+        assert_eq!(m.drafts_moved, 0);
+        assert_eq!(m.shadow_fp_moved_drafts, 0);
     }
 }

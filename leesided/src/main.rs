@@ -43,6 +43,8 @@ fn main() {
         ["llm", "send", rest @ ..] => run_llm_send(rest),
         ["llm", "subjects", rest @ ..] => run_llm_subjects(rest),
         ["llm", "drain"] => run_llm_drain(),
+        ["llm", "eval", rest @ ..] => run_llm_eval(rest),
+        ["llm", "eval-build", rest @ ..] => run_llm_eval_build(rest),
         _ => {
             eprintln!("{FULL_USAGE}");
             std::process::exit(2);
@@ -68,6 +70,8 @@ fn print_help(words: &[&str]) {
             "usage: leesided llm subjects [--scope actor|cluster] [--top <n>]"
         }
         ["llm", "drain", ..] => "usage: leesided llm drain (drains the queued jobs in LEESIDED_LLM_MODE)",
+        ["llm", "eval", ..] => "usage: leesided llm eval --point label|explain|classify|draft [--set <file>] [--prompt <file>] [--model <slug>] [--limit <n>] | llm eval --compare <hash> <hash>",
+        ["llm", "eval-build", ..] => "usage: leesided llm eval-build --point label|explain|classify|draft --out <file> [--kind <kind>] [--early] [--sample <n>] [--limit <n>]",
         ["llm", ..] => "usage: leesided llm show --point <point> --subject <scope>:<id> | llm send --point <point> --subject <scope>:<id> | llm subjects [--scope actor|cluster] [--top <n>] | llm drain",
         _ => FULL_USAGE,
     };
@@ -365,7 +369,8 @@ fn run_review(args: &[&str]) {
     let stdin = std::io::stdin();
     let mut input = std::io::BufReader::new(stdin.lock());
     let mut output = std::io::stdout();
-    match leesided::review::run_review(&cfg.db, top, &mut input, &mut output) {
+    match leesided::review::run_review(&cfg.db, top, &llm_thresholds(&cfg), &mut input, &mut output)
+    {
         Ok(n) => {
             println!("review: {n} labeled");
         }
@@ -586,6 +591,211 @@ fn run_llm_send(args: &[&str]) {
             std::process::exit(1);
         }
     }
+}
+
+fn run_llm_eval(args: &[&str]) {
+    let mut point: Option<String> = None;
+    let mut set: Option<String> = None;
+    let mut prompt_file: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut limit: Option<usize> = None;
+    let mut compare: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--point" => point = Some(need_value(&mut it, "eval", "--point")),
+            "--set" => set = Some(need_value(&mut it, "eval", "--set")),
+            "--prompt" => prompt_file = Some(need_value(&mut it, "eval", "--prompt")),
+            "--model" => model = Some(need_value(&mut it, "eval", "--model")),
+            "--limit" => {
+                let v = need_value(&mut it, "eval", "--limit");
+                limit = Some(v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided llm eval: --limit is a row count, not {v}");
+                    std::process::exit(2);
+                }));
+            }
+            "--compare" => {
+                for _ in 0..2 {
+                    let Some(h) = it.next() else {
+                        eprintln!("leesided llm eval: --compare needs two prompt hashes");
+                        std::process::exit(2);
+                    };
+                    compare.push(h.to_string());
+                }
+            }
+            _ => {
+                eprintln!("leesided llm eval: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let cfg = Config::from_env();
+    if !compare.is_empty() {
+        let a = leesided::llm_eval::latest_for_hash(&cfg.db, &compare[0]).unwrap_or_else(|e| {
+            eprintln!("leesided llm eval: {e}");
+            std::process::exit(1);
+        });
+        let b = leesided::llm_eval::latest_for_hash(&cfg.db, &compare[1]).unwrap_or_else(|e| {
+            eprintln!("leesided llm eval: {e}");
+            std::process::exit(1);
+        });
+        match (a, b) {
+            (Some(a), Some(b)) => print!("{}", leesided::llm_eval::compare_text(&a, &b)),
+            (None, _) => {
+                eprintln!("leesided llm eval: no eval row for {}", compare[0]);
+                std::process::exit(1);
+            }
+            _ => {
+                eprintln!("leesided llm eval: no eval row for {}", compare[1]);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    let Some(point) = point else {
+        eprintln!("leesided llm eval: --point is required");
+        std::process::exit(2);
+    };
+    if !["label", "explain", "classify", "draft"].contains(&point.as_str()) {
+        eprintln!(
+            "leesided llm eval: unknown point `{point}` (built: label explain classify draft)"
+        );
+        std::process::exit(2);
+    }
+    let set = set.unwrap_or_else(|| format!("windside/evals/{point}.jsonl"));
+    let (Some(url), Some(key)) = (cfg.llm_url.clone(), cfg.llm_key.clone()) else {
+        eprintln!("leesided llm eval: LEESIDED_LLM_URL and LEESIDED_LLM_KEY are required");
+        std::process::exit(2);
+    };
+    let model_name = model.clone().unwrap_or_else(|| cfg.llm_model.clone());
+    let exec = leesided::llm::Exec {
+        url: url.clone(),
+        key: key.clone(),
+        model: cfg.llm_model.clone(),
+        model_overrides: leesided::llm::Exec::overrides_from_config(&cfg),
+        mode: leesided::config::LlmMode::Live,
+        daily_calls: cfg.llm_daily_calls,
+        daily_tokens: cfg.llm_daily_tokens,
+        honeytoken_routes: cfg.honeytoken_routes.clone(),
+    };
+    let (system_text, prompt_hash) = match prompt_file.as_deref() {
+        Some(f) => {
+            let text = std::fs::read_to_string(f).unwrap_or_else(|e| {
+                eprintln!("leesided llm eval: {f}: {e}");
+                std::process::exit(2);
+            });
+            use sha2::Digest as _;
+            let hash = format!("{:x}", sha2::Sha256::digest(text.as_bytes()));
+            (Some(text), hash)
+        }
+        None => match leesided::llm::prompt_hash(&point) {
+            Ok(h) => (None, h),
+            Err(e) => {
+                eprintln!("leesided llm eval: {e}");
+                std::process::exit(1);
+            }
+        },
+    };
+    let o = leesided::llm::probe(&url, &key, &model_name).unwrap_or_else(|e| {
+        eprintln!("leesided llm eval: probe failed ({e})");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "probe: json_mode={} effort={}",
+        o.json_mode.as_str(),
+        o.effort
+    );
+    let effort = if o.effort {
+        leesided::llm::effort_for(&point).ok().map(str::to_string)
+    } else {
+        None
+    };
+    let input = leesided::llm_eval::EvalInput {
+        exec: &exec,
+        system: system_text.as_deref(),
+        prompt_hash,
+        model: model_name,
+        json_mode: o.json_mode,
+        effort,
+        limit,
+    };
+    match leesided::llm_eval::evaluate(&cfg.db, std::path::Path::new(&set), &point, &input) {
+        Ok(summary) => summary.print(),
+        Err(e) => {
+            eprintln!("leesided llm eval: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_llm_eval_build(args: &[&str]) {
+    let mut point: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut kind: Option<String> = None;
+    let mut early = false;
+    let mut sample: Option<usize> = None;
+    let mut limit: Option<usize> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--point" => point = Some(need_value(&mut it, "eval-build", "--point")),
+            "--out" => out = Some(need_value(&mut it, "eval-build", "--out")),
+            "--kind" => kind = Some(need_value(&mut it, "eval-build", "--kind")),
+            "--early" => early = true,
+            "--sample" => {
+                let v = need_value(&mut it, "eval-build", "--sample");
+                sample = Some(v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided llm eval-build: --sample is a row count, not {v}");
+                    std::process::exit(2);
+                }));
+            }
+            "--limit" => {
+                let v = need_value(&mut it, "eval-build", "--limit");
+                limit = Some(v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided llm eval-build: --limit is a row count, not {v}");
+                    std::process::exit(2);
+                }));
+            }
+            _ => {
+                eprintln!("leesided llm eval-build: bad argument {a}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let (Some(point), Some(out)) = (point, out) else {
+        eprintln!("leesided llm eval-build: --point and --out are required");
+        std::process::exit(2);
+    };
+    let cfg = Config::from_env();
+    let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
+    let opts = leesided::llm_eval::BuildOpts {
+        kind,
+        early,
+        sample,
+        limit,
+    };
+    match leesided::llm_eval::eval_build(
+        &cfg.db,
+        &classes,
+        &llm_thresholds(&cfg),
+        &point,
+        std::path::Path::new(&out),
+        &opts,
+    ) {
+        Ok(n) => println!("eval-build: {n} rows to {out}"),
+        Err(e) => {
+            eprintln!("leesided llm eval-build: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn need_value<'a>(it: &mut std::slice::Iter<'a, &str>, cmd: &str, flag: &str) -> String {
+    let Some(v) = it.next() else {
+        eprintln!("leesided llm {cmd}: {flag} needs a value");
+        std::process::exit(2);
+    };
+    v.to_string()
 }
 
 fn run_export() {

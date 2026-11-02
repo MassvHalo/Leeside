@@ -14,6 +14,7 @@ pub mod hash;
 pub mod ingest;
 pub mod labels;
 pub mod llm;
+pub mod llm_eval;
 pub mod report;
 pub mod review;
 pub mod rules;

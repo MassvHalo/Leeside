@@ -1,6 +1,6 @@
 # LLM evals and the human loop
 
-Save as `docs/llm-evals.md`. Companion to `docs/llm.md`. Nothing about a prompt or a model choice changes without a number; this file defines the numbers and the two mechanisms that make the LLM's output checkable: cited evidence and queue order.
+Companion to `docs/llm.md`. Nothing about a prompt or a model choice changes without a number; this file defines the numbers and the two mechanisms that make the LLM's output checkable: cited evidence and queue order.
 
 ## 1. Golden sets
 
@@ -42,7 +42,7 @@ The label schema gains `cited_turns` (indices into the envelope's turns, at most
 | credential_stuffing | at least 5 distinct rejected credentials in the window |
 | webhook_forgery | cited turns are `webhook` with `credential_status` rejected |
 | honeytoken_hit | a cited turn's route is in the honeytoken list |
-| rejected_actions | cited turns carry `app_outcome_result = rejected` |
+| rejected_actions | cited turns carry `app_outcome` ending in `:rejected` (fails closed until the outcomes round adds the field; see `docs/outcomes.md`) |
 | normal_browsing | no flag above 0.2 and `asset_ratio` above 0.1 |
 | verified_partner | the actor holds a verified credential and `rejected_credentials` is 0 |
 | insufficient_data | `turns_held` below 10 |
