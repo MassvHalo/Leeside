@@ -37,6 +37,18 @@ class GateTest extends SampleAppTestCase
         $this->assertNotSame('anon', $this->lastEvent()['principal']);
     }
 
+    public function test_routed_post_failing_csrf_is_still_probed(): void
+    {
+        $this->mirrorSampleWebGroup();
+
+        $response = $this->post('/portal/login', $this->credentials());
+        $response->assertStatus(419);
+
+        $this->assertCount(1, $this->rules->probes);
+        $this->assertSame('portal.login', $this->rules->probes[0]['route']);
+        $this->assertSame(419, $this->lastEvent()['status']);
+    }
+
     public function test_block_returns_403_html(): void
     {
         $this->scriptVerdict(new Verdict('block', 'enforce', 'portal-otp-burst'));

@@ -2,8 +2,6 @@
 
 namespace Leeside\Laravel\Tests\Feature;
 
-use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
-use Illuminate\Session\Middleware\StartSession;
 use Leeside\Laravel\Check\ArrayRuleClient;
 use Leeside\Laravel\Check\RuleClient;
 use Leeside\Laravel\Check\Verdict;
@@ -76,16 +74,9 @@ class FallbackTest extends SampleAppTestCase
 
     public function test_unrouted_post_skips_csrf_and_404s(): void
     {
-        // Mirror the sample app's web group: a real session and a real,
-        // enforcing CSRF check ahead of the gate. (The base case neuters
-        // CSRF, the middleware skips itself under unit tests, and the test
-        // app's web group starts empty.) Without the fallback's
-        // withoutMiddleware this POST 419s ahead of the gate, unprobed.
-        $this->app->instance('env', 'production');
-        $this->app->forgetInstance(PreventRequestForgery::class);
-        $router = $this->app['router'];
-        $router->prependMiddlewareToGroup('web', PreventRequestForgery::class);
-        $router->prependMiddlewareToGroup('web', StartSession::class);
+        // Without the fallback's withoutMiddleware this POST 419s ahead
+        // of the gate, unprobed.
+        $this->mirrorSampleWebGroup();
         $this->registerPackageFallback();
 
         $response = $this->post('/nope-post', ['a' => 'b']);

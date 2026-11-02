@@ -11,6 +11,7 @@ use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Session\Middleware\StartSession;
 use Illuminate\Session\TokenMismatchException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
@@ -122,6 +123,21 @@ abstract class SampleAppTestCase extends TestCase
     protected function hasher(): Hasher
     {
         return $this->app[Hasher::class];
+    }
+
+    /**
+     * Mirror the sample app's web group: a real session and a real,
+     * enforcing CSRF check in skeleton order. (The base case neuters
+     * CSRF, the middleware skips itself under unit tests, and the test
+     * app's web group starts empty.)
+     */
+    protected function mirrorSampleWebGroup(): void
+    {
+        $this->app->instance('env', 'production');
+        $this->app->forgetInstance(PreventRequestForgery::class);
+        $router = $this->app['router'];
+        $router->prependMiddlewareToGroup('web', PreventRequestForgery::class);
+        $router->prependMiddlewareToGroup('web', StartSession::class);
     }
 
     /** @return array<string, mixed> */

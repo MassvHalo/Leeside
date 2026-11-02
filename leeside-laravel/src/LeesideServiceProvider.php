@@ -239,6 +239,11 @@ class LeesideServiceProvider extends ServiceProvider
                 // SubstituteBindings in the default priority list.
                 $kernel->addToMiddlewarePriorityBefore(SubstituteBindings::class, GateTurn::class);
                 $kernel->addToMiddlewarePriorityBefore(GateTurn::class, TagTurn::class);
+                // The CSRF check sorts after the gate, so a 419 on a routed
+                // POST is still a gated turn; it stays after StartSession,
+                // which it needs. VerifyCsrfToken covers older-style kernels.
+                $kernel->addToMiddlewarePriorityBefore(SubstituteBindings::class, PreventRequestForgery::class);
+                $kernel->addToMiddlewarePriorityBefore(SubstituteBindings::class, VerifyCsrfToken::class);
             }
 
             // Kernel mutators re-sync (overwrite) the router groups, so the
