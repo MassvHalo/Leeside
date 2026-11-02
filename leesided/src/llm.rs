@@ -1435,49 +1435,201 @@ fn write_explanation(
     Ok(())
 }
 
-/// Normalize a (method, route) pair into the classifier's pattern key.
-/// Routes already arrive pattern-shaped; residual id segments (plain
-/// integers, UUIDs, long hex) fold to `{id}` defensively.
-pub fn normalize_pattern(method: &str, route: &str) -> (String, String) {
+/// The route name the package sends when no route matched. Such a
+/// turn keys its payload pattern on the request path instead.
+pub const UNROUTED: &str = "_unrouted";
+
+/// The pattern key: sha256 over `METHOD pattern`.
+pub fn pattern_hash(method: &str, pattern: &str) -> String {
+    use sha2::Digest as _;
+    format!(
+        "{:x}",
+        sha2::Sha256::digest(format!("{method} {pattern}").as_bytes())
+    )
+}
+
+/// Fold id-shaped path segments (plain integers, UUIDs) to `{id}`.
+/// Route names never pass through here: they are symbolic already.
+pub fn fold_path_segments(path: &str) -> String {
     let is_uuid = |s: &str| {
         s.len() == 36
             && s.bytes().filter(|b| *b == b'-').count() == 4
             && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
     };
-    let pattern = route
-        .split('/')
+    path.split('/')
         .map(|seg| {
-            if !seg.is_empty()
-                && (seg.bytes().all(|b| b.is_ascii_digit()) || is_uuid(seg) || seg.len() >= 16)
-            {
+            if !seg.is_empty() && (seg.bytes().all(|b| b.is_ascii_digit()) || is_uuid(seg)) {
                 "{id}"
             } else {
                 seg
             }
         })
         .collect::<Vec<_>>()
-        .join("/");
-    use sha2::Digest as _;
-    let hash = format!(
-        "{:x}",
-        sha2::Sha256::digest(format!("{method} {pattern}").as_bytes())
-    );
-    (hash, pattern)
+        .join("/")
+}
+
+/// One turn's payload observation (docs/llm.md 8.3): the route name
+/// when a route matched, else the folded path. Upserts the pattern
+/// row and enqueues a classify job on first sight; the surface and
+/// the samples land with the insert, later turns bump the counters
+/// only. Returns true when the pattern is new. An unrouted turn
+/// without a path (an older package line) keys nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn note_payload_pattern(
+    conn: &Connection,
+    method: &str,
+    route: &str,
+    path: Option<&str>,
+    surface: Option<&str>,
+    sample_query: Option<&str>,
+    body_slice: Option<&str>,
+    enqueued_by: &str,
+    now: i64,
+    daily_calls: u32,
+    daily_tokens: u32,
+) -> Result<bool, LlmError> {
+    let pattern: String = if route != UNROUTED {
+        route.to_string()
+    } else {
+        match path {
+            Some(p) => fold_path_segments(p),
+            None => return Ok(false),
+        }
+    };
+    let hash = pattern_hash(method, &pattern);
+    let inserted = conn.execute(
+        "INSERT INTO payload_patterns (pattern_hash, method, pattern, first_seen_s, last_seen_s, \
+         turns, surface, sample_query, body_slice) \
+         VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?6, ?7) ON CONFLICT(pattern_hash) DO NOTHING",
+        params![
+            hash,
+            method,
+            pattern,
+            now,
+            surface,
+            sample_query,
+            body_slice
+        ],
+    )? == 1;
+    if inserted {
+        enqueue_point(
+            conn,
+            "classify",
+            "pattern",
+            &hash,
+            enqueued_by,
+            now,
+            daily_calls,
+            daily_tokens,
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE payload_patterns SET last_seen_s = ?2, turns = turns + 1 \
+             WHERE pattern_hash = ?1",
+            params![hash, now],
+        )?;
+    }
+    Ok(inserted)
+}
+
+/// Operator-confirmed malicious labels in 24 hours that earn a draft.
+pub const DRAFT_LABELS_NEEDED: i64 = 5;
+
+/// A subject's drafts key: its own key for a cluster, its latest
+/// cluster for an actor, none when the actor never clustered.
+fn draft_cluster_key(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+) -> Result<Option<String>, LlmError> {
+    if scope == "cluster" {
+        return Ok(Some(subject_id.to_string()));
+    }
+    if scope != "actor" {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT cluster_key FROM turns WHERE actor_id = ?1 AND cluster_key IS NOT NULL \
+         ORDER BY ts_us DESC LIMIT 1",
+        params![subject_id],
+        |r| r.get(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        e => Err(LlmError::Sqlite(e)),
+    })
+}
+
+/// The draft trigger (docs/llm.md 8.4): five operator-confirmed
+/// malicious labels on the subject within 24 hours, and no draft for
+/// its cluster key yet. Returns true when a job was enqueued.
+pub fn maybe_enqueue_draft(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+    enqueued_by: &str,
+    now: i64,
+    daily_calls: u32,
+    daily_tokens: u32,
+) -> Result<bool, LlmError> {
+    let Some(key) = draft_cluster_key(conn, scope, subject_id)? else {
+        return Ok(false);
+    };
+    let recent: i64 = conn.query_row(
+        "SELECT count(*) FROM labels WHERE scope = ?1 AND scope_id = ?2 AND source = 'operator' \
+         AND label = 'malicious' AND created_at >= ?3 - 86400",
+        params![scope, subject_id, now],
+        |r| r.get(0),
+    )?;
+    if recent < DRAFT_LABELS_NEEDED {
+        return Ok(false);
+    }
+    let drafted: bool = conn
+        .query_row(
+            "SELECT 1 FROM rule_drafts WHERE cluster_key = ?1 LIMIT 1",
+            params![key],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|_| true)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            e => Err(LlmError::Sqlite(e)),
+        })?;
+    if drafted {
+        return Ok(false);
+    }
+    enqueue_point(
+        conn,
+        "draft",
+        "cluster",
+        &key,
+        enqueued_by,
+        now,
+        daily_calls,
+        daily_tokens,
+    )
 }
 
 /// The point-3 envelope of docs/llm.md section 8.3, built from the
-/// stored pattern row. The capture layer deliberately never stores raw
-/// query strings or body slices, so those ride as explicit nulls and
-/// the prompt judges the pattern alone.
+/// stored pattern row. The samples ride when first sight captured
+/// them; a null means the capture conditions did not hold, and the
+/// prompt then judges the pattern alone.
 pub fn build_classify_envelope(
     conn: &Connection,
     pattern_hash: &str,
 ) -> Result<(serde_json::Value, ClassifyMeta), LlmError> {
-    let (method, pattern): (String, String) = conn
+    let (method, pattern, sample_query, body_slice): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn
         .query_row(
-            "SELECT method, pattern FROM payload_patterns WHERE pattern_hash = ?1",
+            "SELECT method, pattern, sample_query, body_slice FROM payload_patterns \
+             WHERE pattern_hash = ?1",
             params![pattern_hash],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
@@ -1489,8 +1641,8 @@ pub fn build_classify_envelope(
         "task": "classify",
         "method": method,
         "path_pattern": pattern,
-        "sample_query": serde_json::Value::Null,
-        "body_slice": serde_json::Value::Null,
+        "sample_query": sample_query,
+        "body_slice": body_slice,
         "content_type": serde_json::Value::Null,
     });
     Ok((
@@ -2136,15 +2288,8 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
                 Built::Label(_, meta) => {
                     let p = validate_label(&v).map_err(LlmError::Validate)?;
                     write_proposal(&conn, &scope, &subject_id, meta, &p, call_id, now)?;
-                    enqueue_explain(
-                        &conn,
-                        &scope,
-                        &subject_id,
-                        "proposer",
-                        now,
-                        ctx.exec.daily_calls,
-                        ctx.exec.daily_tokens,
-                    )?;
+                    // Explanations are not tied to proposals: the score
+                    // writer asks on crossings and swings (docs/llm.md 8.2).
                 }
                 Built::Explain(_, meta) => {
                     let e = validate_explain(&v).map_err(LlmError::Validate)?;
@@ -2953,6 +3098,246 @@ mod tests {
         assert_eq!(exec.model_for("label"), "base");
         assert_eq!(exec.model_for("classify"), "small");
         assert_eq!(exec.model_for("draft"), "base");
+    }
+
+    #[test]
+    fn fold_path_segments_folds_ids_only() {
+        assert_eq!(fold_path_segments("/venues/42"), "/venues/{id}");
+        assert_eq!(
+            fold_path_segments("/a/123e4567-e89b-12d3-a456-426614174000/x"),
+            "/a/{id}/x"
+        );
+        assert_eq!(fold_path_segments("/wp-login.php"), "/wp-login.php");
+        assert_eq!(fold_path_segments("venues.show"), "venues.show");
+        assert_eq!(fold_path_segments("/v2/items/007"), "/v2/items/{id}");
+    }
+
+    #[test]
+    fn pattern_hash_is_sha256_over_method_and_pattern() {
+        assert_eq!(
+            pattern_hash("GET", "/venues/{id}"),
+            "cd7b7a0e4dc19b03678afc664b108f3ecb712fba54b3d3d5c9ce7655d8896d9d"
+        );
+    }
+
+    #[test]
+    fn note_payload_pattern_first_sight_enqueues() {
+        let db = tmp_db("pattern-new");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        assert!(note_payload_pattern(
+            &conn,
+            "GET",
+            "venues.show",
+            None,
+            Some("web"),
+            Some("page=2"),
+            None,
+            "ingest",
+            now,
+            500,
+            500_000
+        )
+        .unwrap());
+        let row: (String, String, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT pattern, method, turns, surface, sample_query FROM payload_patterns",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "venues.show".to_string(),
+                "GET".to_string(),
+                1,
+                Some("web".to_string()),
+                Some("page=2".to_string())
+            )
+        );
+        let job: (String, String, String) = conn
+            .query_row("SELECT point, scope, status FROM llm_jobs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(job.0, "classify");
+        assert_eq!(job.1, "pattern");
+        assert_eq!(job.2, "queued");
+    }
+
+    #[test]
+    fn note_payload_pattern_second_sight_bumps_counters_only() {
+        let db = tmp_db("pattern-seen");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for _ in 0..2 {
+            note_payload_pattern(
+                &conn,
+                "GET",
+                "_unrouted",
+                Some("/venues/42"),
+                Some("web"),
+                Some("page=3"),
+                Some("{}"),
+                "ingest",
+                now,
+                500,
+                500_000,
+            )
+            .unwrap();
+        }
+        let row: (String, i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT pattern, turns, last_seen_s, sample_query FROM payload_patterns",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        // The folded path keys the row; the second turn's samples do
+        // not overwrite the first sight's.
+        assert_eq!(row.0, "/venues/{id}");
+        assert_eq!(row.1, 2);
+        assert_eq!(row.2, now);
+        assert_eq!(row.3.as_deref(), Some("page=3"));
+        let jobs: i64 = conn
+            .query_row("SELECT count(*) FROM llm_jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jobs, 1);
+    }
+
+    #[test]
+    fn note_payload_pattern_skips_unrouted_without_path() {
+        let db = tmp_db("pattern-nopath");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        assert!(!note_payload_pattern(
+            &conn,
+            "GET",
+            "_unrouted",
+            None,
+            Some("web"),
+            None,
+            None,
+            "ingest",
+            now_s(),
+            500,
+            500_000
+        )
+        .unwrap());
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM payload_patterns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    fn operator_label(conn: &Connection, scope: &str, id: &str, label: &str, at: i64) {
+        conn.execute(
+            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
+             confidence, kind, note, created_at) \
+             VALUES (?1, ?2, 'web', 3000000, ?3, 'operator', 1.0, NULL, 't', ?4)",
+            params![scope, id, label, at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn maybe_enqueue_draft_needs_five_malicious_in_24h() {
+        let db = tmp_db("draft-count");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for _ in 0..4 {
+            operator_label(&conn, "cluster", "cc", "malicious", now);
+        }
+        assert!(!maybe_enqueue_draft(&conn, "cluster", "cc", "t", now, 500, 500_000).unwrap());
+        operator_label(&conn, "cluster", "cc", "malicious", now);
+        assert!(maybe_enqueue_draft(&conn, "cluster", "cc", "t", now, 500, 500_000).unwrap());
+        let job: (String, String, String) = conn
+            .query_row("SELECT point, scope, subject_id FROM llm_jobs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            job,
+            ("draft".to_string(), "cluster".to_string(), "cc".to_string())
+        );
+    }
+
+    #[test]
+    fn maybe_enqueue_draft_ignores_old_and_benign() {
+        let db = tmp_db("draft-window");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for _ in 0..4 {
+            operator_label(&conn, "cluster", "cc", "malicious", now);
+        }
+        operator_label(&conn, "cluster", "cc", "malicious", now - 90_000);
+        operator_label(&conn, "cluster", "cc", "benign", now);
+        assert!(!maybe_enqueue_draft(&conn, "cluster", "cc", "t", now, 500, 500_000).unwrap());
+    }
+
+    #[test]
+    fn maybe_enqueue_draft_skips_drafted_clusters() {
+        let db = tmp_db("draft-exists");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for _ in 0..5 {
+            operator_label(&conn, "cluster", "cc", "malicious", now);
+        }
+        conn.execute(
+            "INSERT INTO rule_drafts (cluster_key, rule, reason, parse_ok, status, created_at) \
+             VALUES ('cc', '{}', 'r', 1, 'pending', ?1)",
+            params![now],
+        )
+        .unwrap();
+        assert!(!maybe_enqueue_draft(&conn, "cluster", "cc", "t", now, 500, 500_000).unwrap());
+    }
+
+    #[test]
+    fn maybe_enqueue_draft_resolves_the_actor_cluster() {
+        let db = tmp_db("draft-actor");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        let now = now_s();
+        for _ in 0..5 {
+            operator_label(&conn, "actor", "aa", "malicious", now);
+        }
+        assert!(maybe_enqueue_draft(&conn, "actor", "aa", "t", now, 500, 500_000).unwrap());
+        let subject: String = conn
+            .query_row(
+                "SELECT subject_id FROM llm_jobs WHERE point = 'draft'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(subject, "cc");
+        // No cluster on the turns, no draft.
+        for _ in 0..5 {
+            operator_label(&conn, "actor", "zz", "malicious", now);
+        }
+        assert!(!maybe_enqueue_draft(&conn, "actor", "zz", "t", now, 500, 500_000).unwrap());
+    }
+
+    #[test]
+    fn classify_envelope_carries_first_sight_samples() {
+        let db = tmp_db("classify-samples");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO payload_patterns (pattern_hash, method, pattern, first_seen_s, last_seen_s, \
+             turns, surface, sample_query, body_slice) \
+             VALUES ('ph', 'GET', '/x/{id}', 0, 0, 1, 'web', 'a=<redacted>', '{\"a\":1}')",
+            [],
+        )
+        .unwrap();
+        let (env, _) = build_classify_envelope(&conn, "ph").unwrap();
+        assert_eq!(env["sample_query"], "a=<redacted>");
+        assert_eq!(env["body_slice"], "{\"a\":1}");
     }
 
     #[test]
