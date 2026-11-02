@@ -127,6 +127,10 @@ fn ui_error(e: QueryError) -> Response {
             StatusCode::NOT_FOUND,
             pages::error_page(404, "No such cluster", &format!("no cluster {key}")),
         ),
+        QueryError::NoRule(id) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "No such rule", &format!("no rule {id}")),
+        ),
         e => page(
             StatusCode::INTERNAL_SERVER_ERROR,
             pages::error_page(500, "Inspector error", &e.to_string()),
@@ -136,7 +140,7 @@ fn ui_error(e: QueryError) -> Response {
 
 fn read<T>(e: &Engine, f: impl FnOnce(&Ctx) -> Result<T, QueryError>) -> Result<T, Box<Response>> {
     e.store
-        .read(|conn| Ctx::new(conn, "default").and_then(|ctx| f(&ctx)))
+        .read(|conn| Ctx::new(conn, &e.cfg.app_id).and_then(|ctx| f(&ctx)))
         .map_err(|e| Box::new(ui_error(e)))
 }
 
@@ -892,10 +896,71 @@ pub async fn labels_list(
 }
 
 pub async fn rules_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let now = store::now_s();
     let (rules, drafts) = or_return!(read(&e, |ctx| Ok((ctx.rules(now)?, ctx.rule_drafts()?))));
-    page(StatusCode::OK, pages::rules_list(&rules, &drafts))
+    page(
+        StatusCode::OK,
+        pages::rules_list(&rules, &drafts, &session.csrf),
+    )
+}
+
+async fn rule_flip(
+    e: &Arc<Engine>,
+    headers: &HeaderMap,
+    uri: &Uri,
+    id: &str,
+    csrf: &str,
+    enabled: bool,
+) -> Response {
+    let session = or_return!(require(e, headers, uri));
+    if !csrf_ok(&session, csrf) {
+        return forbidden();
+    }
+    let exists = or_return!(read(e, |ctx| ctx.rule_exists(id)));
+    if !exists {
+        return page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "No such rule", &format!("no rule {id}")),
+        );
+    }
+    e.store.send(StoreOp::RuleState {
+        rule_id: id.to_string(),
+        app_id: e.cfg.app_id.clone(),
+        enabled,
+        by: "console".to_string(),
+        at_s: store::now_s(),
+    });
+    e.store.flush().await;
+    // The flag lands in the compiled set on reload; a failed reload
+    // leaves the row written but not live, and says so.
+    if let Err(err) = e.rules.load() {
+        return page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            pages::error_page(500, "Reload failed", &err.to_string()),
+        );
+    }
+    Redirect::to("/ui/rules").into_response()
+}
+
+pub async fn rule_enable(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    rule_flip(&e, &headers, &uri, &id, &f.csrf, true).await
+}
+
+pub async fn rule_disable(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    rule_flip(&e, &headers, &uri, &id, &f.csrf, false).await
 }
 
 pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {

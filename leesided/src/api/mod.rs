@@ -70,6 +70,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/ui/review/decide", post(crate::console::review_decide))
         .route("/ui/labels", get(crate::console::labels_list))
         .route("/ui/rules", get(crate::console::rules_list))
+        .route("/ui/rules/{id}/enable", post(crate::console::rule_enable))
+        .route("/ui/rules/{id}/disable", post(crate::console::rule_disable))
         .route("/ui/model", get(crate::console::model_page))
         .route("/ui/features", get(crate::console::features_page))
         .with_state(engine)

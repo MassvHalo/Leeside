@@ -1761,21 +1761,26 @@ pub fn labels_list(
 
 /// `/ui/rules`: the install set and the overrides, plus the drafts
 /// section (empty until the draft point lands).
-pub fn rules_list(rules: &[RuleView], drafts: &[RuleView]) -> String {
-    let mut body = String::from("<h1>Rules</h1>");
+pub fn rules_list(rules: &[RuleView], drafts: &[RuleView], csrf: &str) -> String {
+    let mut body = String::from("<h1>Rules</h1><p class=\"sub\">The flag is per app and reversible; retire stays as removal from the overrides file.</p>");
     if rules.is_empty() {
         body.push_str("<p class=\"empty\">No rules installed.</p>");
     } else {
         body.push_str(
             "<table><tr><th>Id</th><th>Version</th><th>State</th><th>Mode</th><th>Action</th>\
-             <th>Origin</th><th>Note</th><th>Matched 24h</th><th>Would act</th><th>Acted</th></tr>",
+             <th>Origin</th><th>Note</th><th>Matched 24h</th><th>Would act</th><th>Acted</th>\
+             <th>Enabled</th><th></th></tr>",
         );
         for r in rules {
+            let action = if r.enabled { "disable" } else { "enable" };
             let _ = write!(
                 body,
                 "<tr><td>{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
                  <td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
-                 <td class=\"num\">{}</td></tr>",
+                 <td class=\"num\">{}</td><td>{}</td><td>\
+                 <form class=\"inline\" method=\"post\" action=\"/ui/rules/{}/{action}\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <button class=\"btn\" type=\"submit\">{action}</button></form></td></tr>",
                 mono(&r.id),
                 r.version,
                 mono(&r.state),
@@ -1786,6 +1791,12 @@ pub fn rules_list(rules: &[RuleView], drafts: &[RuleView]) -> String {
                 r.matched_24h,
                 r.would_act_24h,
                 r.acted_24h,
+                if r.enabled {
+                    chip("enabled", "good")
+                } else {
+                    chip("disabled", "muted")
+                },
+                esc(&r.id),
             );
         }
         body.push_str("</table>");

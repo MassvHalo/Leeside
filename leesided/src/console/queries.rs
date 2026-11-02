@@ -26,23 +26,33 @@ pub enum QueryError {
     NoActor(String),
     #[error("no cluster {0}")]
     NoCluster(String),
+    #[error("no rule {0}")]
+    NoRule(String),
 }
 
 /// An app-scoped query context over one read connection.
 pub struct Ctx<'a> {
     conn: &'a Connection,
+    app_id: String,
 }
 
 impl<'a> Ctx<'a> {
     pub fn new(conn: &'a Connection, app_id: &str) -> Result<Ctx<'a>, QueryError> {
-        if app_id != "default" {
+        if app_id.is_empty() {
             return Err(QueryError::UnknownApp(app_id.to_string()));
         }
-        Ok(Ctx { conn })
+        Ok(Ctx {
+            conn,
+            app_id: app_id.to_string(),
+        })
     }
 
     fn conn(&self) -> &Connection {
         self.conn
+    }
+
+    fn app(&self) -> &str {
+        &self.app_id
     }
 }
 
@@ -2649,7 +2659,7 @@ impl Ctx<'_> {
 
 // ---------- rules ----------
 
-/// One rule with its 24 h hit counts.
+/// One rule with its 24 h hit counts and its flag for this app.
 #[derive(Debug, Clone)]
 pub struct RuleView {
     pub id: String,
@@ -2665,6 +2675,7 @@ pub struct RuleView {
     pub matched_24h: i64,
     pub would_act_24h: i64,
     pub acted_24h: i64,
+    pub enabled: bool,
 }
 
 impl Ctx<'_> {
@@ -2702,6 +2713,18 @@ impl Ctx<'_> {
                 params![id, hour_from],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?;
+            let enabled: Option<i64> = self
+                .conn()
+                .query_row(
+                    "SELECT enabled FROM rule_state WHERE rule_id = ?1 AND app_id = ?2",
+                    params![id, self.app()],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(QueryError::Sqlite(e)),
+                })?;
             out.push(RuleView {
                 id,
                 version,
@@ -2716,9 +2739,22 @@ impl Ctx<'_> {
                 matched_24h: matched,
                 would_act_24h: would_act,
                 acted_24h: acted,
+                enabled: enabled.is_none_or(|v| v != 0),
             });
         }
         Ok(out)
+    }
+
+    pub fn rule_exists(&self, id: &str) -> Result<bool, QueryError> {
+        self.conn()
+            .query_row("SELECT 1 FROM rules WHERE id = ?1", params![id], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|_| true)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                e => Err(QueryError::Sqlite(e)),
+            })
     }
 
     /// Rule drafts from the LLM. No table yet: the draft point is
