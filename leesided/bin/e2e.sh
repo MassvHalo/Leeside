@@ -22,19 +22,26 @@ E2E_HASH_KEY="${E2E_HASH_KEY:-leeside-e2e-test-key-do-not-use-in-production}"
 # each one, so a green run means every assert below held.
 FAIL=""
 rm -rf "$WORK"; mkdir -p "$WORK/run"
+# Process hygiene (handoff §2.10): the harness runs a hardlink under a
+# distinct name, so no pattern can match the production daemon, and stops
+# it by PID file, never by pattern. `ln -f` refreshes the link every run,
+# since a rebuild replaces the inode; same directory, so same filesystem.
+BIN="$HERE/target/release/leesided-e2e"
+ln -f "$HERE/target/release/leesided" "$BIN"
+PIDFILE="$WORK/leesided-e2e.pid"
 if curl -sf "http://$API/health" >/dev/null 2>&1; then
-  echo "something already answers on $API (a previous run?); stop it first: pgrep -a leesided" >&2
+  echo "something already answers on $API (a previous run?); stop it first: kill -INT \$(cat $WORK/leesided-e2e.pid)" >&2
   exit 1
 fi
 
-cleanup() { kill "${PPID_:-}" "${TPID:-}" "${NGX_PID:-}" "${FPM_PID:-}" 2>/dev/null; kill -INT "${LPID:-}" 2>/dev/null; wait "${LPID:-}" 2>/dev/null; }
+cleanup() { kill "${PPID_:-}" "${TPID:-}" "${NGX_PID:-}" "${FPM_PID:-}" 2>/dev/null; if [ -f "$PIDFILE" ]; then kill -INT "$(cat "$PIDFILE")" 2>/dev/null; wait "$(cat "$PIDFILE")" 2>/dev/null; fi; }
 trap cleanup EXIT
 
 LEESIDED_SOCKET_DIR="$WORK/run" LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_API="$API" \
 LEESIDED_RULES_DIR="$HERE/rules/install" LEESIDED_HASH_KEY="$E2E_HASH_KEY" RUST_LOG=info \
 LEESIDED_WINDSIDE_MODE=shadow LEESIDED_WINDSIDE_MODEL="$HERE/../windside/models/0.1.0" \
-  "$HERE/target/release/leesided" serve >"$WORK/leesided.log" 2>&1 &
-LPID=$!
+  "$BIN" serve >"$WORK/leesided.log" 2>&1 &
+echo $! >"$PIDFILE"
 for _ in $(seq 1 50); do curl -sf "http://$API/health" >/dev/null && break; sleep 0.1; done
 echo "== leesided up"; curl -s "http://$API/health" | python3 -c 'import sys,json; h=json.load(sys.stdin); print("mode", h["mode"], "| rules", h["rules"]["loaded"], "| hash", h["rules"]["hash"][:12])'
 
@@ -86,7 +93,7 @@ grep -c "_lsd" "$WORK/jar3.txt" | sed 's/^/  _lsd cookies in the jar: /'
 sleep 1
 sqlite3 "$WORK/leesided.sqlite" "select '  tag_status', coalesce(tag_status,'-'), count(*), count(distinct tag_id) as ids from turns where ua_class='chromium' group by 2;"
 echo "== tap: TLS through a private nginx and php-fpm on 18443, one curl and one python request"
-TAP_BIN="$HERE/target/release/leesided"
+TAP_BIN="$BIN"
 if "$TAP_BIN" tap --probe >/dev/null 2>&1; then
   FPM_BIN="$(ls /usr/sbin/php-fpm8.* /usr/sbin/php-fpm 2>/dev/null | head -1)"
   mkdir -p "$WORK/tls/tmp" "$WORK/tls/logs"
@@ -181,7 +188,7 @@ sqlite3 "$WORK/leesided.sqlite" "select '  turns ' || count(*) || ' | joined to 
 sqlite3 "$WORK/leesided.sqlite" "select '  no verdict (events whose probe never joined): ' || status || ' ' || coalesce(exception,'-') || ' x' || count(*) from turns where verdict is null group by status, exception;"
 echo "== shadow: the daemon scored in shadow mode; both scopes must have score rows"
 LEESIDED_DB="$WORK/leesided.sqlite" LEESIDED_WINDSIDE_MODEL="$HERE/../windside/models/0.1.0" \
-  "$HERE/target/release/leesided" report shadow --since 0 | tee "$WORK/shadow.txt"
+  "$BIN" report shadow --since 0 | tee "$WORK/shadow.txt"
 grep -qE "^  actor: [0-9]+ feature rows, [1-9][0-9]* scored" "$WORK/shadow.txt" || FAIL="$FAIL shadow-actor:0"
 grep -qE "^  cluster: [0-9]+ feature rows, [1-9][0-9]* scored" "$WORK/shadow.txt" || FAIL="$FAIL shadow-cluster:0"
 echo "== logs: $WORK/leesided.log, $WORK/php.log, $WORK/tap.log; db: $WORK/leesided.sqlite"
