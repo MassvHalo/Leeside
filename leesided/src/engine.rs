@@ -73,6 +73,8 @@ pub struct Engine {
     pub llm: crate::llm::State,
     /// The highest migration applied at open, for `/health`.
     pub migration_version: i64,
+    /// The inspector's sessions (docs/inspector.md).
+    pub console: crate::console::Console,
 }
 
 /// What `WINDSIDE_MODEL` gave: the loaded model, or the refusal reason
@@ -368,6 +370,7 @@ impl Engine {
             windside,
             llm,
             migration_version,
+            console: crate::console::Console::default(),
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -1068,6 +1071,7 @@ impl Engine {
                     kind: None,
                     note,
                     created_at: store::now_s(),
+                    signals: None,
                 }));
             };
             if self.cfg.honeytoken_routes.iter().any(|r| r == &ev.route) {

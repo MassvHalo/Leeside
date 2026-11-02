@@ -5,6 +5,7 @@ pub mod actors;
 pub mod api;
 pub mod check;
 pub mod config;
+pub mod console;
 pub mod engine;
 pub mod enrich;
 pub mod export;

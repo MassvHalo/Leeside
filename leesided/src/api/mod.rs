@@ -39,6 +39,17 @@ pub fn router(engine: Arc<Engine>) -> Router {
             async move { authorize(token.as_deref(), req, next).await }
         }))
         .route("/health", get(health))
+        .route("/ui/", get(crate::console::ui_root))
+        .route(
+            "/ui/login",
+            get(crate::console::login_get).post(crate::console::login_post),
+        )
+        .route("/ui/llm", get(crate::console::llm_list))
+        .route("/ui/llm/{id}", get(crate::console::llm_detail))
+        .route("/ui/llm/{id}/resend", post(crate::console::resend))
+        .route("/ui/jobs", get(crate::console::jobs_list))
+        .route("/ui/jobs/{id}/retry", post(crate::console::job_retry))
+        .route("/ui/jobs/{id}/cancel", post(crate::console::job_cancel))
         .with_state(engine)
 }
 
@@ -64,7 +75,7 @@ async fn authorize(token: Option<&str>, req: Request, next: Next) -> Response {
 
 /// Constant time in the length of `want`, so the token cannot be guessed a
 /// byte at a time from response timing.
-fn same(got: &[u8], want: &[u8]) -> bool {
+pub(crate) fn same(got: &[u8], want: &[u8]) -> bool {
     let mut diff = (got.len() != want.len()) as u8;
     for (i, w) in want.iter().enumerate() {
         diff |= got.get(i).copied().unwrap_or(0) ^ w;
