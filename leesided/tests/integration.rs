@@ -2964,7 +2964,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 19);
+    assert_eq!(health["migration_version"], 20);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -3318,7 +3318,7 @@ async fn ui_exchange_renders_verbatim() {
         "reasoning_effort": "low",
     })
     .to_string();
-    let proposal = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"]}"#;
+    let proposal = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"],"cited_turns":[0,1]}"#;
     let reasoning = "Thinking <aloud> & onward.";
     let response = serde_json::json!({
         "choices": [{"message": {"content": proposal, "reasoning_content": reasoning}, "finish_reason": "stop"}],

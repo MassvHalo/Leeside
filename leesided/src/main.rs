@@ -528,6 +528,7 @@ fn run_llm_send(args: &[&str]) {
         mode: leesided::config::LlmMode::Live,
         daily_calls: cfg.llm_daily_calls,
         daily_tokens: cfg.llm_daily_tokens,
+        honeytoken_routes: cfg.honeytoken_routes.clone(),
     };
     // The worker's wire settings, so the send matches live: prompt
     // mode needs no probe, but `reasoning_effort` does.

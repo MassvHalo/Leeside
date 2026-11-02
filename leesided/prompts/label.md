@@ -37,4 +37,9 @@ Answer with one JSON object and nothing else:
  "reason": "one or two plain sentences, at most 600 characters",
  "signals": ["up to 5 of: scanner_paths, high_404_rate, machine_cadence,
    no_assets, ua_inconsistent, credential_stuffing, webhook_forgery,
-   honeytoken_hit, normal_browsing, verified_partner, insufficient_data"]}
+   honeytoken_hit, normal_browsing, verified_partner, insufficient_data"],
+ "cited_turns": ["indices into the turns array above, at most 10"]}
+
+Cite only turns that support your signals: every signal is checked
+against the turns you cite, and a signal its turns do not support
+downgrades the whole proposal to `unknown`.

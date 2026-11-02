@@ -52,6 +52,7 @@ pub struct Proposal {
     pub confidence: f64,
     pub reason: String,
     pub signals: Vec<String>,
+    pub cited_turns: Vec<usize>,
 }
 
 impl Proposal {
@@ -120,18 +121,22 @@ pub fn review_rows(conn: &Connection, top: usize) -> Result<Vec<ReviewRow>, Revi
             .unwrap_or((0, 0));
         let proposal: Option<Proposal> = conn
             .query_row(
-                "SELECT label, confidence, note, signals FROM labels \
+                "SELECT label, confidence, note, signals, cited_turns FROM labels \
                  WHERE scope = 'actor' AND scope_id = ?1 AND source = 'llm_proposed' \
                  ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
                 params![scope_id],
                 |r| {
                     let note: Option<String> = r.get(2)?;
                     let signals: Option<String> = r.get(3)?;
+                    let cited: Option<String> = r.get(4)?;
                     Ok(Proposal {
                         label: r.get(0)?,
                         confidence: r.get(1)?,
                         reason: Proposal::display(note.as_deref().unwrap_or("")),
                         signals: signals
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default(),
+                        cited_turns: cited
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
                     })
@@ -255,13 +260,22 @@ pub fn run_review(
         if let Some(p) = &row.proposal {
             writeln!(
                 output,
-                "  llm proposes {} ({:.2}) [{}]: {}",
+                "  llm proposes {} ({:.2}) [{}] cites {}: {}",
                 p.label,
                 p.confidence,
                 if p.signals.is_empty() {
                     "-".to_string()
                 } else {
                     p.signals.join(",")
+                },
+                if p.cited_turns.is_empty() {
+                    "-".to_string()
+                } else {
+                    p.cited_turns
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
                 },
                 p.reason,
             )?;

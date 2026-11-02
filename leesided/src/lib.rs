@@ -9,6 +9,7 @@ pub mod console;
 pub mod engine;
 pub mod enrich;
 pub mod export;
+pub mod faithfulness;
 pub mod hash;
 pub mod ingest;
 pub mod labels;

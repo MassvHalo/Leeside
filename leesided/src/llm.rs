@@ -15,7 +15,7 @@ use crate::rules::features;
 use crate::store::{now_s, StoreError};
 use crate::tap::classes::{Class, Ja4Classes};
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -51,7 +51,7 @@ pub const ENVELOPE_TURNS: i64 = 30;
 
 /// The point-1 schema of docs/llm.md section 8.1, sent as the
 /// `response_format` in schema mode.
-pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]}}}}"#;
+pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals","cited_turns"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]}},"cited_turns":{"type":"array","maxItems":10,"items":{"type":"integer","minimum":0}}}}"#;
 
 /// The point-2 schema of docs/llm.md section 8.2.
 pub const EXPLAIN_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["explanation"],"properties":{"explanation":{"type":"string","maxLength":240}}}"#;
@@ -158,6 +158,8 @@ pub struct Exec {
     pub mode: LlmMode,
     pub daily_calls: u32,
     pub daily_tokens: u32,
+    /// Honeytoken route names, for the `honeytoken_hit` check.
+    pub honeytoken_routes: Vec<String>,
 }
 
 impl Exec {
@@ -194,6 +196,7 @@ impl Exec {
             mode: cfg.llm_mode,
             daily_calls: cfg.llm_daily_calls,
             daily_tokens: cfg.llm_daily_tokens,
+            honeytoken_routes: cfg.honeytoken_routes.clone(),
         })
     }
 
@@ -539,7 +542,8 @@ pub fn build_label_envelope(
     }
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT ts_us, verb, route, status, ua_class, flags, credential_status, tag_status, ja4 \
+        "SELECT ts_us, verb, route, status, ua_class, flags, credential_status, tag_status, ja4, \
+         surface, is_asset, credential_hash, path_pattern \
          FROM turns WHERE {turn_col} = ?1 ORDER BY rowid DESC LIMIT {ENVELOPE_TURNS}"
     ))?;
     let mut turns: Vec<serde_json::Value> = stmt
@@ -554,16 +558,27 @@ pub fn build_label_envelope(
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, Option<String>>(7)?,
                 r.get::<_, Option<String>>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<i64>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
             ))
         })?
         .filter_map(|r| r.ok())
         .map(
-            |(ts, verb, route, status, ua, flags, cred, tag, ja4)| {
+            |(ts, verb, route, status, ua, flags, cred, tag, ja4, surface, is_asset, cred_hash, pattern)| {
                 let class = ja4.as_deref().map_or(Class::Unknown, |j| classes.classify(j));
+                // Unrouted turns show their folded payload pattern, so scanner
+                // paths are visible (docs/llm.md 8.1); routed turns show the
+                // route name, the only path the store keeps for them.
+                let path = match (route.as_str(), pattern) {
+                    (UNROUTED, Some(p)) => p,
+                    _ => route,
+                };
                 serde_json::json!({
                     "t_ms": (ts - now_us) / 1000,
                     "method": verb,
-                    "path": route,
+                    "path": path,
                     "status": status,
                     "ua_class": ua,
                     "flags": flags.and_then(|f| serde_json::from_str::<serde_json::Value>(&f).ok()).unwrap_or(serde_json::Value::Null),
@@ -574,6 +589,9 @@ pub fn build_label_envelope(
                         Class::Library => "library",
                         Class::Unknown => "unknown",
                     },
+                    "surface": surface,
+                    "is_asset": is_asset,
+                    "cred": cred_hash.map(|h| h.chars().take(8).collect::<String>()),
                 })
             },
         )
@@ -743,13 +761,19 @@ pub struct LabelProposal {
     pub confidence: f64,
     pub reason: String,
     pub signals: Vec<String>,
+    pub cited_turns: Vec<usize>,
 }
 
-/// The point-1 schema of docs/llm.md section 8.1, enforced whatever
-/// the JSON mode: enums match exactly, nothing is coerced.
+/// The point-1 schema of docs/llm.md section 8.1 plus the cited
+/// evidence of docs/llm-evals.md section 3, enforced whatever the
+/// JSON mode: enums match exactly, nothing is coerced.
 pub fn validate_label(v: &serde_json::Value) -> Result<LabelProposal, String> {
     let map = v.as_object().ok_or("label: not an object".to_string())?;
-    check_keys(map, &["label", "confidence", "reason", "signals"], "label")?;
+    check_keys(
+        map,
+        &["label", "confidence", "reason", "signals", "cited_turns"],
+        "label",
+    )?;
     let label = check_str_len(map.get("label"), "label", 16, "label")?;
     if !matches!(label.as_str(), "benign" | "malicious" | "unknown") {
         return Err(format!("label: `{label}` is not a label"));
@@ -773,11 +797,26 @@ pub fn validate_label(v: &serde_json::Value) -> Result<LabelProposal, String> {
         }
         signals.push(s.to_string());
     }
+    let cited_raw = map
+        .get("cited_turns")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("label: `cited_turns` is not an array".to_string())?;
+    if cited_raw.len() > 10 {
+        return Err("label: more than 10 cited turns".to_string());
+    }
+    let mut cited_turns = Vec::with_capacity(cited_raw.len());
+    for c in cited_raw {
+        let c = c
+            .as_u64()
+            .ok_or("label: a cited turn is not an index".to_string())?;
+        cited_turns.push(c as usize);
+    }
     Ok(LabelProposal {
         label,
         confidence,
         reason,
         signals,
+        cited_turns,
     })
 }
 
@@ -1265,8 +1304,8 @@ fn write_proposal(
 ) -> Result<(), LlmError> {
     conn.execute(
         "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, \
-         kind, note, created_at, signals) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'llm_proposed', ?6, NULL, ?7, ?8, ?9)",
+         kind, note, created_at, signals, cited_turns) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'llm_proposed', ?6, NULL, ?7, ?8, ?9, ?10)",
         params![
             scope,
             subject_id,
@@ -1277,9 +1316,50 @@ fn write_proposal(
             format!("{} [llm_call:{call_id}]", proposal.reason),
             now,
             serde_json::to_string(&proposal.signals).unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(&proposal.cited_turns).unwrap_or_else(|_| "[]".to_string()),
         ],
     )?;
     Ok(())
+}
+
+/// Validate a label completion, check every claimed signal against
+/// the cited turns, and write the proposal. A failed check downgrades
+/// the proposal to `unknown` (the reason is kept) and logs the signal
+/// on the call row. Shared by the worker and `send`.
+#[allow(clippy::too_many_arguments)]
+fn land_label_proposal(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+    envelope: &serde_json::Value,
+    meta: &LabelMeta,
+    v: &serde_json::Value,
+    call_id: i64,
+    now: i64,
+    honeytoken_routes: &[String],
+) -> Result<(), LlmError> {
+    let mut p = validate_label(v).map_err(LlmError::Validate)?;
+    let honey: HashSet<String> = honeytoken_routes.iter().cloned().collect();
+    let words = crate::faithfulness::scanner_paths();
+    let aux = crate::faithfulness::Aux {
+        honeytoken_routes: &honey,
+        scanner_paths: &words,
+    };
+    if let Err(failed) =
+        crate::faithfulness::check_proposal(envelope, &p.signals, &p.cited_turns, &aux)
+    {
+        tracing::warn!(
+            subject = %format!("{scope}:{subject_id}"),
+            signal = %failed,
+            "faithfulness check failed; proposal downgraded to unknown"
+        );
+        conn.execute(
+            "UPDATE llm_calls SET faithfulness_failed = ?1 WHERE id = ?2",
+            params![failed, call_id],
+        )?;
+        p.label = "unknown".to_string();
+    }
+    write_proposal(conn, scope, subject_id, meta, &p, call_id, now)
 }
 
 fn input_summary(subject: &Subject, meta: &LabelMeta) -> String {
@@ -1468,12 +1548,21 @@ pub fn fold_path_segments(path: &str) -> String {
         .join("/")
 }
 
-/// One turn's payload observation (docs/llm.md 8.3): the route name
-/// when a route matched, else the folded path. Upserts the pattern
-/// row and enqueues a classify job on first sight; the surface and
-/// the samples land with the insert, later turns bump the counters
-/// only. Returns true when the pattern is new. An unrouted turn
-/// without a path (an older package line) keys nothing.
+/// One turn's payload pattern (docs/llm.md 8.3): the route name when
+/// a route matched, else the folded path. None for an unrouted turn
+/// without a path (an older package line), which keys nothing.
+pub fn pattern_for_turn(route: &str, path: Option<&str>) -> Option<String> {
+    if route != UNROUTED {
+        Some(route.to_string())
+    } else {
+        path.map(fold_path_segments)
+    }
+}
+
+/// One turn's payload observation (docs/llm.md 8.3): upserts the
+/// pattern row and enqueues a classify job on first sight; the surface
+/// and the samples land with the insert, later turns bump the counters
+/// only. Returns true when the pattern is new.
 #[allow(clippy::too_many_arguments)]
 pub fn note_payload_pattern(
     conn: &Connection,
@@ -1488,13 +1577,8 @@ pub fn note_payload_pattern(
     daily_calls: u32,
     daily_tokens: u32,
 ) -> Result<bool, LlmError> {
-    let pattern: String = if route != UNROUTED {
-        route.to_string()
-    } else {
-        match path {
-            Some(p) => fold_path_segments(p),
-            None => return Ok(false),
-        }
+    let Some(pattern) = pattern_for_turn(route, path) else {
+        return Ok(false);
     };
     let hash = pattern_hash(method, &pattern);
     let inserted = conn.execute(
@@ -1938,6 +2022,7 @@ fn proposal_json(p: &LabelProposal) -> String {
     serde_json::json!({
         "label": p.label, "confidence": p.confidence,
         "reason": p.reason, "signals": p.signals,
+        "cited_turns": p.cited_turns,
     })
     .to_string()
 }
@@ -2285,9 +2370,18 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
             let call_id = *call_ids.last().expect("a completion logged its call");
             let v: serde_json::Value = serde_json::from_str(&parsed)?;
             match &built {
-                Built::Label(_, meta) => {
-                    let p = validate_label(&v).map_err(LlmError::Validate)?;
-                    write_proposal(&conn, &scope, &subject_id, meta, &p, call_id, now)?;
+                Built::Label(envelope, meta) => {
+                    land_label_proposal(
+                        &conn,
+                        &scope,
+                        &subject_id,
+                        envelope,
+                        meta,
+                        &v,
+                        call_id,
+                        now,
+                        &ctx.exec.honeytoken_routes,
+                    )?;
                     // Explanations are not tied to proposals: the score
                     // writer asks on crossings and swings (docs/llm.md 8.2).
                 }
@@ -2472,9 +2566,20 @@ pub fn send_point(
                 build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
             let summary = input_summary(subject, &meta);
             let (scope, id) = (subject.scope.clone(), subject.id.clone());
+            let honeytokens = exec.honeytoken_routes.clone();
+            let check_envelope = e.clone();
             let write = move |conn: &Connection, v: &serde_json::Value, call_id: i64| {
-                let p = validate_label(v).map_err(LlmError::Validate)?;
-                write_proposal(conn, &scope, &id, &meta, &p, call_id, now)
+                land_label_proposal(
+                    conn,
+                    &scope,
+                    &id,
+                    &check_envelope,
+                    &meta,
+                    v,
+                    call_id,
+                    now,
+                    &honeytokens,
+                )
             };
             (e, summary, Box::new(write))
         }
@@ -2756,7 +2861,9 @@ mod tests {
         .to_string()
     }
 
-    const GOOD_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"]}"#;
+    const GOOD_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"],"cited_turns":[0,1]}"#;
+    /// The fixture's third turn is a wordlisted path, so this lands.
+    const FAITHFUL_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.9,"reason":"Wordlist path hit.","signals":["scanner_paths"],"cited_turns":[2]}"#;
 
     fn exec_for(url: &str, mode: LlmMode) -> Exec {
         Exec {
@@ -2767,6 +2874,7 @@ mod tests {
             mode,
             daily_calls: 500,
             daily_tokens: 500_000,
+            honeytoken_routes: Vec::new(),
         }
     }
 
@@ -2807,15 +2915,11 @@ mod tests {
     fn validate_label_accepts_the_documented_shape() {
         let v: serde_json::Value = serde_json::from_str(GOOD_PROPOSAL).unwrap();
         let p = validate_label(&v).unwrap();
-        assert_eq!(
-            p,
-            LabelProposal {
-                label: "malicious".to_string(),
-                confidence: 0.93,
-                reason: "Wordlist paths at machine cadence.".to_string(),
-                signals: vec!["scanner_paths".to_string(), "machine_cadence".to_string()],
-            }
-        );
+        assert_eq!(p.label, "malicious");
+        assert_eq!(p.confidence, 0.93);
+        assert_eq!(p.reason, "Wordlist paths at machine cadence.");
+        assert_eq!(p.signals, vec!["scanner_paths", "machine_cadence"]);
+        assert_eq!(p.cited_turns, vec![0, 1]);
     }
 
     #[test]
@@ -2835,6 +2939,12 @@ mod tests {
         extra["action"] = "block".into();
         let mut missing = good.clone();
         missing.as_object_mut().unwrap().remove("reason");
+        let mut bad_cited = good.clone();
+        bad_cited["cited_turns"] = serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let mut bad_cite = good.clone();
+        bad_cite["cited_turns"] = serde_json::json!([0, -1]);
+        let mut missing_cited = good.clone();
+        missing_cited.as_object_mut().unwrap().remove("cited_turns");
         for (name, v) in [
             ("enum", bad_enum),
             ("confidence", bad_conf),
@@ -2843,6 +2953,9 @@ mod tests {
             ("signal", bad_signal),
             ("extra-key", extra),
             ("missing-key", missing),
+            ("cited-len", bad_cited),
+            ("cite", bad_cite),
+            ("missing-cited", missing_cited),
             ("non-object", serde_json::json!([1])),
         ] {
             assert!(validate_label(&v).is_err(), "{name} passed");
@@ -3094,6 +3207,7 @@ mod tests {
             mode: LlmMode::Live,
             daily_calls: 1,
             daily_tokens: 1,
+            honeytoken_routes: Vec::new(),
         };
         assert_eq!(exec.model_for("label"), "base");
         assert_eq!(exec.model_for("classify"), "small");
@@ -3498,7 +3612,7 @@ mod tests {
             let conn = Connection::open(&db).unwrap();
             assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
         }
-        let (url, _) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let (url, _) = mock_server(vec![(200, completion(FAITHFUL_PROPOSAL))]);
         let ctx = drain_ctx(
             exec_for(&url, LlmMode::Live),
             Some(JsonMode::Prompt),
@@ -3509,32 +3623,80 @@ mod tests {
         assert_eq!(mode.json, Some(JsonMode::Prompt));
         assert_eq!(mode.effort, Some(false));
         let conn = Connection::open(&db).unwrap();
-        let label: (String, String, f64, String, String) = conn
+        let label: (String, String, f64, String, String, Option<String>) = conn
             .query_row(
-                "SELECT label, source, confidence, note, signals FROM labels \
+                "SELECT label, source, confidence, note, signals, cited_turns FROM labels \
                  WHERE source = 'llm_proposed'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(label.0, "malicious");
         assert_eq!(label.1, "llm_proposed");
         assert_eq!(label.2, PROPOSED_CONFIDENCE);
         assert!(label.3.ends_with(" [llm_call:1]"), "{}", label.3);
-        assert_eq!(
-            label.4, r#"["scanner_paths","machine_cadence"]"#,
-            "{}",
-            label.4
-        );
-        let call: (Option<String>, Option<i64>, Option<i64>) = conn
+        assert_eq!(label.4, r#"["scanner_paths"]"#, "{}", label.4);
+        assert_eq!(label.5.as_deref(), Some("[2]"));
+        let call: (Option<String>, Option<i64>, Option<i64>, Option<String>) = conn
             .query_row(
-                "SELECT parsed, prompt_tokens, completion_tokens FROM llm_calls",
+                "SELECT parsed, prompt_tokens, completion_tokens, faithfulness_failed FROM llm_calls",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert!(call.0.unwrap().contains("scanner_paths"));
+        assert_eq!((call.1, call.2), (Some(10), Some(5)));
+        assert_eq!(call.3, None);
+    }
+
+    #[test]
+    fn drain_live_downgrades_an_unfaithful_proposal() {
+        let db = tmp_db("unfaithful");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        // Two cited turns with no 404s and no wordlist hit: scanner_paths
+        // fails, and machine_cadence would too (gap_cv is 1.0).
+        let (url, _) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let label: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT label, note, cited_turns FROM labels WHERE source = 'llm_proposed'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert!(call.0.unwrap().contains("machine_cadence"));
-        assert_eq!((call.1, call.2), (Some(10), Some(5)));
+        assert_eq!(label.0, "unknown", "downgraded, never stored as proposed");
+        assert!(
+            label.1.starts_with("Wordlist paths at machine cadence."),
+            "reason kept: {}",
+            label.1
+        );
+        assert_eq!(label.2.as_deref(), Some("[0,1]"));
+        let failed: Option<String> = conn
+            .query_row("SELECT faithfulness_failed FROM llm_calls", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(failed.as_deref(), Some("scanner_paths"));
     }
 
     #[test]
@@ -3816,7 +3978,7 @@ mod tests {
     fn send_label_writes_a_jobless_call_and_label() {
         let db = tmp_db("send");
         fixture(&db);
-        let (url, seen) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let (url, seen) = mock_server(vec![(200, completion(FAITHFUL_PROPOSAL))]);
         let out = send_label(
             &db,
             &exec_for(&url, LlmMode::Live),
