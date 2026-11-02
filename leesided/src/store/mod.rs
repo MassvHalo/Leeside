@@ -70,6 +70,15 @@ pub enum StoreError {
     Closed,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Boxed: `LlmError` already holds a `StoreError`.
+    #[error("llm: {0}")]
+    Llm(Box<crate::llm::LlmError>),
+}
+
+impl From<crate::llm::LlmError> for StoreError {
+    fn from(e: crate::llm::LlmError) -> Self {
+        StoreError::Llm(Box::new(e))
+    }
 }
 
 /// One ingested event, as columns.
@@ -120,6 +129,15 @@ pub struct TurnRow {
     pub actor_id: Option<String>,
     pub country: Option<String>,
     pub cluster_key: Option<String>,
+    // Payload capture (brief §Payload capture): transient, never a
+    // `turns` column. The writer folds `path` into the payload pattern
+    // and keeps the samples on the pattern row at first sight only.
+    pub path: Option<String>,
+    pub sample_query: Option<String>,
+    pub body_slice: Option<String>,
+    /// LLM budgets for the first-sight classify job; zero stays silent.
+    pub daily_calls: u32,
+    pub daily_tokens: u32,
 }
 
 /// What the check answered, to be joined onto the turn row once it lands.
@@ -183,6 +201,9 @@ pub struct LabelRow {
     pub created_at: i64,
     /// The model's signals as a JSON array; `llm_proposed` only.
     pub signals: Option<String>,
+    /// LLM budgets for the 5-in-24h draft trigger; zero stays silent.
+    pub daily_calls: u32,
+    pub daily_tokens: u32,
 }
 
 /// One `llm_calls` row: a logged model exchange (docs/llm.md).
@@ -251,6 +272,18 @@ pub enum StoreOp {
     /// for the subject exists, no proposal went out in the last hour,
     /// and the daily budgets hold (`llm::ENQUEUE_LABEL_SQL`).
     LlmEnqueue {
+        scope: String,
+        subject_id: String,
+        enqueued_by: String,
+        now_s: i64,
+        daily_calls: u32,
+        daily_tokens: u32,
+    },
+    /// Any other point's job (docs/llm.md §4): lands only when no job
+    /// for the point and subject is open and the daily budgets hold
+    /// (`llm::ENQUEUE_POINT_SQL`).
+    LlmEnqueuePoint {
+        point: String,
         scope: String,
         subject_id: String,
         enqueued_by: String,
@@ -366,6 +399,12 @@ pub struct ScoreRow {
     pub score: f64,
     pub model_version: String,
     pub top3: String,
+    /// The surface threshold for the explain trigger; without it the
+    /// writer judges swings only, never crossings.
+    pub threshold: Option<f64>,
+    /// LLM budgets for the crossing/swing explain job; zero stays silent.
+    pub daily_calls: u32,
+    pub daily_tokens: u32,
 }
 
 /// An `actor_merges` row.
@@ -1098,6 +1137,9 @@ mod tests {
                 score: 0.5,
                 model_version: "0.1.0".to_string(),
                 top3: "[]".to_string(),
+                threshold: Some(0.5),
+                daily_calls: 0,
+                daily_tokens: 0,
             }));
         }
         store.flush().await;

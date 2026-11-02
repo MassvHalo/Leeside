@@ -296,6 +296,15 @@ struct EventWire<'a> {
     /// Package-minted per request; joins the event to its probe and seeds the actor id.
     #[serde(default)]
     turn_id: Option<String>,
+    /// Payload capture (brief §Payload capture): the decoded path, the
+    /// redacted query string and the redacted first 2 KB of the body.
+    /// Additive v2; older package lines omit all three.
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    sample_query: Option<String>,
+    #[serde(default)]
+    body_slice: Option<String>,
 }
 
 /// Schema versions this build ingests. v2 is a superset of v1.
@@ -980,6 +989,9 @@ impl Engine {
                             score: p,
                             model_version: version,
                             top3: top3.clone(),
+                            threshold: surface.and_then(|s| self.surface_threshold(s.as_str())),
+                            daily_calls: self.llm_budgets().0,
+                            daily_tokens: self.llm_budgets().1,
                         }));
                         self.enqueue_label("actor", &id_hex, p);
                         self.store.send(StoreOp::ActorScore {
@@ -1038,6 +1050,9 @@ impl Engine {
                             score: p,
                             model_version: version,
                             top3: top3.clone(),
+                            threshold: surface.and_then(|s| self.surface_threshold(s.as_str())),
+                            daily_calls: self.llm_budgets().0,
+                            daily_tokens: self.llm_budgets().1,
                         }));
                         self.enqueue_label("cluster", &format!("{c:016x}"), p);
                     }
@@ -1072,6 +1087,9 @@ impl Engine {
                     note,
                     created_at: store::now_s(),
                     signals: None,
+                    // Auto-labels never trigger drafts; operator labels do.
+                    daily_calls: 0,
+                    daily_tokens: 0,
                 }));
             };
             if self.cfg.honeytoken_routes.iter().any(|r| r == &ev.route) {
@@ -1158,6 +1176,11 @@ impl Engine {
             h2_fp: ev.h2_fp,
             remote_port: ev.remote_port.map(|p| p as i64),
             ts_ms: ev.ts_ms,
+            path: ev.path,
+            sample_query: ev.sample_query,
+            body_slice: ev.body_slice,
+            daily_calls: self.llm_budgets().0,
+            daily_tokens: self.llm_budgets().1,
         }));
         self.counters.events.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1233,6 +1256,25 @@ impl Engine {
     /// A row above 0.5 asks for a label proposal (docs/llm.md point 1).
     /// The queue guard dedups, caps and budgets, so this stays
     /// unconditional; with the LLM unconfigured it sends nothing.
+    /// The writer-thread triggers' budgets: the configured daily
+    /// allowances, or zero (which stays silent) without an LLM.
+    fn llm_budgets(&self) -> (u32, u32) {
+        self.llm
+            .exec
+            .as_ref()
+            .map(|e| (e.daily_calls, e.daily_tokens))
+            .unwrap_or((0, 0))
+    }
+
+    /// The surface threshold for the explain trigger, if the loaded
+    /// manifest names one.
+    fn surface_threshold(&self, surface: &str) -> Option<f64> {
+        self.windside
+            .loaded
+            .as_ref()
+            .and_then(|l| l.manifest.thresholds.get(surface).copied())
+    }
+
     fn enqueue_label(&self, scope: &str, subject_id: &str, score: f64) {
         if score <= crate::llm::ENQUEUE_SCORE {
             return;

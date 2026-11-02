@@ -82,6 +82,19 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                         if let Some((rec, _)) = pending.remove(&pending_key_for_turn(&row)) {
                             apply_check(&tx, &rec)?;
                         }
+                        crate::llm::note_payload_pattern(
+                            &tx,
+                            &row.verb,
+                            &row.route,
+                            row.path.as_deref(),
+                            row.surface.as_deref(),
+                            row.sample_query.as_deref(),
+                            row.body_slice.as_deref(),
+                            "ingest",
+                            now_s(),
+                            row.daily_calls,
+                            row.daily_tokens,
+                        )?;
                     }
                     StoreOp::ConversationClose(c) => insert_close(&tx, &c)?,
                     StoreOp::CheckRecord(rec) => {
@@ -174,10 +187,41 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                         )?;
                     }
                     StoreOp::Score(s) => {
+                        let prev: Option<f64> = tx
+                            .query_row(
+                                "SELECT score FROM scores WHERE scope = ?1 AND scope_id = ?2 \
+                                 ORDER BY rowid DESC LIMIT 1",
+                                params![s.scope, s.scope_id],
+                                |r| r.get(0),
+                            )
+                            .map(Some)
+                            .or_else(|e| match e {
+                                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                                e => Err(e),
+                            })?;
                         tx.execute(
                             "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                             params![s.scope, s.scope_id, s.turn_id, s.surface, s.ts_us, s.score, s.model_version, s.top3],
                         )?;
+                        // The explain trigger (docs/llm.md 8.2): a
+                        // crossing is below-or-nothing to at-or-above,
+                        // re-crossings included; a swing is anywhere.
+                        // The hourly cooldown bounds the repeats.
+                        let crossed = s
+                            .threshold
+                            .is_some_and(|t| s.score >= t && prev.is_none_or(|p| p < t));
+                        let swung = prev.is_some_and(|p| (s.score - p).abs() > 0.2);
+                        if crossed || swung {
+                            crate::llm::enqueue_explain(
+                                &tx,
+                                &s.scope,
+                                &s.scope_id,
+                                "scorer",
+                                now_s(),
+                                s.daily_calls,
+                                s.daily_tokens,
+                            )?;
+                        }
                     }
                     StoreOp::ActorScore {
                         id,
@@ -211,6 +255,17 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                                 l.signals
                             ],
                         )?;
+                        if l.source == "operator" && l.label == "malicious" {
+                            crate::llm::maybe_enqueue_draft(
+                                &tx,
+                                l.scope,
+                                &l.scope_id,
+                                "operator-labels",
+                                l.created_at,
+                                l.daily_calls,
+                                l.daily_tokens,
+                            )?;
+                        }
                     }
                     StoreOp::LlmEnqueue {
                         scope,
@@ -223,6 +278,28 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                         tx.execute(
                             crate::llm::ENQUEUE_LABEL_SQL,
                             params![
+                                scope,
+                                subject_id,
+                                enqueued_by,
+                                now_s,
+                                daily_calls,
+                                daily_tokens
+                            ],
+                        )?;
+                    }
+                    StoreOp::LlmEnqueuePoint {
+                        point,
+                        scope,
+                        subject_id,
+                        enqueued_by,
+                        now_s,
+                        daily_calls,
+                        daily_tokens,
+                    } => {
+                        tx.execute(
+                            crate::llm::ENQUEUE_POINT_SQL,
+                            params![
+                                point,
                                 scope,
                                 subject_id,
                                 enqueued_by,
@@ -496,6 +573,8 @@ fn maybe_rule_decision(tx: &Transaction, rec: &CheckRecord) -> Result<(), StoreE
                 note: Some(rule.clone()),
                 created_at: now_s(),
                 signals: None,
+                daily_calls: 0,
+                daily_tokens: 0,
             };
             if insert_label_for_row(tx, &label)? > 0 {
                 return Ok(());

@@ -2967,6 +2967,8 @@ async fn review_confirm_writes_an_operator_label_the_export_carries() {
             note: Some("machine cadence".to_string()),
             created_at: 0,
             signals: None,
+            daily_calls: 0,
+            daily_tokens: 0,
         }));
     h.engine.store.flush().await;
     let mut out = Vec::new();
