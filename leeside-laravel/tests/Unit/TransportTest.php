@@ -73,4 +73,22 @@ class TransportTest extends TestCase
             fclose($handle);
         }
     }
+
+    public function test_array_nulls_socket_only_fields(): void
+    {
+        $transport = new ArrayTransport;
+
+        $transport->send([
+            'v' => 1,
+            'ip' => '10.0.0.1',
+            'path' => '/wp-login.php',
+            'sample_query' => 'a=1',
+            'body_slice' => '{}',
+        ]);
+
+        $this->assertSame(
+            [['v' => 1, 'ip' => null, 'path' => null, 'sample_query' => null, 'body_slice' => null]],
+            $transport->events
+        );
+    }
 }

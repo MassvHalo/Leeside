@@ -308,6 +308,120 @@ class TurnEventFactoryTest extends TestCase
         $this->assertSame('_unrouted', RouteName::fromRoute(Request::create('/x', 'GET')->route()));
     }
 
+    public function test_routed_200_carries_no_capture(): void
+    {
+        $request = Request::create('/venues/7?token=abc&page=2', 'GET');
+        $route = new Route(['GET'], 'venues/{venue}', ['as' => 'venues.show', 'uses' => fn () => null]);
+        $route->bind($request);
+        $request->setRouteResolver(fn () => $route);
+
+        $event = $this->factory->build($request, new Response('ok', 200), $this->begun());
+
+        $this->assertSame('venues.show', $event['route']);
+        $this->assertNull($event['path']);
+        $this->assertNull($event['sample_query']);
+        $this->assertNull($event['body_slice']);
+    }
+
+    public function test_unrouted_404_carries_all_three_redacted(): void
+    {
+        $request = Request::create(
+            '/wp-login.php?token=S3CR3T-token-value&page=2', 'POST',
+            [], [], [],
+            ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+            'user=admin&otp=654321'
+        );
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame('_unrouted', $event['route']);
+        $this->assertSame('/wp-login.php', $event['path']);
+        $this->assertSame('token=%5Bredacted%5D&page=2', $event['sample_query']);
+        $this->assertSame('user=admin&otp=%5Bredacted%5D', $event['body_slice']);
+    }
+
+    public function test_redacted_values_never_appear_in_any_form(): void
+    {
+        $request = Request::create(
+            '/.env?password=hunter2-hunter2&x=1', 'POST',
+            [], [], [],
+            ['CONTENT_TYPE' => 'application/json'],
+            '{"user":{"otp":"112233"},"token":"tok-tok-token","ok":true}'
+        );
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $json = (string) json_encode($event);
+        foreach (['hunter2-hunter2', '112233', 'tok-tok-token'] as $secret) {
+            $this->assertStringNotContainsString($secret, $json, "leaked: {$secret}");
+        }
+        // ... but the evidence kept its shape: redacted markers, plain fields.
+        $this->assertStringContainsString('password=%5Bredacted%5D', $event['sample_query']);
+        $this->assertSame(
+            '{"user":{"otp":"[redacted]"},"token":"[redacted]","ok":true}',
+            $event['body_slice']
+        );
+    }
+
+    public function test_routed_4xx_captures_samples_without_path(): void
+    {
+        $request = Request::create(
+            '/portal/login?next=%2F', 'POST', [], [], [],
+            ['CONTENT_TYPE' => 'application/x-www-form-urlencoded'],
+            'phone=123&otp=12'
+        );
+        $context = $this->begun();
+        $context->recordRoute('portal.login');
+
+        $event = $this->factory->build($request, new Response('x', 422), $context);
+
+        $this->assertNull($event['path']);
+        $this->assertSame('next=%2F', $event['sample_query']);
+        $this->assertSame('phone=123&otp=%5Bredacted%5D', $event['body_slice']);
+    }
+
+    public function test_capture_truncates_values_total_and_body(): void
+    {
+        $long = str_repeat('a', 100);
+        $request = Request::create("/x?v={$long}", 'GET');
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+        $this->assertSame('v='.str_repeat('a', 64), $event['sample_query']);
+
+        $many = implode('&', array_map(fn ($i) => "p{$i}=".str_repeat('b', 60), range(0, 20)));
+        $request = Request::create("/x?{$many}", 'GET');
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+        $this->assertSame(512, strlen($event['sample_query']));
+
+        $request = Request::create('/x', 'POST', [], [], [], [], str_repeat('c', 3000));
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+        $this->assertSame(2048, strlen($event['body_slice']));
+    }
+
+    public function test_redact_list_is_configurable(): void
+    {
+        config(['leeside.capture.redact_params' => ['phone']]);
+        $factory = new TurnEventFactory(
+            $this->hasher, new ShapeReducer, $this->app['auth'], $this->stats,
+            [], null, null, $this->app['config']
+        );
+        $request = Request::create(
+            '/x?phone=0661111111&otp=123456', 'GET'
+        );
+
+        $event = $factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame('phone=%5Bredacted%5D&otp=123456', $event['sample_query']);
+    }
+
+    public function test_redact_names_match_case_insensitively(): void
+    {
+        $request = Request::create('/x?Token=abc&OTP=123', 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame('Token=%5Bredacted%5D&OTP=%5Bredacted%5D', $event['sample_query']);
+    }
+
     private function begun(): TurnContext
     {
         $context = new TurnContext;

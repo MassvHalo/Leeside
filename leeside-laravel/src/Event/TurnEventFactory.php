@@ -99,6 +99,7 @@ class TurnEventFactory
         $uaClass = UserAgentClass::classify($request->userAgent());
         $shape = RequestShape::build($request, $this->hasher, $this->headerOrder());
         $fingerprints = $this->proxyFingerprints($request);
+        $capture = $this->capture($request, $response, $probe['route'], $probe['surface']);
 
         return [
             'v' => $probe['v'],
@@ -151,7 +152,140 @@ class TurnEventFactory
             'ua_class' => $uaClass,
             'remote_port' => $this->remotePort($request),
             'ts_ms' => intdiv($probe['ts'], 1000),
+            // Payload capture (brief §Payload capture): socket only, like
+            // ip. Null unless the capture conditions hold.
+            'path' => $capture['path'],
+            'sample_query' => $capture['sample'],
+            'body_slice' => $capture['body'],
         ];
+    }
+
+    /**
+     * Payload capture (brief §Payload capture). The path rides only on
+     * unrouted requests; the samples only when the request matched no
+     * route, the response is 4xx, or the surface is honeypot. Redaction
+     * runs before truncation; empties yield null.
+     *
+     * @return array{path: ?string, sample: ?string, body: ?string}
+     */
+    private function capture(Request $request, Response $response, string $route, ?string $surface): array
+    {
+        $none = ['path' => null, 'sample' => null, 'body' => null];
+        $unrouted = $route === '_unrouted';
+        $status = $response->getStatusCode();
+        if (! $unrouted && ($status < 400 || $status >= 500) && $surface !== 'honeypot') {
+            return $none;
+        }
+        $redact = $this->redactParams();
+        $out = $none;
+        if ($unrouted) {
+            $out['path'] = '/'.ltrim($request->decodedPath(), '/');
+        }
+        $out['sample'] = $this->sampleQuery((string) $request->server->get('QUERY_STRING', ''), $redact);
+        $out['body'] = $this->bodySlice($request, $redact);
+
+        return $out;
+    }
+
+    /** @return string[] lowercased, blanks dropped */
+    private function redactParams(): array
+    {
+        $list = $this->config?->get('leeside.capture.redact_params');
+        if (is_string($list)) {
+            $list = explode(',', $list);
+        }
+        if (! is_array($list) || $list === []) {
+            $list = ['password', 'token', 'otp', 'card', 'secret'];
+        }
+
+        return array_values(array_filter(array_map(
+            fn ($name) => strtolower(trim((string) $name)),
+            $list
+        )));
+    }
+
+    private function sampleQuery(string $query, array $redact): ?string
+    {
+        if ($query === '') {
+            return null;
+        }
+        $out = substr($this->redactPairs($query, $redact, 64), 0, 512);
+        if ($out === '') {
+            return null;
+        }
+        // Never end on a split percent-encoding.
+        $out = (string) preg_replace('/%[0-9A-Fa-f]{0,1}$/', '', $out);
+
+        return $out === '' ? null : $out;
+    }
+
+    private function bodySlice(Request $request, array $redact): ?string
+    {
+        $content = $request->getContent();
+        if (! is_string($content) || $content === '') {
+            return null;
+        }
+        if ($request->isJson()) {
+            $decoded = json_decode($content, true);
+            if (is_array($decoded)) {
+                $encoded = json_encode(
+                    $this->redactDeep($decoded, $redact),
+                    JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
+                );
+                if (is_string($encoded)) {
+                    $content = $encoded;
+                }
+            }
+        } elseif (str_contains(
+            (string) $request->headers->get('Content-Type', ''),
+            'application/x-www-form-urlencoded'
+        )) {
+            $content = $this->redactPairs($content, $redact, null);
+        }
+
+        return substr($content, 0, 2048);
+    }
+
+    /**
+     * Walk name=value pairs: redact listed names, cut other values to
+     * $valueCut characters when set, re-encode. Duplicates and order kept.
+     */
+    private function redactPairs(string $pairs, array $redact, ?int $valueCut): string
+    {
+        $out = [];
+        foreach (explode('&', $pairs) as $part) {
+            if ($part === '') {
+                continue;
+            }
+            [$name, $value] = array_pad(explode('=', $part, 2), 2, '');
+            // urldecode: '+' is a space in query strings and forms.
+            $name = urldecode($name);
+            $value = urldecode($value);
+            if (in_array(strtolower($name), $redact, true)) {
+                $value = '[redacted]';
+            } elseif ($valueCut !== null) {
+                $cut = mb_substr($value, 0, $valueCut, 'UTF-8');
+                $value = is_string($cut) ? $cut : substr($value, 0, $valueCut);
+            }
+            $out[] = rawurlencode($name).'='.rawurlencode($value);
+        }
+
+        return implode('&', $out);
+    }
+
+    private function redactDeep(mixed $value, array $redact): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+        $out = [];
+        foreach ($value as $key => $item) {
+            $out[$key] = is_string($key) && in_array(strtolower($key), $redact, true)
+                ? '[redacted]'
+                : $this->redactDeep($item, $redact);
+        }
+
+        return $out;
     }
 
     /**

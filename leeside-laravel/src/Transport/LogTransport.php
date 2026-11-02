@@ -15,9 +15,12 @@ class LogTransport implements Transport
     public function send(array $event): bool
     {
         try {
-            // The address travels on the socket only; a log line keeps the hash side.
-            if (array_key_exists('ip', $event)) {
-                $event['ip'] = null;
+            // The address and the capture travel on the socket only; a log
+            // line keeps the hash side.
+            foreach (['ip', 'path', 'sample_query', 'body_slice'] as $socketOnly) {
+                if (array_key_exists($socketOnly, $event)) {
+                    $event[$socketOnly] = null;
+                }
             }
             $line = json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
             if ($line === false) {

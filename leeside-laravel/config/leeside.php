@@ -70,6 +70,16 @@ return [
         'proxy_headers' => ['ja4' => 'X-Leeside-JA4', 'ja4t' => 'X-Leeside-JA4T', 'h2_fp' => 'X-Leeside-H2'],
     ],
 
+    // Payload capture (brief §Payload capture): parameter names whose
+    // values become [redacted] in sample_query and body_slice, ahead of
+    // truncation. Comma-separated in the environment.
+    'capture' => [
+        'redact_params' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('LEESIDE_REDACT_PARAMS', 'password,token,otp,card,secret'))
+        ))),
+    ],
+
     // Schema v2: which kind of client a request belongs to. Evaluated in
     // order: force, honeypot group, webhook list, api (bearer, API-key header,
     // the api group or the /api prefix), else web.

@@ -31,4 +31,26 @@ class LogTransportTest extends TestCase
             fclose($handle);
         }
     }
+
+    public function test_log_nulls_socket_only_fields(): void
+    {
+        $marker = 'leeside-'.uniqid();
+        $transport = new LogTransport($this->app['log'], 'single');
+
+        $transport->send([
+            'v' => 1,
+            'marker' => $marker,
+            'ip' => '10.0.0.1',
+            'path' => '/wp-login.php',
+            'sample_query' => 'a=1',
+            'body_slice' => '{}',
+        ]);
+
+        $log = file_get_contents($this->app->storagePath('logs/laravel.log'));
+
+        $this->assertStringContainsString(
+            '"marker":"'.$marker.'","ip":null,"path":null,"sample_query":null,"body_slice":null',
+            $log
+        );
+    }
 }

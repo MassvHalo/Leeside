@@ -14,8 +14,10 @@ class ArrayTransport implements Transport
             return false;
         }
 
-        if (array_key_exists('ip', $event)) {
-            $event['ip'] = null;
+        foreach (['ip', 'path', 'sample_query', 'body_slice'] as $socketOnly) {
+            if (array_key_exists($socketOnly, $event)) {
+                $event[$socketOnly] = null;
+            }
         }
 
         $this->events[] = $event;
