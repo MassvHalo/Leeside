@@ -2808,7 +2808,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 16);
+    assert_eq!(health["migration_version"], 17);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -3745,6 +3745,136 @@ async fn ui_step4_pages_render() {
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("turns_held"), "{body}");
     assert!(body.contains("distinct user agents minus one"), "{body}");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_rule_disable_lifts_the_rule_from_the_probe_path() {
+    let h = ui_harness(Some("op-token")).await;
+    h.engine.set_mode(Mode::Enforce).unwrap();
+    let rule: Rule = serde_json::from_value(json!({
+        "id": "ui-toggle-burst", "note": "t", "mode": "enforce", "action": "block",
+        "match": {"route": ["api.ping"], "verb": ["POST"], "principal": "any", "surface": ["api"]},
+        "when": {"scope": "peer", "window_s": 60, "count": {}, "gte": 3},
+        "origin": {"kind": "operator"}
+    }))
+    .unwrap();
+    h.engine
+        .write_rule(rule, State::Active, "operator", None)
+        .await
+        .unwrap();
+    let now = now_us();
+    for i in 0..3 {
+        h.event(&v2_event(
+            now - 10_000_000 + (i as i64) * 1_000_000,
+            "1111111111111111",
+            "api.ping",
+            "api",
+            None,
+        ))
+        .await;
+    }
+    h.wait_for("3 peer turns", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 3
+    })
+    .await;
+    let v = h
+        .probe(&v2_probe(now, "api.ping", "1111111111111111", "api", None))
+        .await;
+    assert_eq!(v["action"], "block", "rule trips first: {v}");
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (_, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    let csrf = ui_csrf(&body);
+    assert!(body.contains("ui-toggle-burst"), "{body}");
+    // Disable: the page, the compiled set, and the probe path agree.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/rules/ui-toggle-burst/disable",
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("disabled</span>"), "{body}");
+    assert!(!h
+        .engine
+        .rules
+        .loaded()
+        .iter()
+        .any(|(r, _)| r.id == "ui-toggle-burst"));
+    for i in 0..3 {
+        h.event(&v2_event(
+            now + (i as i64) * 1_000_000,
+            "3333333333333333",
+            "api.ping",
+            "api",
+            None,
+        ))
+        .await;
+    }
+    h.wait_for("6 events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    let v = h
+        .probe(&v2_probe(now, "api.ping", "3333333333333333", "api", None))
+        .await;
+    assert_eq!(v["action"], "allow", "disabled rule stays silent: {v}");
+    // Every change is an audit row.
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (enabled, by): (i64, String) = db
+        .query_row(
+            "SELECT enabled, by FROM rule_state_audit WHERE rule_id = 'ui-toggle-burst'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((enabled, by.as_str()), (0, "console"));
+    drop(db);
+    // Re-enable: the rule is back on the probe path.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/rules/ui-toggle-burst/enable",
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert!(h
+        .engine
+        .rules
+        .loaded()
+        .iter()
+        .any(|(r, _)| r.id == "ui-toggle-burst"));
+    let v = h
+        .probe(&v2_probe(now, "api.ping", "3333333333333333", "api", None))
+        .await;
+    assert_eq!(v["action"], "block", "re-enabled rule trips: {v}");
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let n: i64 = db
+        .query_row(
+            "SELECT count(*) FROM rule_state_audit WHERE rule_id = 'ui-toggle-burst'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+    drop(db);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/rules/no-such-rule/disable",
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 404);
     h.running.abort();
     h.engine.shutdown().await;
 }
