@@ -233,7 +233,7 @@ live only after the three responses read clean.
 
 ## First v2 deploy
 
-This deploy crosses migrations 0005 to 0015 and the v2 `ts` change
+This deploy crosses migrations 0005 to 0019 and the v2 `ts` change
 (integer microseconds; v1 keeps float seconds and its `(peer_key, ts_us)`
 join). **Daemon first, package second, never the reverse:** the old and
 new versions are mutually incompatible on v2 traffic, and the reverse

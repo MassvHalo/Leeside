@@ -143,9 +143,26 @@ resolves actors from them (`docs/actor-identity.md` section 8).
 | `shape` | object | its components, so leesided can re-derive with another recipe |
 | `flags` | list of strings | consistency flags below, per request only |
 | `ja4`, `ja4t`, `h2_fp` | string or null | copied from `X-Leeside-JA4`, `-JA4T`, `-H2` only when the hop was a trusted proxy; else null and the flag `proxy_header_untrusted`. No proxy produces them yet; leesided's passive tap (`leesided/docs/tap.md`) fills `ja4` and `ja4t` on its own side at ingest when the event brought null, and may add the flag `ua_vs_ja4_mismatch` to `flags` on the stored turn. `h2_fp` stays null until a proxy sends it |
+| `path` | `/venues/42` | the decoded request path without the query string, every event; **socket transport only** like `ip`: the `log` and `array` transports write null. leesided folds its id segments into the payload pattern and never stores it |
+| `sample_query` | `page=2&q=x` or null | the redacted query string, Payload capture below; null unless the capture conditions hold; socket only |
+| `body_slice` | `{"otp":"[redacted]"}` or null | the redacted first 2 KB of the request body; same conditions; socket only |
 
 `auth_id` from the source brief is `principal`; `session_hash` is
 `session_key`; `ts_ms` is whole milliseconds derived from `ts`.
+
+**Payload capture.** The package attaches `sample_query` and `body_slice`
+only when the request matched no route (`_unrouted`), the response status
+is 4xx, or the surface is `honeypot`; otherwise both are null. Redaction
+runs before truncation: every parameter named in `capture.redact_params`
+(default `password`, `token`, `otp`, `card`, `secret`) has its value
+replaced with `[redacted]`, in the query string and in form or JSON
+bodies; then each query value is cut to 64 characters, the whole
+`sample_query` to 512 bytes, and `body_slice` to the first 2 KB.
+leesided stores both on the `payload_patterns` row at first sight only —
+later turns for a known pattern update its counters and nothing else —
+and never per turn. All three fields are additive v2: older package lines
+omit them, and leesided then derives no pattern row for an unrouted turn
+without a path.
 
 **Tag cookie** (`web` surface only). Name `_lsd` (configurable). Value
 `base64url(id || issued_at) . "." . base64url(mac)`: `id` 16 random bytes,
@@ -369,6 +386,10 @@ JSON when the request expects JSON); no Leeside headers on the wire.
     'proxy_headers' => ['X-Leeside-JA4', 'X-Leeside-JA4T', 'X-Leeside-H2'],
     'header_order_reliable' => env('LEESIDE_HEADER_ORDER_RELIABLE', true),   // set from the deploy-time test
 ],
+'capture' => [
+    // parameter names redacted to [redacted] in sample_query/body_slice, before truncation
+    'redact_params' => ['password', 'token', 'otp', 'card', 'secret'],  // env LEESIDE_REDACT_PARAMS, comma-separated
+],
 ```
 
 Relative socket paths resolve against `base_path()`.
@@ -396,6 +417,12 @@ cookie's `id` is a random value the package itself minted, carries nothing
 about the user, and is stored as `tag_id`; the cookie's MAC is never stored.
 The raw user agent, credential values and header values still never leave
 PHP: what crosses is `ua_class`, `credential_hash` and `shape`.
+
+A third bounded exception carries the payload classifier's evidence.
+`path`, `sample_query` and `body_slice` travel the socket only (the `log`
+and `array` transports write null); leesided never stores the raw path,
+and keeps the two samples — redacted, truncated, first sight only — on
+the `payload_patterns` row they keyed, never per turn.
 
 ### Tests
 
