@@ -195,8 +195,8 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                         // per window and source, and a re-label is a new row
                         // the latest-wins readers collapse.
                         tx.execute(
-                            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at, signals) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                             params![
                                 l.scope,
                                 l.scope_id,
@@ -207,7 +207,8 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                                 l.confidence,
                                 l.kind,
                                 l.note,
-                                l.created_at
+                                l.created_at,
+                                l.signals
                             ],
                         )?;
                     }
@@ -228,6 +229,51 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                                 now_s,
                                 daily_calls,
                                 daily_tokens
+                            ],
+                        )?;
+                    }
+                    StoreOp::LlmJobRetry { id, now_s } => {
+                        tx.execute(
+                            "UPDATE llm_jobs SET status = 'queued', attempts = 0, \
+                             not_before = ?2, updated_at = ?2 \
+                             WHERE id = ?1 AND status = 'failed'",
+                            params![id, now_s],
+                        )?;
+                    }
+                    StoreOp::LlmJobCancel { id, now_s } => {
+                        tx.execute(
+                            "UPDATE llm_jobs SET status = 'failed', \
+                             last_error = 'cancelled by the operator', updated_at = ?2 \
+                             WHERE id = ?1 AND status = 'queued'",
+                            params![id, now_s],
+                        )?;
+                    }
+                    StoreOp::LlmCallInsert(c) => {
+                        tx.execute(
+                            "INSERT INTO llm_calls (job_id, point, model, prompt_hash, json_mode, \
+                             input_summary, request, response, parsed, latency_ms, \
+                             prompt_tokens, completion_tokens, finish_reason, reasoning_tokens, \
+                             reasoning_excerpt, resend_of, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+                             ?14, ?15, ?16, ?17)",
+                            params![
+                                c.job_id,
+                                c.point,
+                                c.model,
+                                c.prompt_hash,
+                                c.json_mode,
+                                c.input_summary,
+                                c.request,
+                                c.response,
+                                c.parsed,
+                                c.latency_ms,
+                                c.prompt_tokens,
+                                c.completion_tokens,
+                                c.finish_reason,
+                                c.reasoning_tokens,
+                                c.reasoning_excerpt,
+                                c.resend_of,
+                                c.created_at
                             ],
                         )?;
                     }
@@ -429,6 +475,7 @@ fn maybe_rule_decision(tx: &Transaction, rec: &CheckRecord) -> Result<(), StoreE
                 kind: None,
                 note: Some(rule.clone()),
                 created_at: now_s(),
+                signals: None,
             };
             if insert_label_for_row(tx, &label)? > 0 {
                 return Ok(());

@@ -47,6 +47,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (13, include_str!("../../migrations/0013_labels_append.sql")),
     (14, include_str!("../../migrations/0014_llm.sql")),
     (15, include_str!("../../migrations/0015_llm_reasoning.sql")),
+    (16, include_str!("../../migrations/0016_llm_resend.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +175,30 @@ pub struct LabelRow {
     pub kind: Option<String>,
     pub note: Option<String>,
     pub created_at: i64,
+    /// The model's signals as a JSON array; `llm_proposed` only.
+    pub signals: Option<String>,
+}
+
+/// One `llm_calls` row: a logged model exchange (docs/llm.md).
+#[derive(Debug, Clone)]
+pub struct LlmCallRow {
+    pub job_id: Option<i64>,
+    pub point: String,
+    pub model: String,
+    pub prompt_hash: String,
+    pub json_mode: String,
+    pub input_summary: String,
+    pub request: String,
+    pub response: Option<String>,
+    pub parsed: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub finish_reason: Option<String>,
+    pub reasoning_tokens: Option<i64>,
+    pub reasoning_excerpt: Option<String>,
+    pub resend_of: Option<i64>,
+    pub created_at: i64,
 }
 
 // `Turn` carries the whole row by value: one hop through the channel per
@@ -227,6 +252,21 @@ pub enum StoreOp {
         daily_calls: u32,
         daily_tokens: u32,
     },
+    /// The inspector retries a failed job: back to queued with a fresh
+    /// attempt budget. No-op unless the job is failed.
+    LlmJobRetry {
+        id: i64,
+        now_s: i64,
+    },
+    /// The inspector cancels a queued job: failed with the operator as
+    /// the reason (the schema has no cancelled state). No-op unless
+    /// the job is queued.
+    LlmJobCancel {
+        id: i64,
+        now_s: i64,
+    },
+    /// A logged model exchange: the inspector's re-send, or a test seed.
+    LlmCallInsert(LlmCallRow),
     /// A honeytoken hit: the actor's windows label malicious until `until_us`.
     HoneytokenHit {
         actor_id: String,
@@ -505,6 +545,11 @@ impl Store {
     ) -> Result<T, StoreError> {
         let conn = self.reader.lock();
         Ok(f(&conn)?)
+    }
+
+    /// Like [`Store::with_reader`] but the closure keeps its own error.
+    pub fn read<T, E>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+        f(&self.reader.lock())
     }
 
     pub fn rules_count(&self) -> Result<i64, StoreError> {
