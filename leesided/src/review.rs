@@ -177,6 +177,34 @@ pub fn write_operator_label(
     Ok(())
 }
 
+/// After an operator label lands: a malicious verdict may earn the
+/// subject's cluster a draft (docs/llm.md 8.4). Nothing is enqueued
+/// unconfigured.
+fn note_operator_label(
+    conn: &Connection,
+    exec: Option<&crate::llm::Exec>,
+    scope_id: &str,
+    label: &str,
+    now_s: i64,
+) -> Result<(), ReviewError> {
+    if label != "malicious" {
+        return Ok(());
+    }
+    let Some(exec) = exec else {
+        return Ok(());
+    };
+    crate::llm::maybe_enqueue_draft(
+        conn,
+        "actor",
+        scope_id,
+        "review",
+        now_s,
+        exec.daily_calls,
+        exec.daily_tokens,
+    )?;
+    Ok(())
+}
+
 /// Run the interactive loop. Returns the number of labels written.
 pub fn run_review(
     db: &Path,
@@ -192,7 +220,8 @@ pub fn run_review(
     }
     // Opening the review asks for proposals; the queue guard dedups,
     // caps and budgets, and nothing is enqueued unconfigured.
-    if let Some(exec) = crate::llm::Exec::from_config(&crate::config::Config::from_env()) {
+    let exec = crate::llm::Exec::from_config(&crate::config::Config::from_env());
+    if let Some(exec) = &exec {
         let now = crate::store::now_s();
         for row in &rows {
             crate::llm::enqueue_label(
@@ -259,6 +288,7 @@ pub fn run_review(
                 "c" if row.proposal.is_some() => {
                     let label = row.proposal.as_ref().expect("checked").label.clone();
                     write_operator_label(&conn, row, &label, "confirmed llm_proposed", now_s)?;
+                    note_operator_label(&conn, exec.as_ref(), &row.scope_id, &label, now_s)?;
                     writeln!(output, "  labeled {label} (confirmed proposal)")?;
                     labeled += 1;
                     break;
@@ -270,6 +300,7 @@ pub fn run_review(
                         _ => "unknown",
                     };
                     write_operator_label(&conn, row, label, "review CLI", now_s)?;
+                    note_operator_label(&conn, exec.as_ref(), &row.scope_id, label, now_s)?;
                     if row.proposal.as_ref().is_some_and(|p| p.label != label) {
                         writeln!(output, "  labeled {label} (differs from proposal)")?;
                     } else {

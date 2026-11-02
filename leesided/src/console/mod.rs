@@ -464,6 +464,16 @@ pub async fn resend(
     }
 }
 
+/// The writer-thread triggers' budgets: the configured daily
+/// allowances, or zero (which stays silent) without an LLM.
+fn llm_budgets(e: &Engine) -> (u32, u32) {
+    e.llm
+        .exec
+        .as_ref()
+        .map(|x| (x.daily_calls, x.daily_tokens))
+        .unwrap_or((0, 0))
+}
+
 fn thresholds(e: &Engine) -> std::collections::HashMap<String, f64> {
     e.windside
         .loaded
@@ -661,6 +671,8 @@ pub async fn actor_label(
         note: f.note.filter(|n| !n.trim().is_empty()),
         created_at: now,
         signals: None,
+        daily_calls: llm_budgets(&e).0,
+        daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
     Redirect::to(&format!("/ui/actors/{}", detail.head.id)).into_response()
@@ -704,9 +716,86 @@ pub async fn cluster_label(
         note: f.note.filter(|n| !n.trim().is_empty()),
         created_at: store::now_s(),
         signals: None,
+        daily_calls: llm_budgets(&e).0,
+        daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
     Redirect::to(&format!("/ui/clusters/{}", detail.row.key)).into_response()
+}
+
+/// Queue one draft job for a cluster: the button on either page. The
+/// queue guard dedups, so repeats are harmless.
+async fn draft_for(e: &Arc<Engine>, cluster: String, back_to: String) -> Response {
+    let Some(exec) = e.llm.exec.clone() else {
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            pages::error_page(
+                503,
+                "LLM unconfigured",
+                "LEESIDED_LLM_URL or LEESIDED_LLM_KEY is unset",
+            ),
+        );
+    };
+    e.store.send(StoreOp::LlmEnqueuePoint {
+        point: "draft".to_string(),
+        scope: "cluster".to_string(),
+        subject_id: cluster,
+        enqueued_by: "console".to_string(),
+        now_s: store::now_s(),
+        daily_calls: exec.daily_calls,
+        daily_tokens: exec.daily_tokens,
+    });
+    e.store.flush().await;
+    Redirect::to(&back_to).into_response()
+}
+
+pub async fn actor_draft(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
+        &id,
+        0,
+        store::now_s(),
+        &HashMap::new()
+    )));
+    let Some(cluster) = detail.row.cluster.clone() else {
+        return page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            pages::error_page(
+                422,
+                "Nothing to draft over",
+                "this actor's turns carry no cluster key",
+            ),
+        );
+    };
+    let back_to = format!("/ui/actors/{}", detail.head.id);
+    draft_for(&e, cluster, back_to).await
+}
+
+pub async fn cluster_draft(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(key): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let detail = or_return!(read(&e, |ctx| {
+        ctx.cluster_detail(&key, 0, &HashMap::new())
+    }));
+    let back_to = format!("/ui/clusters/{}", detail.row.key);
+    draft_for(&e, detail.row.key.clone(), back_to).await
 }
 
 /// A sticky actor-scope block, rule "operator", 24 h like the rule
@@ -860,6 +949,8 @@ pub async fn review_decide(
         note: Some(note),
         created_at: now,
         signals: None,
+        daily_calls: llm_budgets(&e).0,
+        daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
     Redirect::to("/ui/review").into_response()

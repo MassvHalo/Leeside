@@ -55,6 +55,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/ui/actors", get(crate::console::actors_list))
         .route("/ui/actors/{id}", get(crate::console::actor_detail))
         .route("/ui/actors/{id}/label", post(crate::console::actor_label))
+        .route("/ui/actors/{id}/draft", post(crate::console::actor_draft))
         .route("/ui/actors/{id}/block", post(crate::console::actor_block))
         .route(
             "/ui/actors/{id}/unblock",
@@ -65,6 +66,10 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(
             "/ui/clusters/{key}/label",
             post(crate::console::cluster_label),
+        )
+        .route(
+            "/ui/clusters/{key}/draft",
+            post(crate::console::cluster_draft),
         )
         .route("/ui/review", get(crate::console::review_list))
         .route("/ui/review/decide", post(crate::console::review_decide))

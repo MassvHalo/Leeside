@@ -1260,6 +1260,28 @@ fn activity_block(a: &super::queries::ActivityView) -> String {
     out
 }
 
+/// Ask the draft point for a rule over the subject's cluster. The
+/// draft lands in the review table on `/ui/rules`, never live.
+fn draft_form(scope: &str, id: &str, csrf: &str) -> String {
+    let (action, sub) = if scope == "actor" {
+        (
+            format!("/ui/actors/{id}/draft"),
+            "drafts a rule for this actor's cluster",
+        )
+    } else {
+        (
+            format!("/ui/clusters/{id}/draft"),
+            "drafts a rule for this cluster",
+        )
+    };
+    format!(
+        "<form method=\"post\" action=\"{action}\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <button class=\"btn\" type=\"submit\">Draft a rule</button></form>\
+         <p class=\"sub\">Queues one draft job; {sub}.</p>",
+    )
+}
+
 fn label_form(scope: &str, id: &str, window_end_ts: Option<i64>, csrf: &str) -> String {
     let action = if scope == "actor" {
         format!("/ui/actors/{id}/label")
@@ -1459,6 +1481,14 @@ pub fn actor_detail_page(
     }
     body.push_str("<h2>Label verdicts</h2>");
     body.push_str(&label_form("actor", &d.head.id, d.window_end_ts, csrf));
+    body.push_str("<h2>Draft a rule</h2>");
+    if d.row.cluster.is_some() {
+        body.push_str(&draft_form("actor", &d.head.id, csrf));
+    } else {
+        body.push_str(
+            "<p class=\"empty\">No cluster on this actor's turns: nothing to draft over.</p>",
+        );
+    }
     body.push_str("<h2>Decisions</h2>");
     body.push_str(&decision_table(&d.decisions, now_s));
     if d.row.blocked {
@@ -1615,6 +1645,8 @@ pub fn cluster_detail_page(
     }
     body.push_str("<h2>Label verdicts</h2>");
     body.push_str(&label_form("cluster", &d.row.key, d.window_end_ts, csrf));
+    body.push_str("<h2>Draft a rule</h2>");
+    body.push_str(&draft_form("cluster", &d.row.key, csrf));
     body.push_str("<h2>Turns</h2>");
     body.push_str(&turn_table(&d.turns));
     body.push_str(&pager(
