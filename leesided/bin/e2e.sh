@@ -178,6 +178,26 @@ except urllib.error.HTTPError as e: print(e.code)'); echo "  python GET / -> $PY
 else
   echo "  skipped: this binary may not capture. Once: sudo setcap cap_net_raw+ep $TAP_BIN  (redo after each build)"
 fi
+echo "== ffuf-style act: unrouted paths with query strings and a body"
+curl -s -o /dev/null -A "leeside-ffuf/1.0" "http://127.0.0.1:$PORT/wp-login.php?token=ffuf-token-secret-1&user=admin"
+curl -s -o /dev/null -A "leeside-ffuf/1.0" "http://127.0.0.1:$PORT/.env?x=1"
+curl -s -o /dev/null -A "leeside-ffuf/1.0" -d "user=root&password=ffuf-pass-secret-2" "http://127.0.0.1:$PORT/nothing-here/7"
+for _ in $(seq 1 50); do
+  [ "$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from turns where route = '_unrouted';")" = "3" ] && break
+  sleep 0.1
+done
+echo "== payload patterns: the ffuf act carries samples, routed 2xx acts carry none"
+sqlite3 "$WORK/leesided.sqlite" "select '  ' || pattern || ' x' || turns || ' sample:' || (sample_query is not null) || ' body:' || (body_slice is not null) from payload_patterns order by pattern;"
+FFUF_SAMPLE=$(sqlite3 "$WORK/leesided.sqlite" "select sample_query from payload_patterns where pattern = '/wp-login.php';")
+[ "$FFUF_SAMPLE" = "token=%5Bredacted%5D&user=admin" ] || FAIL="$FAIL ffuf-sample:$FFUF_SAMPLE"
+FFUF_BODY=$(sqlite3 "$WORK/leesided.sqlite" "select body_slice from payload_patterns where pattern = '/nothing-here/{id}';")
+[ "$FFUF_BODY" = "user=root&password=%5Bredacted%5D" ] || FAIL="$FAIL ffuf-body:$FFUF_BODY"
+FFUF_LEAK=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from payload_patterns where sample_query like '%ffuf-token-secret-1%' or body_slice like '%ffuf-pass-secret-2%';")
+[ "$FFUF_LEAK" = "0" ] || FAIL="$FAIL ffuf-leak:$FFUF_LEAK"
+ROUTED_SAMPLES=$(sqlite3 "$WORK/leesided.sqlite" "select count(*) from payload_patterns where pattern in ('home','venues.show','api.venues.index','api.venues.visit','api.ping','webhooks.demo') and (sample_query is not null or body_slice is not null);")
+[ "$ROUTED_SAMPLES" = "0" ] || FAIL="$FAIL routed-samples:$ROUTED_SAMPLES"
+PORTAL_SAMPLE=$(sqlite3 "$WORK/leesided.sqlite" "select body_slice like '%otp=%5Bredacted%5D%' from payload_patterns where pattern = 'portal.login';")
+[ "$PORTAL_SAMPLE" = "1" ] || FAIL="$FAIL portal-sample:$PORTAL_SAMPLE"
 echo "== every turn, by surface, credential status and verdict (events, not probes)"
 sqlite3 "$WORK/leesided.sqlite" "select coalesce(surface,'v1'), coalesce(credential_status,'-'), coalesce(verdict,'no check'), count(*) from turns group by 1,2,3 order by 4 desc;"
 echo "== the decision in SQLite"
