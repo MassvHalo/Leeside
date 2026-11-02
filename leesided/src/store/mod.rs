@@ -49,6 +49,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (15, include_str!("../../migrations/0015_llm_reasoning.sql")),
     (16, include_str!("../../migrations/0016_llm_resend.sql")),
     (17, include_str!("../../migrations/0017_rule_state.sql")),
+    (18, include_str!("../../migrations/0018_llm_points.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]

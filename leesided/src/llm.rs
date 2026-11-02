@@ -22,6 +22,11 @@ use std::time::Duration;
 /// Prompt registry: one file per point, in git. The file's sha256 is
 /// recorded with every call.
 pub const LABEL_PROMPT: &str = include_str!("../prompts/label.md");
+pub const EXPLAIN_PROMPT: &str = include_str!("../prompts/explain.md");
+pub const CLASSIFY_PROMPT: &str = include_str!("../prompts/classify.md");
+pub const DRAFT_PROMPT: &str = include_str!("../prompts/draft.md");
+/// The grammar excerpt the draft envelope carries.
+pub const GRAMMAR_MD: &str = include_str!("../prompts/grammar.md");
 
 /// Per-point `max_tokens`, sized for a reasoning model: a trivial
 /// probe cost 1,997 reasoning tokens, so reasoning dominates every call
@@ -47,6 +52,26 @@ pub const ENVELOPE_TURNS: i64 = 30;
 /// The point-1 schema of docs/llm.md section 8.1, sent as the
 /// `response_format` in schema mode.
 pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]}}}}"#;
+
+/// The point-2 schema of docs/llm.md section 8.2.
+pub const EXPLAIN_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["explanation"],"properties":{"explanation":{"type":"string","maxLength":240}}}"#;
+
+/// The point-3 schema of docs/llm.md section 8.3.
+pub const CLASSIFY_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["category","confidence"],"properties":{"category":{"type":"string","enum":["sqli","traversal","enumeration","scanner_signature","none"]},"confidence":{"type":"number","minimum":0,"maximum":1}}}"#;
+
+/// The point-4 schema of docs/llm.md section 8.4.
+pub const DRAFT_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["rule","reason"],"properties":{"rule":{"type":"string","maxLength":1200},"reason":{"type":"string","maxLength":400}}}"#;
+
+/// The registry as the wire sees it: system prompt plus schema.
+pub fn prompt_for(point: &str) -> Result<(&'static str, &'static str), LlmError> {
+    match point {
+        "label" => Ok((LABEL_PROMPT, LABEL_SCHEMA_JSON)),
+        "explain" => Ok((EXPLAIN_PROMPT, EXPLAIN_SCHEMA_JSON)),
+        "classify" => Ok((CLASSIFY_PROMPT, CLASSIFY_SCHEMA_JSON)),
+        "draft" => Ok((DRAFT_PROMPT, DRAFT_SCHEMA_JSON)),
+        p => Err(LlmError::Point(p.to_string())),
+    }
+}
 
 pub const LABEL_SIGNALS: [&str; 11] = [
     "scanner_paths",
@@ -105,9 +130,9 @@ pub enum LlmError {
     Http(String),
     #[error("database `{0}` does not exist")]
     MissingDb(String),
-    #[error("unknown point `{0}` (built: label)")]
+    #[error("unknown point `{0}` (built: label explain classify draft)")]
     Point(String),
-    #[error("bad subject `{0}`: <actor|cluster>:<id>")]
+    #[error("bad subject `{0}`: <actor|cluster|pattern>:<id>")]
     Subject(String),
     #[error("no {0} `{1}` with a feature row in the store")]
     NoSubject(String, String),
@@ -208,10 +233,7 @@ impl State {
 
 /// sha256 over the registry file, recorded with every call.
 pub fn prompt_hash(point: &str) -> Result<String, LlmError> {
-    let text = match point {
-        "label" => LABEL_PROMPT,
-        p => return Err(LlmError::Point(p.to_string())),
-    };
+    let (text, _) = prompt_for(point)?;
     use sha2::Digest as _;
     Ok(format!("{:x}", sha2::Sha256::digest(text.as_bytes())))
 }
@@ -247,7 +269,7 @@ pub struct Subject {
 
 pub fn parse_subject(s: &str) -> Result<Subject, LlmError> {
     let (scope, id) = s.split_once(':').unwrap_or(("", ""));
-    if !matches!(scope, "actor" | "cluster") || id.is_empty() {
+    if !matches!(scope, "actor" | "cluster" | "pattern") || id.is_empty() {
         return Err(LlmError::Subject(s.to_string()));
     }
     Ok(Subject {
@@ -606,10 +628,7 @@ pub fn build_request(
     effort: Option<&str>,
     budget: Option<u32>,
 ) -> Result<serde_json::Value, LlmError> {
-    let (system, schema) = match point {
-        "label" => (LABEL_PROMPT, LABEL_SCHEMA_JSON),
-        p => return Err(LlmError::Point(p.to_string())),
-    };
+    let (system, schema) = prompt_for(point)?;
     let mut body = serde_json::json!({
         "model": model,
         "temperature": 0,
@@ -1165,6 +1184,7 @@ pub(crate) struct Attempt {
 fn write_call(
     conn: &Connection,
     job: Option<i64>,
+    point: &str,
     model: &str,
     prompt_hash: &str,
     json_mode: JsonMode,
@@ -1177,9 +1197,10 @@ fn write_call(
         "INSERT INTO llm_calls (job_id, point, model, prompt_hash, json_mode, input_summary, \
          request, response, parsed, latency_ms, prompt_tokens, completion_tokens, \
          finish_reason, reasoning_tokens, reasoning_excerpt, created_at, resend_of) \
-         VALUES (?1, 'label', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             job,
+            point,
             model,
             prompt_hash,
             json_mode.as_str(),
@@ -1206,6 +1227,7 @@ fn write_call(
 fn write_exchanges(
     conn: &Connection,
     job: Option<i64>,
+    point: &str,
     model: &str,
     prompt_hash: &str,
     json_mode: JsonMode,
@@ -1219,6 +1241,7 @@ fn write_exchanges(
         ids.push(write_call(
             conn,
             job,
+            point,
             model,
             prompt_hash,
             json_mode,
@@ -1229,14 +1252,6 @@ fn write_exchanges(
         )?);
     }
     Ok(ids)
-}
-
-fn proposal_from_content(content: &str) -> Result<LabelProposal, String> {
-    let obj =
-        extract_json(content).ok_or_else(|| "no JSON object in the completion".to_string())?;
-    let v: serde_json::Value = serde_json::from_str(obj)
-        .map_err(|e| format!("the completion's JSON does not parse: {e}"))?;
-    validate_label(&v)
 }
 
 fn write_proposal(
@@ -1277,6 +1292,448 @@ fn input_summary(subject: &Subject, meta: &LabelMeta) -> String {
     .to_string()
 }
 
+// ---------- Points 2-4 ----------
+
+pub struct ExplainMeta {
+    pub surface: Option<String>,
+    pub score: f64,
+    pub score_ts: i64,
+}
+
+pub struct ClassifyMeta {
+    pub pattern_hash: String,
+    pub method: String,
+    pub pattern: String,
+}
+
+pub struct DraftMeta {
+    pub cluster_key: String,
+    pub rows: i64,
+}
+
+/// The point-2 envelope of docs/llm.md section 8.2: the subject's
+/// latest score plus its threshold, top-3 and window aggregates.
+pub fn build_explain_envelope(
+    conn: &Connection,
+    subject: &Subject,
+    thresholds: &HashMap<String, f64>,
+) -> Result<(serde_json::Value, ExplainMeta), LlmError> {
+    if !matches!(subject.scope.as_str(), "actor" | "cluster") {
+        return Err(LlmError::Subject(format!(
+            "{}:{}",
+            subject.scope, subject.id
+        )));
+    }
+    let (score, top3_raw, ts_us, surface): (f64, String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT score, top3, ts_us, surface FROM scores \
+             WHERE scope = ?1 AND scope_id = ?2 ORDER BY ts_us DESC LIMIT 1",
+            params![subject.scope, subject.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                LlmError::NoSubject(subject.scope.clone(), subject.id.clone())
+            }
+            e => LlmError::Sqlite(e),
+        })?;
+    let vector: Option<String> = conn
+        .query_row(
+            "SELECT vector FROM feature_vectors \
+             WHERE scope = ?1 AND key = ?2 ORDER BY ts_us DESC LIMIT 1",
+            params![subject.scope, subject.id],
+            |r| r.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(LlmError::Sqlite(e)),
+        })?;
+    let values: Vec<f32> = vector
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    let at = |name: &str| -> Option<f32> {
+        features::NAMES
+            .iter()
+            .position(|n| *n == name)
+            .and_then(|i| values.get(i).copied())
+    };
+    let turn_col = if subject.scope == "actor" {
+        "actor_id"
+    } else {
+        "cluster_key"
+    };
+    let asset_ratio: Option<f64> = conn
+        .query_row(
+            &format!(
+                "SELECT avg(is_asset = 1) FROM (SELECT is_asset FROM turns \
+                 WHERE {turn_col} = ?1 ORDER BY ts_us DESC LIMIT 64)"
+            ),
+            params![subject.id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    let top3: Vec<serde_json::Value> = serde_json::from_str::<Vec<serde_json::Value>>(&top3_raw)
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            let name = e.get("name")?.as_str()?.to_string();
+            let gain = e.get("path_gain")?.as_f64()?;
+            let value = at(&name)?;
+            Some(serde_json::json!([name, value, gain]))
+        })
+        .collect();
+    let envelope = serde_json::json!({
+        "task": "explain",
+        "surface": surface,
+        "score": score,
+        "threshold": surface.as_ref().and_then(|s| thresholds.get(s).copied()),
+        "top3": top3,
+        "window": {
+            "turns_held": at("turns_held"),
+            "ratio_4xx": at("ratio_4xx"),
+            "distinct_routes": at("distinct_routes"),
+            "iri_cv": at("gap_cv"),
+            "asset_ratio": asset_ratio,
+        },
+    });
+    Ok((
+        envelope,
+        ExplainMeta {
+            surface,
+            score,
+            score_ts: ts_us,
+        },
+    ))
+}
+
+fn explain_summary(subject: &Subject, meta: &ExplainMeta) -> String {
+    serde_json::json!({
+        "subject": format!("{}:{}", subject.scope, subject.id),
+        "score_ts": meta.score_ts,
+        "score": meta.score,
+    })
+    .to_string()
+}
+
+fn write_explanation(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+    meta: &ExplainMeta,
+    explanation: &str,
+) -> Result<(), LlmError> {
+    conn.execute(
+        "UPDATE scores SET explanation = ?1 \
+         WHERE scope = ?2 AND scope_id = ?3 AND ts_us = ?4",
+        params![explanation, scope, subject_id, meta.score_ts],
+    )?;
+    Ok(())
+}
+
+/// Normalize a (method, route) pair into the classifier's pattern key.
+/// Routes already arrive pattern-shaped; residual id segments (plain
+/// integers, UUIDs, long hex) fold to `{id}` defensively.
+pub fn normalize_pattern(method: &str, route: &str) -> (String, String) {
+    let is_uuid = |s: &str| {
+        s.len() == 36
+            && s.bytes().filter(|b| *b == b'-').count() == 4
+            && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+    };
+    let pattern = route
+        .split('/')
+        .map(|seg| {
+            if !seg.is_empty()
+                && (seg.bytes().all(|b| b.is_ascii_digit()) || is_uuid(seg) || seg.len() >= 16)
+            {
+                "{id}"
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    use sha2::Digest as _;
+    let hash = format!(
+        "{:x}",
+        sha2::Sha256::digest(format!("{method} {pattern}").as_bytes())
+    );
+    (hash, pattern)
+}
+
+/// The point-3 envelope of docs/llm.md section 8.3, built from the
+/// stored pattern row. The capture layer deliberately never stores raw
+/// query strings or body slices, so those ride as explicit nulls and
+/// the prompt judges the pattern alone.
+pub fn build_classify_envelope(
+    conn: &Connection,
+    pattern_hash: &str,
+) -> Result<(serde_json::Value, ClassifyMeta), LlmError> {
+    let (method, pattern): (String, String) = conn
+        .query_row(
+            "SELECT method, pattern FROM payload_patterns WHERE pattern_hash = ?1",
+            params![pattern_hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                LlmError::NoSubject("pattern".to_string(), pattern_hash.to_string())
+            }
+            e => LlmError::Sqlite(e),
+        })?;
+    let envelope = serde_json::json!({
+        "task": "classify",
+        "method": method,
+        "path_pattern": pattern,
+        "sample_query": serde_json::Value::Null,
+        "body_slice": serde_json::Value::Null,
+        "content_type": serde_json::Value::Null,
+    });
+    Ok((
+        envelope,
+        ClassifyMeta {
+            pattern_hash: pattern_hash.to_string(),
+            method,
+            pattern,
+        },
+    ))
+}
+
+fn classify_summary(meta: &ClassifyMeta) -> String {
+    serde_json::json!({
+        "subject": format!("pattern:{}", meta.pattern_hash),
+        "method": meta.method,
+        "pattern": meta.pattern,
+    })
+    .to_string()
+}
+
+fn write_class(
+    conn: &Connection,
+    meta: &ClassifyMeta,
+    category: &str,
+    confidence: f64,
+    call_id: i64,
+    now: i64,
+) -> Result<(), LlmError> {
+    conn.execute(
+        "INSERT INTO payload_classes (pattern_hash, category, confidence, call_id, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5) \
+         ON CONFLICT(pattern_hash) DO UPDATE SET category = excluded.category, \
+         confidence = excluded.confidence, call_id = excluded.call_id, \
+         created_at = excluded.created_at",
+        params![meta.pattern_hash, category, confidence, call_id, now],
+    )?;
+    Ok(())
+}
+
+/// The point-4 envelope of docs/llm.md section 8.4: the cluster's
+/// shape, the grammar excerpt, and two install-set examples.
+pub fn build_draft_envelope(
+    conn: &Connection,
+    cluster_key: &str,
+) -> Result<(serde_json::Value, DraftMeta), LlmError> {
+    let surfaces: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT surface FROM turns WHERE cluster_key = ?1 AND surface IS NOT NULL",
+        )?
+        .query_map(params![cluster_key], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if surfaces.is_empty() {
+        return Err(LlmError::NoSubject(
+            "cluster".to_string(),
+            cluster_key.to_string(),
+        ));
+    }
+    let rows: i64 = conn.query_row(
+        "SELECT count(*) FROM feature_vectors WHERE scope = 'cluster' AND key = ?1",
+        params![cluster_key],
+        |r| r.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT vector FROM feature_vectors \
+         WHERE scope = 'cluster' AND key = ?1 ORDER BY ts_us DESC LIMIT 20",
+    )?;
+    let mut shared: HashMap<&str, (f32, f32)> = HashMap::new();
+    for v in stmt.query_map(params![cluster_key], |r| r.get::<_, String>(0))? {
+        let values: Vec<f32> = serde_json::from_str(&v?).unwrap_or_default();
+        for name in [
+            "turns_held",
+            "ratio_4xx",
+            "ratio_404",
+            "distinct_routes",
+            "verb_post_ratio",
+            "gap_cv",
+        ] {
+            let Some(i) = features::NAMES.iter().position(|n| *n == name) else {
+                continue;
+            };
+            let Some(v) = values.get(i).copied() else {
+                continue;
+            };
+            shared
+                .entry(name)
+                .and_modify(|(lo, hi)| {
+                    *lo = lo.min(v);
+                    *hi = hi.max(v);
+                })
+                .or_insert((v, v));
+        }
+    }
+    let shared: HashMap<&str, Vec<f32>> = shared
+        .into_iter()
+        .map(|(k, (lo, hi))| (k, vec![lo, hi]))
+        .collect();
+    let mut stmt = conn.prepare(
+        "SELECT body FROM rules WHERE origin_kind = 'install' AND state = 'active' \
+         ORDER BY id LIMIT 2",
+    )?;
+    let examples: Vec<serde_json::Value> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|b| b.ok().and_then(|b| serde_json::from_str(&b).ok()))
+        .collect();
+    let envelope = serde_json::json!({
+        "task": "draft_rule",
+        "cluster": {
+            "key": cluster_key,
+            "surfaces": surfaces,
+            "row_count": rows,
+            "shared": shared,
+        },
+        "grammar": GRAMMAR_MD,
+        "examples": examples,
+    });
+    Ok((
+        envelope,
+        DraftMeta {
+            cluster_key: cluster_key.to_string(),
+            rows,
+        },
+    ))
+}
+
+fn draft_summary(meta: &DraftMeta) -> String {
+    serde_json::json!({
+        "subject": format!("cluster:{}", meta.cluster_key),
+        "rows": meta.rows,
+    })
+    .to_string()
+}
+
+/// A draft that parsed, with its row id, or the parse error when it did
+/// not: only parsing drafts land in `rule_drafts`.
+pub enum DraftLanded {
+    Row(i64),
+    Rejected(String),
+}
+
+fn write_draft(
+    conn: &Connection,
+    meta: &DraftMeta,
+    rule_text: &str,
+    reason: &str,
+    call_id: i64,
+    now: i64,
+) -> Result<DraftLanded, LlmError> {
+    let parsed: Result<crate::rules::model::Rule, _> = serde_json::from_str(rule_text);
+    let error = match &parsed {
+        Err(e) => Some(format!("not JSON: {e}")),
+        Ok(rule) => {
+            let problems = rule.validate(now);
+            (!problems.is_empty()).then(|| {
+                problems
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        }
+    };
+    if let Some(error) = error {
+        return Ok(DraftLanded::Rejected(error));
+    }
+    conn.execute(
+        "INSERT INTO rule_drafts (cluster_key, rule, reason, parse_ok, parse_error, call_id, created_at) \
+         VALUES (?1, ?2, ?3, 1, NULL, ?4, ?5)",
+        params![meta.cluster_key, rule_text, reason, call_id, now],
+    )?;
+    Ok(DraftLanded::Row(conn.last_insert_rowid()))
+}
+
+/// One generic enqueue: lands only when no job for the point and
+/// subject is open and the daily budgets hold. Label keeps its own
+/// stricter SQL; explain adds its cooldown at the call site.
+pub const ENQUEUE_POINT_SQL: &str =
+    "INSERT INTO llm_jobs (point, scope, subject_id, status, attempts, enqueued_by, created_at, updated_at, not_before) \
+     SELECT ?1, ?2, ?3, 'queued', 0, ?4, ?5, ?5, ?5 \
+     WHERE NOT EXISTS (SELECT 1 FROM llm_jobs WHERE point = ?1 AND scope = ?2 AND subject_id = ?3 AND status IN ('queued', 'running')) \
+     AND (SELECT count(*) FROM llm_calls WHERE point = ?1 AND created_at >= (?5 / 86400) * 86400) < ?6 \
+     AND (SELECT coalesce(sum(coalesce(prompt_tokens, 0) + coalesce(completion_tokens, 0)), 0) FROM llm_calls WHERE point = ?1 AND created_at >= (?5 / 86400) * 86400) < ?7";
+
+#[allow(clippy::too_many_arguments)]
+pub fn enqueue_point(
+    conn: &Connection,
+    point: &str,
+    scope: &str,
+    subject_id: &str,
+    enqueued_by: &str,
+    now: i64,
+    daily_calls: u32,
+    daily_tokens: u32,
+) -> Result<bool, LlmError> {
+    let n = conn.execute(
+        ENQUEUE_POINT_SQL,
+        params![
+            point,
+            scope,
+            subject_id,
+            enqueued_by,
+            now,
+            daily_calls,
+            daily_tokens,
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// An explanation alongside a fresh proposal, at most one open or
+/// recent job per subject per cooldown: explanations ride the latest
+/// score row, so repeats within the hour would re-read the window.
+#[allow(clippy::too_many_arguments)]
+pub fn enqueue_explain(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+    enqueued_by: &str,
+    now: i64,
+    daily_calls: u32,
+    daily_tokens: u32,
+) -> Result<bool, LlmError> {
+    let recent: i64 = conn.query_row(
+        "SELECT count(*) FROM llm_jobs WHERE point = 'explain' AND scope = ?1 AND subject_id = ?2 \
+         AND (status IN ('queued', 'running') OR (status = 'done' AND updated_at >= ?3 - ?4))",
+        params![scope, subject_id, now, PROPOSAL_COOLDOWN_S],
+        |r| r.get(0),
+    )?;
+    if recent > 0 {
+        return Ok(false);
+    }
+    enqueue_point(
+        conn,
+        "explain",
+        scope,
+        subject_id,
+        enqueued_by,
+        now,
+        daily_calls,
+        daily_tokens,
+    )
+}
+
 // ---------- Executor ----------
 
 /// One physical POST and what came back: a response when one was
@@ -1287,21 +1744,16 @@ pub struct Exchange {
 }
 
 pub enum ExecutionOutcome {
-    Proposed(LabelProposal),
+    /// The completion validated: the parsed JSON, verbatim.
+    Validated { parsed: String },
     /// Validation failed with no retries left; carries the first error.
-    Invalid {
-        first_error: String,
-    },
+    Invalid { first_error: String },
     /// `length` with empty content at double budget: dropped and logged.
     LengthExhausted,
     /// A non-200 needs the caller's policy (requeue or fail).
-    Http {
-        status: u16,
-    },
+    Http { status: u16 },
     /// A transport failure needs the caller's policy.
-    Transport {
-        error: String,
-    },
+    Transport { error: String },
 }
 
 pub struct Execution {
@@ -1338,20 +1790,49 @@ fn proposal_json(p: &LabelProposal) -> String {
     .to_string()
 }
 
-/// Run a point-1 call to its end: at most three physical POSTs. A
-/// `length` with empty content is retried once at double the budget;
-/// an invalid proposal is retried once with the error appended. Every
-/// exchange comes back in the transcript; the caller logs all of them
-/// and applies its own policy to HTTP and transport failures.
-pub fn execute_label_call(
+/// Parse and validate one completion's content for any point: the
+/// canonical parsed JSON on success, the first error otherwise.
+fn parsed_from_content(point: &str, content: &str) -> Result<String, String> {
+    let obj =
+        extract_json(content).ok_or_else(|| "no JSON object in the completion".to_string())?;
+    let v: serde_json::Value = serde_json::from_str(obj)
+        .map_err(|e| format!("the completion's JSON does not parse: {e}"))?;
+    match point {
+        "label" => {
+            let p = validate_label(&v)?;
+            Ok(proposal_json(&p))
+        }
+        "explain" => {
+            let e = validate_explain(&v)?;
+            Ok(serde_json::json!({ "explanation": e }).to_string())
+        }
+        "classify" => {
+            let (c, f) = validate_classify(&v)?;
+            Ok(serde_json::json!({ "category": c, "confidence": f }).to_string())
+        }
+        "draft" => {
+            let (rule, reason) = validate_draft(&v)?;
+            Ok(serde_json::json!({ "rule": rule, "reason": reason }).to_string())
+        }
+        p => Err(format!("unknown point {p}")),
+    }
+}
+
+/// Run one call to its end: at most three physical POSTs. A `length`
+/// with empty content is retried once at double the budget; an invalid
+/// completion is retried once with the error appended. Every exchange
+/// comes back in the transcript; the caller logs all of them and
+/// applies its own policy to HTTP and transport failures.
+pub fn execute_call(
     url: &str,
     key: &str,
     model: &str,
+    point: &str,
     envelope: &serde_json::Value,
     json_mode: JsonMode,
     effort: Option<&str>,
 ) -> Result<Execution, LlmError> {
-    let base = max_tokens("label")?;
+    let base = max_tokens(point)?;
     let mut budget = base;
     let mut length_used = false;
     let mut validation_used = false;
@@ -1359,7 +1840,7 @@ pub fn execute_label_call(
     let mut suffix: Option<String> = None;
     let mut exchanges = Vec::new();
     loop {
-        let mut request = build_request(model, "label", envelope, json_mode, effort, Some(budget))?;
+        let mut request = build_request(model, point, envelope, json_mode, effort, Some(budget))?;
         if let Some(s) = &suffix {
             let user = request
                 .pointer("/messages/1/content")
@@ -1433,17 +1914,17 @@ pub fn execute_label_call(
                 outcome: ExecutionOutcome::LengthExhausted,
             });
         }
-        match proposal_from_content(&completion.content) {
-            Ok(p) => {
+        match parsed_from_content(point, &completion.content) {
+            Ok(parsed) => {
                 exchanges.push(exchange_for(
                     &request_text,
                     &res,
                     Some(&completion),
-                    Some(proposal_json(&p)),
+                    Some(parsed.clone()),
                 ));
                 return Ok(Execution {
                     exchanges,
-                    outcome: ExecutionOutcome::Proposed(p),
+                    outcome: ExecutionOutcome::Validated { parsed },
                 });
             }
             Err(e) => {
@@ -1491,22 +1972,50 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
     let Some((id, point, scope, subject_id, attempts)) = job else {
         return Ok((DrainOutcome::Empty, mode()));
     };
-    if point != "label" {
-        let out = fail(&conn, id, now, &format!("point `{point}` is not built yet"))?;
-        return Ok((out, mode()));
-    }
     let subject = Subject {
         scope: scope.clone(),
         id: subject_id.clone(),
     };
-    let built = build_label_envelope(
-        &conn,
-        &ctx.classes,
-        &subject,
-        &ctx.thresholds,
-        now * 1_000_000,
-    );
-    let (envelope, meta) = match built {
+    enum Built {
+        Label(serde_json::Value, LabelMeta),
+        Explain(serde_json::Value, ExplainMeta),
+        Classify(serde_json::Value, ClassifyMeta),
+        Draft(serde_json::Value, DraftMeta),
+    }
+    let built: Result<Built, LlmError> = match point.as_str() {
+        "label" => build_label_envelope(
+            &conn,
+            &ctx.classes,
+            &subject,
+            &ctx.thresholds,
+            now * 1_000_000,
+        )
+        .map(|(e, m)| Built::Label(e, m)),
+        "explain" => build_explain_envelope(&conn, &subject, &ctx.thresholds)
+            .map(|(e, m)| Built::Explain(e, m)),
+        "classify" => {
+            if subject.scope != "pattern" {
+                Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )))
+            } else {
+                build_classify_envelope(&conn, &subject.id).map(|(e, m)| Built::Classify(e, m))
+            }
+        }
+        "draft" => {
+            if subject.scope != "cluster" {
+                Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )))
+            } else {
+                build_draft_envelope(&conn, &subject.id).map(|(e, m)| Built::Draft(e, m))
+            }
+        }
+        p => Err(LlmError::Point(p.to_string())),
+    };
+    let built = match built {
         Ok(b) => b,
         Err(e) => {
             let out = fail(&conn, id, now, &e.to_string())?;
@@ -1515,7 +2024,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
     };
     if let Err(e) = budget_check(
         &conn,
-        "label",
+        &point,
         now,
         ctx.exec.daily_calls,
         ctx.exec.daily_tokens,
@@ -1530,16 +2039,22 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
         )?;
         return Ok((out, mode()));
     }
-    let hash = prompt_hash("label")?;
-    let summary = input_summary(&subject, &meta);
+    let hash = prompt_hash(&point)?;
+    let (envelope, summary) = match &built {
+        Built::Label(e, m) => (e.clone(), input_summary(&subject, m)),
+        Built::Explain(e, m) => (e.clone(), explain_summary(&subject, m)),
+        Built::Classify(e, m) => (e.clone(), classify_summary(m)),
+        Built::Draft(e, m) => (e.clone(), draft_summary(m)),
+    };
     if ctx.exec.mode == LlmMode::Dry {
         // Prompt mode, no effort: dry never probes (a probe is a
         // request), so the logged request is the unprobed shape.
-        let model = ctx.exec.model_for("label");
-        let request = build_request(model, "label", &envelope, JsonMode::Prompt, None, None)?;
+        let model = ctx.exec.model_for(&point);
+        let request = build_request(model, &point, &envelope, JsonMode::Prompt, None, None)?;
         write_call(
             &conn,
             Some(id),
+            &point,
             model,
             &hash,
             JsonMode::Prompt,
@@ -1584,12 +2099,13 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
         json: Some(json_mode),
         effort: Some(effort_supported),
     };
-    let model = ctx.exec.model_for("label");
-    let effort = effort_supported.then(|| effort_for("label")).transpose()?;
-    let execution = execute_label_call(
+    let model = ctx.exec.model_for(&point);
+    let effort = effort_supported.then(|| effort_for(&point)).transpose()?;
+    let execution = execute_call(
         &ctx.exec.url,
         &ctx.exec.key,
         model,
+        &point,
         &envelope,
         json_mode,
         effort,
@@ -1597,6 +2113,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
     let call_ids = write_exchanges(
         &conn,
         Some(id),
+        &point,
         model,
         &hash,
         json_mode,
@@ -1612,9 +2129,42 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
         )
     };
     match execution.outcome {
-        ExecutionOutcome::Proposed(p) => {
-            let call_id = *call_ids.last().expect("a proposal logged its call");
-            write_proposal(&conn, &scope, &subject_id, &meta, &p, call_id, now)?;
+        ExecutionOutcome::Validated { parsed } => {
+            let call_id = *call_ids.last().expect("a completion logged its call");
+            let v: serde_json::Value = serde_json::from_str(&parsed)?;
+            match &built {
+                Built::Label(_, meta) => {
+                    let p = validate_label(&v).map_err(LlmError::Validate)?;
+                    write_proposal(&conn, &scope, &subject_id, meta, &p, call_id, now)?;
+                    enqueue_explain(
+                        &conn,
+                        &scope,
+                        &subject_id,
+                        "proposer",
+                        now,
+                        ctx.exec.daily_calls,
+                        ctx.exec.daily_tokens,
+                    )?;
+                }
+                Built::Explain(_, meta) => {
+                    let e = validate_explain(&v).map_err(LlmError::Validate)?;
+                    write_explanation(&conn, &scope, &subject_id, meta, &e)?;
+                }
+                Built::Classify(_, meta) => {
+                    let (category, confidence) =
+                        validate_classify(&v).map_err(LlmError::Validate)?;
+                    write_class(&conn, meta, &category, confidence, call_id, now)?;
+                }
+                Built::Draft(_, meta) => {
+                    let (rule_text, reason) = validate_draft(&v).map_err(LlmError::Validate)?;
+                    if let DraftLanded::Rejected(error) =
+                        write_draft(&conn, meta, &rule_text, &reason, call_id, now)?
+                    {
+                        let out = fail(&conn, id, now, &format!("draft rejected: {error}"))?;
+                        return Ok((out, settled));
+                    }
+                }
+            }
             done(&conn)?;
             Ok((DrainOutcome::Done { job: id }, settled))
         }
@@ -1624,7 +2174,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
                 id,
                 now,
                 &format!(
-                    "proposal invalid after {} attempts, first: {first_error}",
+                    "{point} invalid after {} attempts, first: {first_error}",
                     execution.exchanges.len()
                 ),
             )?;
@@ -1676,18 +2226,54 @@ pub fn show_label(
     thresholds: &HashMap<String, f64>,
     subject: &Subject,
 ) -> Result<serde_json::Value, LlmError> {
+    show_point(db, model, classes, thresholds, "label", subject)
+}
+
+/// The exact request `send` would put on the wire, without sending it.
+/// Prompt mode, no effort: show never probes, so the printed request is
+/// the unprobed shape.
+pub fn show_point(
+    db: &Path,
+    model: &str,
+    classes: &Ja4Classes,
+    thresholds: &HashMap<String, f64>,
+    point: &str,
+    subject: &Subject,
+) -> Result<serde_json::Value, LlmError> {
     let conn = open_db(db)?;
     let now = now_s();
-    let (envelope, _) = build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
-    // Prompt mode, no effort: show never probes, so the printed
-    // request is the unprobed shape.
-    build_request(model, "label", &envelope, JsonMode::Prompt, None, None)
+    let envelope = match point {
+        "label" => build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)
+            .map(|(e, _)| e)?,
+        "explain" => build_explain_envelope(&conn, subject, thresholds).map(|(e, _)| e)?,
+        "classify" => {
+            if subject.scope != "pattern" {
+                return Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )));
+            }
+            build_classify_envelope(&conn, &subject.id).map(|(e, _)| e)?
+        }
+        "draft" => {
+            if subject.scope != "cluster" {
+                return Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )));
+            }
+            build_draft_envelope(&conn, &subject.id).map(|(e, _)| e)?
+        }
+        p => return Err(LlmError::Point(p.to_string())),
+    };
+    build_request(model, point, &envelope, JsonMode::Prompt, None, None)
 }
 
 pub struct SendOutput {
     /// The raw response bodies, one per attempt (validation retries once).
     pub raws: Vec<String>,
-    pub parsed: Option<LabelProposal>,
+    /// The validated completion as canonical JSON.
+    pub parsed: Option<String>,
     pub call_id: Option<i64>,
 }
 
@@ -1709,28 +2295,105 @@ pub fn send_label(
     effort: Option<&str>,
     resend_of: Option<i64>,
 ) -> Result<SendOutput, LlmError> {
+    send_point(
+        db, exec, classes, thresholds, "label", subject, effort, resend_of,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn send_point(
+    db: &Path,
+    exec: &Exec,
+    classes: &Ja4Classes,
+    thresholds: &HashMap<String, f64>,
+    point: &str,
+    subject: &Subject,
+    effort: Option<&str>,
+    resend_of: Option<i64>,
+) -> Result<SendOutput, LlmError> {
     if exec.url.is_empty() || exec.key.is_empty() {
         return Err(LlmError::Unconfigured);
     }
     let conn = open_db(db)?;
     let now = now_s();
-    budget_check(&conn, "label", now, exec.daily_calls, exec.daily_tokens)?;
-    let (envelope, meta) =
-        build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
-    let model = exec.model_for("label");
-    let execution = execute_label_call(
+    budget_check(&conn, point, now, exec.daily_calls, exec.daily_tokens)?;
+    let model = exec.model_for(point);
+    /// Lands one validated completion; the closure per point.
+    type WriteCompletion =
+        Box<dyn FnOnce(&Connection, &serde_json::Value, i64) -> Result<(), LlmError>>;
+    let (envelope, summary, write): (serde_json::Value, String, WriteCompletion) = match point {
+        "label" => {
+            let (e, meta) =
+                build_label_envelope(&conn, classes, subject, thresholds, now * 1_000_000)?;
+            let summary = input_summary(subject, &meta);
+            let (scope, id) = (subject.scope.clone(), subject.id.clone());
+            let write = move |conn: &Connection, v: &serde_json::Value, call_id: i64| {
+                let p = validate_label(v).map_err(LlmError::Validate)?;
+                write_proposal(conn, &scope, &id, &meta, &p, call_id, now)
+            };
+            (e, summary, Box::new(write))
+        }
+        "explain" => {
+            let (e, meta) = build_explain_envelope(&conn, subject, thresholds)?;
+            let summary = explain_summary(subject, &meta);
+            let (scope, id) = (subject.scope.clone(), subject.id.clone());
+            let write = move |conn: &Connection, v: &serde_json::Value, _| {
+                let text = validate_explain(v).map_err(LlmError::Validate)?;
+                write_explanation(conn, &scope, &id, &meta, &text)
+            };
+            (e, summary, Box::new(write))
+        }
+        "classify" => {
+            if subject.scope != "pattern" {
+                return Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )));
+            }
+            let (e, meta) = build_classify_envelope(&conn, &subject.id)?;
+            let summary = classify_summary(&meta);
+            let write = move |conn: &Connection, v: &serde_json::Value, call_id: i64| {
+                let (category, confidence) = validate_classify(v).map_err(LlmError::Validate)?;
+                write_class(conn, &meta, &category, confidence, call_id, now)
+            };
+            (e, summary, Box::new(write))
+        }
+        "draft" => {
+            if subject.scope != "cluster" {
+                return Err(LlmError::Subject(format!(
+                    "{}:{}",
+                    subject.scope, subject.id
+                )));
+            }
+            let (e, meta) = build_draft_envelope(&conn, &subject.id)?;
+            let summary = draft_summary(&meta);
+            let write = move |conn: &Connection, v: &serde_json::Value, call_id: i64| {
+                let (rule_text, reason) = validate_draft(v).map_err(LlmError::Validate)?;
+                match write_draft(conn, &meta, &rule_text, &reason, call_id, now)? {
+                    DraftLanded::Row(_) => Ok(()),
+                    DraftLanded::Rejected(error) => {
+                        Err(LlmError::Validate(format!("draft rejected: {error}")))
+                    }
+                }
+            };
+            (e, summary, Box::new(write))
+        }
+        p => return Err(LlmError::Point(p.to_string())),
+    };
+    let execution = execute_call(
         &exec.url,
         &exec.key,
         model,
+        point,
         &envelope,
         JsonMode::Prompt,
         effort,
     )?;
-    let hash = prompt_hash("label")?;
-    let summary = input_summary(subject, &meta);
+    let hash = prompt_hash(point)?;
     let call_ids = write_exchanges(
         &conn,
         None,
+        point,
         model,
         &hash,
         JsonMode::Prompt,
@@ -1745,17 +2408,18 @@ pub fn send_label(
         .filter_map(|e| e.attempt.response.clone())
         .collect();
     match execution.outcome {
-        ExecutionOutcome::Proposed(p) => {
-            let call_id = *call_ids.last().expect("a proposal logged its call");
-            write_proposal(&conn, &subject.scope, &subject.id, &meta, &p, call_id, now)?;
+        ExecutionOutcome::Validated { parsed } => {
+            let call_id = *call_ids.last().expect("a completion logged its call");
+            let v: serde_json::Value = serde_json::from_str(&parsed)?;
+            write(&conn, &v, call_id)?;
             Ok(SendOutput {
                 raws,
-                parsed: Some(p),
+                parsed: Some(parsed),
                 call_id: Some(call_id),
             })
         }
         ExecutionOutcome::Invalid { first_error } => Err(LlmError::Validate(format!(
-            "proposal invalid after {} attempts, first: {first_error}",
+            "{point} invalid after {} attempts, first: {first_error}",
             execution.exchanges.len()
         ))),
         ExecutionOutcome::LengthExhausted => Err(LlmError::LengthExhausted),
@@ -2084,7 +2748,7 @@ mod tests {
             schema["response_format"]["json_schema"]["schema"]["required"][0],
             "label"
         );
-        assert!(build_request("m", "explain", &env, JsonMode::Prompt, None, None).is_err());
+        assert!(build_request("m", "triage", &env, JsonMode::Prompt, None, None).is_err());
         assert!(prompt.get("reasoning_effort").is_none());
         let with_effort =
             build_request("m", "label", &env, JsonMode::Prompt, Some("medium"), None).unwrap();
@@ -2331,6 +2995,117 @@ mod tests {
     }
 
     #[test]
+    fn drain_dry_logs_the_explain_request() {
+        let db = tmp_db("dry-explain");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_point(
+                &conn,
+                "explain",
+                "actor",
+                "aa",
+                "test",
+                now_s(),
+                500,
+                500_000
+            )
+            .unwrap());
+        }
+        let ctx = drain_ctx(exec_for("http://127.0.0.1:9", LlmMode::Dry), None, None);
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let call: (String, String, Option<String>) = conn
+            .query_row("SELECT point, request, response FROM llm_calls", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(call.0, "explain");
+        let req: serde_json::Value = serde_json::from_str(&call.1).unwrap();
+        let env: serde_json::Value =
+            serde_json::from_str(req["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(env["task"], "explain");
+        assert_eq!(call.2, None);
+    }
+
+    #[test]
+    fn drain_dry_logs_the_classify_request() {
+        let db = tmp_db("dry-classify");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO payload_patterns (pattern_hash, method, pattern, first_seen_s, last_seen_s, turns) \
+                 VALUES ('ph', 'GET', '/venues/{id}', 0, 0, 3)",
+                [],
+            )
+            .unwrap();
+            assert!(enqueue_point(
+                &conn,
+                "classify",
+                "pattern",
+                "ph",
+                "test",
+                now_s(),
+                500,
+                500_000
+            )
+            .unwrap());
+        }
+        let ctx = drain_ctx(exec_for("http://127.0.0.1:9", LlmMode::Dry), None, None);
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let call: (String, String, Option<String>) = conn
+            .query_row("SELECT point, request, response FROM llm_calls", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(call.0, "classify");
+        let req: serde_json::Value = serde_json::from_str(&call.1).unwrap();
+        let env: serde_json::Value =
+            serde_json::from_str(req["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(env["task"], "classify");
+        assert_eq!(call.2, None);
+    }
+
+    #[test]
+    fn drain_dry_logs_the_draft_request() {
+        let db = tmp_db("dry-draft");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_point(
+                &conn,
+                "draft",
+                "cluster",
+                "cc",
+                "test",
+                now_s(),
+                500,
+                500_000
+            )
+            .unwrap());
+        }
+        let ctx = drain_ctx(exec_for("http://127.0.0.1:9", LlmMode::Dry), None, None);
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let call: (String, String, Option<String>) = conn
+            .query_row("SELECT point, request, response FROM llm_calls", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(call.0, "draft");
+        let req: serde_json::Value = serde_json::from_str(&call.1).unwrap();
+        let env: serde_json::Value =
+            serde_json::from_str(req["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(env["task"], "draft_rule");
+        assert_eq!(call.2, None);
+    }
+
+    #[test]
     fn drain_live_writes_the_proposal() {
         let db = tmp_db("live");
         fixture(&db);
@@ -2405,7 +3180,7 @@ mod tests {
                 }
             ),
         };
-        assert!(why.contains("proposal invalid after 2 attempts"), "{why}");
+        assert!(why.contains("label invalid after 2 attempts"), "{why}");
         let conn = Connection::open(&db).unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
@@ -2668,7 +3443,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.raws.len(), 1);
-        assert_eq!(out.parsed.as_ref().unwrap().label, "malicious");
+        let parsed: serde_json::Value = serde_json::from_str(out.parsed.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["label"], "malicious");
         let bodies = seen.lock().unwrap();
         let req: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
         assert_eq!(req["reasoning_effort"], "medium");

@@ -42,6 +42,7 @@ fn main() {
         ["llm", "show", rest @ ..] => run_llm_show(rest),
         ["llm", "send", rest @ ..] => run_llm_send(rest),
         ["llm", "subjects", rest @ ..] => run_llm_subjects(rest),
+        ["llm", "drain"] => run_llm_drain(),
         _ => {
             eprintln!("{FULL_USAGE}");
             std::process::exit(2);
@@ -49,7 +50,7 @@ fn main() {
     }
 }
 
-const FULL_USAGE: &str = "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id> | llm subjects [--scope actor|cluster] [--top <n>]]";
+const FULL_USAGE: &str = "usage: leesided [serve | rules schema | rules validate <file> | rules export | tap [--probe] [--iface X] [--ports 80,443] [--tls-ports 443] [--sock PATH] | label-import <manifest> | export --since <unix_s> --run-id <id> --out <csv> | report shadow --since <unix_s> | review [--top <n>] | llm show --point <point> --subject <scope>:<id> | llm send --point <point> --subject <scope>:<id> | llm subjects [--scope actor|cluster] [--top <n>] | llm drain]";
 
 /// Every subcommand answers `--help` (or `-h`) with its usage line.
 fn print_help(words: &[&str]) {
@@ -61,12 +62,13 @@ fn print_help(words: &[&str]) {
         ["export", ..] => "usage: leesided export --since <unix_s> --run-id <id> --out <csv>",
         ["report", ..] => "usage: leesided report shadow --since <unix_s>",
         ["review", ..] => "usage: leesided review [--top <n>]",
-        ["llm", "show", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id>",
-        ["llm", "send", ..] => "usage: leesided llm send --point label --subject <actor|cluster>:<id>",
+        ["llm", "show", ..] => "usage: leesided llm show --point label|explain|classify|draft --subject <actor|cluster|pattern>:<id>",
+        ["llm", "send", ..] => "usage: leesided llm send --point label|explain|classify|draft --subject <actor|cluster|pattern>:<id>",
         ["llm", "subjects", ..] => {
             "usage: leesided llm subjects [--scope actor|cluster] [--top <n>]"
         }
-        ["llm", ..] => "usage: leesided llm show --point label --subject <actor|cluster>:<id> | llm send --point label --subject <actor|cluster>:<id> | llm subjects [--scope actor|cluster] [--top <n>]",
+        ["llm", "drain", ..] => "usage: leesided llm drain (drains the queued jobs in LEESIDED_LLM_MODE)",
+        ["llm", ..] => "usage: leesided llm show --point <point> --subject <scope>:<id> | llm send --point <point> --subject <scope>:<id> | llm subjects [--scope actor|cluster] [--top <n>] | llm drain",
         _ => FULL_USAGE,
     };
     println!("{line}");
@@ -400,8 +402,60 @@ fn llm_args(args: &[&str], cmd: &str) -> (String, String) {
     match (point, subject) {
         (Some(p), Some(s)) => (p, s),
         _ => {
-            eprintln!("leesided llm {cmd}: --point label --subject <actor|cluster>:<id> required");
+            eprintln!(
+                "leesided llm {cmd}: --point label|explain|classify|draft --subject <actor|cluster|pattern>:<id> required"
+            );
             std::process::exit(2);
+        }
+    }
+}
+
+/// Drain the queued jobs the way the daemon's worker tick does, in
+/// the configured mode: in dry this logs the full request for every
+/// queued job and sends nothing.
+fn run_llm_drain() {
+    let cfg = Config::from_env();
+    let Some(exec) = leesided::llm::Exec::from_config(&cfg) else {
+        eprintln!(
+            "leesided llm drain: LLM is not configured (LEESIDED_LLM_URL and LEESIDED_LLM_KEY)"
+        );
+        std::process::exit(2);
+    };
+    let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
+    let thresholds = llm_thresholds(&cfg);
+    let mut settled = leesided::llm::DrainMode {
+        json: None,
+        effort: None,
+    };
+    for _ in 0..25 {
+        let ctx = leesided::llm::DrainCtx {
+            exec: exec.clone(),
+            json_mode: settled.json,
+            effort_supported: settled.effort,
+            classes: classes.clone(),
+            thresholds: thresholds.clone(),
+        };
+        match leesided::llm::drain_once(&cfg.db, &ctx) {
+            Ok((leesided::llm::DrainOutcome::Empty, _)) => break,
+            Ok((out, mode)) => {
+                settled = mode;
+                match out {
+                    leesided::llm::DrainOutcome::Done { job } => {
+                        println!("drain: job {job} done");
+                    }
+                    leesided::llm::DrainOutcome::Deferred { job, why } => {
+                        println!("drain: job {job} deferred ({why})");
+                    }
+                    leesided::llm::DrainOutcome::Failed { job, why } => {
+                        println!("drain: job {job} failed ({why})");
+                    }
+                    leesided::llm::DrainOutcome::Empty => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("leesided llm drain: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -422,8 +476,10 @@ fn llm_thresholds(cfg: &Config) -> std::collections::HashMap<String, f64> {
 fn run_llm_show(args: &[&str]) {
     let cfg = Config::from_env();
     let (point, subject) = llm_args(args, "show");
-    if point != "label" {
-        eprintln!("leesided llm show: unknown point `{point}` (built: label)");
+    if !["label", "explain", "classify", "draft"].contains(&point.as_str()) {
+        eprintln!(
+            "leesided llm show: unknown point `{point}` (built: label explain classify draft)"
+        );
         std::process::exit(2);
     }
     let subject = leesided::llm::parse_subject(&subject).unwrap_or_else(|e| {
@@ -431,11 +487,12 @@ fn run_llm_show(args: &[&str]) {
         std::process::exit(2);
     });
     let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
-    match leesided::llm::show_label(
+    match leesided::llm::show_point(
         &cfg.db,
         &cfg.llm_model,
         &classes,
         &llm_thresholds(&cfg),
+        &point,
         &subject,
     ) {
         Ok(request) => println!("{}", serde_json::to_string_pretty(&request).expect("json")),
@@ -449,8 +506,10 @@ fn run_llm_show(args: &[&str]) {
 fn run_llm_send(args: &[&str]) {
     let cfg = Config::from_env();
     let (point, subject) = llm_args(args, "send");
-    if point != "label" {
-        eprintln!("leesided llm send: unknown point `{point}` (built: label)");
+    if !["label", "explain", "classify", "draft"].contains(&point.as_str()) {
+        eprintln!(
+            "leesided llm send: unknown point `{point}` (built: label explain classify draft)"
+        );
         std::process::exit(2);
     }
     let subject = leesided::llm::parse_subject(&subject).unwrap_or_else(|e| {
@@ -491,11 +550,12 @@ fn run_llm_send(args: &[&str]) {
         }
     };
     let classes = leesided::tap::classes::Ja4Classes::load(cfg.ja4_classes.as_deref());
-    match leesided::llm::send_label(
+    match leesided::llm::send_point(
         &cfg.db,
         &exec,
         &classes,
         &llm_thresholds(&cfg),
+        &point,
         &subject,
         effort,
         None,
@@ -505,17 +565,18 @@ fn run_llm_send(args: &[&str]) {
                 println!("--- raw response {} ---\n{raw}", i + 1);
             }
             match out.parsed {
-                Some(p) => println!(
-                    "--- parsed ---\n{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "label": p.label,
-                        "confidence": p.confidence,
-                        "reason": p.reason,
-                        "signals": p.signals,
-                        "call_id": out.call_id,
-                    }))
-                    .expect("json")
-                ),
+                Some(p) => {
+                    let v: serde_json::Value = serde_json::from_str(&p).expect("parsed json");
+                    println!(
+                        "--- parsed ---\n{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "point": point,
+                            "call_id": out.call_id,
+                            "parsed": v,
+                        }))
+                        .expect("json")
+                    );
+                }
                 None => println!("--- parsed ---\nnone"),
             }
         }
