@@ -72,6 +72,8 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/ui/rules", get(crate::console::rules_list))
         .route("/ui/rules/{id}/enable", post(crate::console::rule_enable))
         .route("/ui/rules/{id}/disable", post(crate::console::rule_disable))
+        .route("/ui/payloads", get(crate::console::payloads_list))
+        .route("/ui/payloads/{hash}", get(crate::console::payload_detail))
         .route("/ui/model", get(crate::console::model_page))
         .route("/ui/features", get(crate::console::features_page))
         .with_state(engine)

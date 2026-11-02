@@ -7,9 +7,9 @@
 //! to the system stacks; the box carries no webfonts.
 
 use super::queries::{
-    ActorDetail, ActorRow, Call, CallRow, ClusterDetail, ClusterRow, DecisionView, FeatureRowView,
-    Job, LabelRef, ModelView, Outcome, ReviewFull, RuleView, ScoreView, TapInfo, Trace,
-    TraceProposal, Turn, TurnLite,
+    ActorDetail, ActorRow, Call, CallRow, ClusterDetail, ClusterRow, DecisionView, DraftView,
+    FeatureRowView, Job, LabelRef, ModelView, Outcome, PayloadRow, ReviewFull, RuleView, ScoreView,
+    TapInfo, Trace, TraceProposal, Turn, TurnLite,
 };
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -223,6 +223,7 @@ fn nav(active: &str) -> String {
         ("/ui/llm", "LLM calls"),
         ("/ui/jobs", "Jobs"),
         ("/ui/rules", "Rules"),
+        ("/ui/payloads", "Payloads"),
         ("/ui/model", "Model"),
         ("/ui/features", "Features"),
     ] {
@@ -517,28 +518,34 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
 
     let mut interp = String::from("<section><h2>Interpreted</h2>");
     interp.push_str(&validation_block(c));
-    interp.push_str("<h2>Produced label</h2>");
-    match &c.produced_label {
-        Some(l) => interp.push_str(&label_block(l)),
-        None => interp.push_str("<p class=\"empty\">This call produced no label.</p>"),
-    }
-    interp.push_str("<h2>What happened next</h2>");
-    match &c.followup {
-        Some(f) => {
-            let _ = write!(
-                interp,
-                "<dl class=\"kv\"><dt>Review</dt><dd>{} {}</dd>\
-                 <dt>At</dt><dd class=\"mono\">{}</dd></dl>",
-                if f.confirmed {
-                    chip("confirmed", "good")
-                } else {
-                    chip("rejected", "bad")
-                },
-                mono(&f.label),
-                esc(&fmt_ts_s(f.created_at)),
-            );
+    // Only the label point produces a label and feeds the review
+    // queue; the other points land an explanation, a class or a draft.
+    if c.point == "label" {
+        interp.push_str("<h2>Produced label</h2>");
+        match &c.produced_label {
+            Some(l) => interp.push_str(&label_block(l)),
+            None => interp.push_str("<p class=\"empty\">This call produced no label.</p>"),
         }
-        None => interp.push_str("<p class=\"empty\">No operator decision on that label yet.</p>"),
+        interp.push_str("<h2>What happened next</h2>");
+        match &c.followup {
+            Some(f) => {
+                let _ = write!(
+                    interp,
+                    "<dl class=\"kv\"><dt>Review</dt><dd>{} {}</dd>\
+                     <dt>At</dt><dd class=\"mono\">{}</dd></dl>",
+                    if f.confirmed {
+                        chip("confirmed", "good")
+                    } else {
+                        chip("rejected", "bad")
+                    },
+                    mono(&f.label),
+                    esc(&fmt_ts_s(f.created_at)),
+                );
+            }
+            None => {
+                interp.push_str("<p class=\"empty\">No operator decision on that label yet.</p>");
+            }
+        }
     }
     if !c.siblings.is_empty() {
         interp.push_str("<h2>Retries on this subject</h2><table>");
@@ -1428,6 +1435,21 @@ pub fn actor_detail_page(
         }
         body.push_str("</table>");
     }
+    body.push_str("<h2>Explanation</h2>");
+    match &d.explanation {
+        Some(e) => {
+            let _ = write!(
+                body,
+                "<blockquote>{}</blockquote>\
+                 <p class=\"sub\">score {score:.4} on turn {turn} · {ts}</p>",
+                esc(&e.text),
+                turn = turn_link(&Some(e.turn_id.clone())),
+                ts = esc(&fmt_ts_us(e.ts_us)),
+                score = e.score,
+            );
+        }
+        None => body.push_str("<p class=\"empty\">No explanation for this actor yet.</p>"),
+    }
     body.push_str("<h2>Labels</h2>");
     body.push_str(&label_table(&d.labels));
     body.push_str("<h2>Pending proposal</h2>");
@@ -1759,9 +1781,10 @@ pub fn labels_list(
     layout("Labels", "/ui/labels", &body)
 }
 
-/// `/ui/rules`: the install set and the overrides, plus the drafts
-/// section (empty until the draft point lands).
-pub fn rules_list(rules: &[RuleView], drafts: &[RuleView], csrf: &str) -> String {
+/// `/ui/rules`: the install set and the overrides, plus what the
+/// draft point wrote. Drafts are read-only here: one becomes a rule
+/// through the overrides file, never through the page.
+pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> String {
     let mut body = String::from("<h1>Rules</h1><p class=\"sub\">The flag is per app and reversible; retire stays as removal from the overrides file.</p>");
     if rules.is_empty() {
         body.push_str("<p class=\"empty\">No rules installed.</p>");
@@ -1803,9 +1826,121 @@ pub fn rules_list(rules: &[RuleView], drafts: &[RuleView], csrf: &str) -> String
     }
     body.push_str("<h2>Drafts</h2>");
     if drafts.is_empty() {
-        body.push_str("<p class=\"empty\">No drafts: the draft point is not built yet.</p>");
+        body.push_str("<p class=\"empty\">No drafts yet.</p>");
+    } else {
+        for d in drafts {
+            let parse = if d.parse_ok {
+                chip("parses", "good")
+            } else {
+                chip("rejected", "bad")
+            };
+            let call = d
+                .call_id
+                .map(|c| format!("<a href=\"/ui/llm/{c}\">call {c}</a>"))
+                .unwrap_or_else(|| "—".to_string());
+            let _ = write!(
+                body,
+                "<h3>draft {} · {}</h3>\
+                 <dl class=\"kv\">\
+                 <dt>Cluster</dt><dd>{}</dd>\
+                 <dt>Rule text</dt><dd>{}</dd>\
+                 <dt>Reason</dt><dd>{}</dd>\
+                 <dt>Status</dt><dd>{} · {}</dd>\
+                 <dt>Call</dt><dd>{}</dd>\
+                 <dt>Written</dt><dd class=\"mono\">{}</dd>\
+                 </dl>",
+                d.id,
+                parse,
+                cluster_link(&d.cluster_key),
+                mono(&d.rule),
+                esc(&d.reason),
+                mono(&d.status),
+                match &d.parse_error {
+                    Some(e) => esc(e),
+                    None => "—".to_string(),
+                },
+                call,
+                esc(&fmt_ts_s(d.created_at)),
+            );
+        }
     }
     layout("Rules", "/ui/rules", &body)
+}
+
+/// `/ui/payloads`: the observed request patterns and what the
+/// classify point made of them.
+pub fn payloads_list(rows: &[PayloadRow], page: i64, total: i64) -> String {
+    let mut body = String::from(
+        "<h1>Payloads</h1><p class=\"sub\">One row per distinct request pattern; the class is the classify point's verdict.</p>",
+    );
+    if rows.is_empty() {
+        body.push_str("<p class=\"empty\">No payload patterns observed.</p>");
+    } else {
+        body.push_str(
+            "<table><tr><th>Pattern</th><th>Method</th><th>Turns</th>\
+             <th>Class</th><th>Confidence</th><th>Last seen</th></tr>",
+        );
+        for r in rows {
+            let _ = write!(
+                body,
+                "<tr><td><a href=\"/ui/payloads/{}\">{}</a></td><td>{}</td>\
+                 <td class=\"num\">{}</td><td>{}</td><td class=\"num\">{}</td>\
+                 <td class=\"mono\">{}</td></tr>",
+                esc(&r.pattern_hash),
+                mono(&r.pattern),
+                mono(&r.method),
+                r.turns,
+                match &r.category {
+                    Some(c) => mono(c),
+                    None => "—".to_string(),
+                },
+                r.confidence
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "—".to_string()),
+                esc(&fmt_ts_s(r.last_seen_s)),
+            );
+        }
+        body.push_str("</table>");
+        body.push_str(&pager("/ui/payloads?", page, total));
+    }
+    layout("Payloads", "/ui/payloads", &body)
+}
+
+/// `/ui/payloads/{hash}`: one pattern and its class.
+pub fn payload_detail_page(r: &PayloadRow) -> String {
+    let call = r
+        .call_id
+        .map(|c| format!("<a href=\"/ui/llm/{c}\">call {c}</a>"))
+        .unwrap_or_else(|| "—".to_string());
+    let mut body = format!(
+        "<h1>Pattern {}</h1><p class=\"sub\">{} {}</p>",
+        mono(&r.pattern_hash),
+        mono(&r.method),
+        mono(&r.pattern),
+    );
+    let _ = write!(
+        body,
+        "<dl class=\"kv\">\
+         <dt>Class</dt><dd>{}</dd>\
+         <dt>Confidence</dt><dd class=\"mono\">{}</dd>\
+         <dt>Classified by</dt><dd>{}</dd>\
+         <dt>Turns</dt><dd class=\"mono\">{}</dd>\
+         <dt>First seen</dt><dd class=\"mono\">{}</dd>\
+         <dt>Last seen</dt><dd class=\"mono\">{}</dd>\
+         </dl>",
+        match &r.category {
+            Some(c) => mono(c),
+            None => "not classified yet".to_string(),
+        },
+        r.confidence
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "—".to_string()),
+        call,
+        r.turns,
+        esc(&fmt_ts_s(r.first_seen_s)),
+        esc(&fmt_ts_s(r.last_seen_s)),
+    );
+    layout("Payloads", "/ui/payloads", &body)
 }
 
 /// `/ui/model`: version, mode, thresholds, manifest, shadow report.

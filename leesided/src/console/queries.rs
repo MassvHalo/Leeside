@@ -28,6 +28,8 @@ pub enum QueryError {
     NoCluster(String),
     #[error("no rule {0}")]
     NoRule(String),
+    #[error("no payload pattern {0}")]
+    NoPayload(String),
 }
 
 /// An app-scoped query context over one read connection.
@@ -1847,7 +1849,15 @@ pub struct SimilarActor {
 }
 
 /// Everything `/ui/actors/{id}` shows.
+/// The point-2 one-liner riding the latest explained score row.
 #[derive(Debug, Clone)]
+pub struct ExplanationView {
+    pub text: String,
+    pub turn_id: String,
+    pub ts_us: i64,
+    pub score: f64,
+}
+
 pub struct ActorDetail {
     pub head: ActorHead,
     pub row: ActorRow,
@@ -1857,6 +1867,7 @@ pub struct ActorDetail {
     pub cluster_actors: i64,
     pub activity: ActivityView,
     pub scores: ScoreBlock,
+    pub explanation: Option<ExplanationView>,
     pub labels: Vec<LabelRef>,
     pub proposal: Option<TraceProposal>,
     pub decisions: Vec<DecisionView>,
@@ -2206,6 +2217,27 @@ impl Ctx<'_> {
                 e => Err(QueryError::Sqlite(e)),
             })?;
         let page_no = page.max(0);
+        let explanation: Option<ExplanationView> = self
+            .conn()
+            .query_row(
+                "SELECT explanation, turn_id, ts_us, score FROM scores \
+                 WHERE scope = 'actor' AND scope_id = ?1 AND explanation IS NOT NULL \
+                 ORDER BY ts_us DESC LIMIT 1",
+                params![canonical],
+                |r| {
+                    Ok(ExplanationView {
+                        text: r.get(0)?,
+                        turn_id: r.get(1)?,
+                        ts_us: r.get(2)?,
+                        score: r.get(3)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
         Ok(ActorDetail {
             head,
             row,
@@ -2215,6 +2247,7 @@ impl Ctx<'_> {
             cluster_actors,
             activity: self.activity_for(&ids)?,
             scores: self.scores_for("actor", &canonical, thresholds)?,
+            explanation,
             labels,
             proposal,
             decisions: self.decisions_for("actor", &canonical)?,
@@ -2759,8 +2792,106 @@ impl Ctx<'_> {
 
     /// Rule drafts from the LLM. No table yet: the draft point is
     /// unbuilt, so this is empty until point 4 lands.
-    pub fn rule_drafts(&self) -> Result<Vec<RuleView>, QueryError> {
-        Ok(Vec::new())
+    /// Rule drafts from the draft point, newest first.
+    pub fn rule_drafts(&self) -> Result<Vec<DraftView>, QueryError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT id, cluster_key, rule, reason, parse_ok, parse_error, call_id, status, created_at \
+             FROM rule_drafts ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DraftView {
+                id: r.get(0)?,
+                cluster_key: r.get(1)?,
+                rule: r.get(2)?,
+                reason: r.get(3)?,
+                parse_ok: r.get::<_, i64>(4)? != 0,
+                parse_error: r.get(5)?,
+                call_id: r.get(6)?,
+                status: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(QueryError::from)
+    }
+}
+
+/// One row of `rule_drafts`: what the draft point wrote, verbatim.
+#[derive(Debug, Clone)]
+pub struct DraftView {
+    pub id: i64,
+    pub cluster_key: String,
+    pub rule: String,
+    pub reason: String,
+    pub parse_ok: bool,
+    pub parse_error: Option<String>,
+    pub call_id: Option<i64>,
+    pub status: String,
+    pub created_at: i64,
+}
+
+// ---------- payloads ----------
+
+/// One payload pattern with its class, if the classify point judged it.
+#[derive(Debug, Clone)]
+pub struct PayloadRow {
+    pub pattern_hash: String,
+    pub method: String,
+    pub pattern: String,
+    pub turns: i64,
+    pub first_seen_s: i64,
+    pub last_seen_s: i64,
+    pub category: Option<String>,
+    pub confidence: Option<f64>,
+    pub call_id: Option<i64>,
+}
+
+fn payload_from_row(r: &rusqlite::Row<'_>) -> Result<PayloadRow, rusqlite::Error> {
+    Ok(PayloadRow {
+        pattern_hash: r.get(0)?,
+        method: r.get(1)?,
+        pattern: r.get(2)?,
+        turns: r.get(3)?,
+        first_seen_s: r.get(4)?,
+        last_seen_s: r.get(5)?,
+        category: r.get(6)?,
+        confidence: r.get(7)?,
+        call_id: r.get(8)?,
+    })
+}
+
+const PAYLOAD_COLS: &str = "p.pattern_hash, p.method, p.pattern, p.turns, p.first_seen_s, \
+     p.last_seen_s, c.category, c.confidence, c.call_id FROM payload_patterns p \
+     LEFT JOIN payload_classes c ON c.pattern_hash = p.pattern_hash";
+
+impl Ctx<'_> {
+    pub fn payload_patterns(&self, page: i64) -> Result<Vec<PayloadRow>, QueryError> {
+        let offset = page.max(0) * PAGE_SIZE;
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {PAYLOAD_COLS} ORDER BY p.last_seen_s DESC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt.query_map(params![PAGE_SIZE, offset], payload_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(QueryError::from)
+    }
+
+    pub fn payload_count(&self) -> Result<i64, QueryError> {
+        Ok(self
+            .conn()
+            .query_row("SELECT count(*) FROM payload_patterns", [], |r| r.get(0))?)
+    }
+
+    pub fn payload_detail(&self, hash: &str) -> Result<PayloadRow, QueryError> {
+        self.conn()
+            .query_row(
+                &format!("SELECT {PAYLOAD_COLS} WHERE p.pattern_hash = ?1"),
+                params![hash],
+                payload_from_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => QueryError::NoPayload(hash.to_string()),
+                e => QueryError::Sqlite(e),
+            })
     }
 }
 

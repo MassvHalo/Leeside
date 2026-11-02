@@ -131,6 +131,14 @@ fn ui_error(e: QueryError) -> Response {
             StatusCode::NOT_FOUND,
             pages::error_page(404, "No such rule", &format!("no rule {id}")),
         ),
+        QueryError::NoPayload(hash) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(
+                404,
+                "No such pattern",
+                &format!("no payload pattern {hash}"),
+            ),
+        ),
         e => page(
             StatusCode::INTERNAL_SERVER_ERROR,
             pages::error_page(500, "Inspector error", &e.to_string()),
@@ -366,13 +374,13 @@ pub async fn resend(
         return forbidden();
     }
     let call = or_return!(read(&e, |ctx| ctx.llm_call(id)));
-    if call.point != "label" {
+    if !["label", "explain", "classify", "draft"].contains(&call.point.as_str()) {
         return page(
             StatusCode::UNPROCESSABLE_ENTITY,
             pages::error_page(
                 422,
                 "Cannot re-send",
-                "re-send only supports the label point",
+                &format!("re-send does not support the {} point", call.point),
             ),
         );
     }
@@ -412,12 +420,14 @@ pub async fn resend(
         .as_ref()
         .map(|l| l.manifest.thresholds.clone())
         .unwrap_or_default();
+    let point = call.point.clone();
     let out = tokio::task::spawn_blocking(move || {
-        crate::llm::send_label(
+        crate::llm::send_point(
             &db,
             &exec,
             &classes,
             &thresholds,
+            &point,
             &subject,
             effort.as_deref(),
             Some(id),
@@ -961,6 +971,32 @@ pub async fn rule_disable(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     rule_flip(&e, &headers, &uri, &id, &f.csrf, false).await
+}
+
+pub async fn payloads_list(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let page_no = q.page.unwrap_or(0).max(0);
+    let (rows, total) = or_return!(read(&e, |ctx| Ok((
+        ctx.payload_patterns(page_no)?,
+        ctx.payload_count()?
+    ))));
+    page(StatusCode::OK, pages::payloads_list(&rows, page_no, total))
+}
+
+pub async fn payload_detail(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(hash): Path<String>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let row = or_return!(read(&e, |ctx| ctx.payload_detail(&hash)));
+    page(StatusCode::OK, pages::payload_detail_page(&row))
 }
 
 pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {

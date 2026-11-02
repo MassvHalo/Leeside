@@ -3879,3 +3879,86 @@ async fn ui_rule_disable_lifts_the_rule_from_the_probe_path() {
     h.running.abort();
     h.engine.shutdown().await;
 }
+
+/// The LLM-output tables have no writer op (the drain writes them
+/// directly), so the inspector tests seed through a second
+/// connection; the busy timeout covers the writer's lock.
+fn ui_seed(h: &Harness, sql: &str) {
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute_batch(sql).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_actor_explanation_renders_with_its_turn() {
+    let (h, actor, _) = ui_actor_harness().await;
+    ui_seed(
+        &h,
+        "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3, \
+         explanation) VALUES ('actor', (SELECT actor_id FROM turns WHERE turn_id = \
+         '00000000000000000000000000000005'), '00000000000000000000000000000005', 'web', 3000000, \
+         0.91, '0.1.0', '[]', 'Wordlist paths at machine cadence, no assets fetched.')",
+    );
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(
+        body.contains("Wordlist paths at machine cadence, no assets fetched."),
+        "{body}"
+    );
+    assert!(
+        body.contains("/ui/turns/00000000000000000000000000000005"),
+        "{body}"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_rules_drafts_render_verbatim() {
+    let h = ui_harness(Some("op-token")).await;
+    ui_seed(
+        &h,
+        "INSERT INTO rule_drafts (cluster_key, rule, reason, parse_ok, parse_error, call_id, \
+         status, created_at) VALUES ('cc', '{\"id\":\"draft-burst\"}', 'Three scanners, one shape.', \
+         1, NULL, NULL, 'pending', 1700000000)",
+    );
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("draft-burst"), "{body}");
+    assert!(body.contains("Three scanners, one shape."), "{body}");
+    assert!(body.contains("parses</span>"), "{body}");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_payloads_list_and_detail() {
+    let h = ui_harness(Some("op-token")).await;
+    ui_seed(
+        &h,
+        "INSERT INTO payload_patterns (pattern_hash, method, pattern, first_seen_s, last_seen_s, \
+         turns) VALUES ('ph', 'GET', '/venues/{id}', 1700000000, 1700000600, 3); \
+         INSERT INTO payload_classes (pattern_hash, category, confidence, call_id, created_at) \
+         VALUES ('ph', 'enumeration', 0.8, NULL, 1700000600)",
+    );
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/payloads", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("/venues/{id}"), "{body}");
+    assert!(body.contains("enumeration"), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/payloads/ph", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("enumeration"), "{body}");
+    assert!(body.contains("0.80"), "{body}");
+    let (st, _, _) = h.ui("GET", "/ui/payloads/nope", Some(&cookie), None).await;
+    assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
