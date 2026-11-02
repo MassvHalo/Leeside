@@ -8,9 +8,9 @@ use Illuminate\Routing\Route;
 
 /**
  * Which kind of client a request belongs to (brief, schema v2). Evaluated in
- * order, first match wins: a forced override, the honeypot group, the
- * webhook list, anything carrying or routed as an API, else web. Everything
- * here is string work on the current request; no lookups.
+ * order, first match wins: a forced override, the honeypot group, a fallback
+ * route (web), the webhook list, anything carrying or routed as an API, else
+ * web. Everything here is string work on the current request; no lookups.
  */
 class SurfaceClassifier
 {
@@ -52,6 +52,13 @@ class SurfaceClassifier
 
         if (in_array($this->option('honeypot_group'), $groups, true)) {
             return self::HONEYPOT;
+        }
+
+        // Unrouted is web, even under an /api prefix or a bearer header:
+        // path and credential inference yield to the fallback. Explicit
+        // force and honeypot grouping above still win.
+        if ($route !== null && $route->isFallback) {
+            return self::WEB;
         }
 
         foreach ($this->option('webhook') as $pattern) {

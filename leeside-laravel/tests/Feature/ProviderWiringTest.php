@@ -33,6 +33,10 @@ class ProviderWiringTest extends TestCase
         $this->assertTrue($this->app['config']->get('leeside.check.enabled'));
         $this->assertSame(2, $this->app['config']->get('leeside.check.timeout_ms'));
         $this->assertSame(
+            ['password', 'token', 'otp', 'card', 'secret', 'email', 'phone', 'name', 'address'],
+            $this->app['config']->get('leeside.capture.redact_params')
+        );
+        $this->assertSame(
             ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],
             $this->app['config']->get('leeside.ignore')
         );

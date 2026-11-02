@@ -157,16 +157,28 @@ only when the request matched no route (`_unrouted`), the response status
 is 4xx, or the surface is `honeypot`; otherwise both are null. `path`
 rides only on unrouted requests. Redaction runs before truncation: every
 parameter named in `capture.redact_params` (default `password`, `token`,
-`otp`, `card`, `secret`, matched case-insensitively) has its value
-replaced with `[redacted]`, in the query string and in form or JSON
-bodies (JSON at any depth; anything else passes through truncated only);
-then each query value is cut to 64 characters, the whole `sample_query`
-to 512 bytes, and `body_slice` to the first 2 KB. An empty query string
-or body yields null. leesided stores both on the `payload_patterns` row
-at first sight only — later turns for a known pattern update its counters
-and nothing else — and never per turn. All three fields are additive v2:
-older package lines omit them, and leesided then derives no pattern row
-for an unrouted turn without a path.
+`otp`, `card`, `secret`, `email`, `phone`, `name`, `address`, matched
+case-insensitively) has its value replaced with `[redacted]`, and so does
+any value matching an email address or a run of 13 or more digits,
+regardless of parameter name — in the query string and in form or JSON
+bodies (JSON at any depth; anything else keeps its bytes but still loses
+email and digit-run spans); then each query value is cut to 64 characters,
+the whole `sample_query` to 512 bytes, and `body_slice` to the first
+2 KB. An empty query string or body yields null. leesided stores both on
+the `payload_patterns` row at first sight only — later turns for a known
+pattern update its counters and nothing else — and never per turn. All
+three fields are additive v2: older package lines omit them, and leesided
+then derives no pattern row for an unrouted turn without a path.
+
+**Unrouted fallback.** The package registers an all-method fallback route
+under the `web` group, so unrouted requests are gated like any other: the
+surface records `web` with an `unrouted` flag, the route records
+`_unrouted`, and the client still gets its 404 on every method. The
+fallback skips the group's CSRF check — a 404 has nothing to forge, and
+the check otherwise 419s unrouted POSTs ahead of the gate, unprobed.
+`capture.fallback: false` disables it for apps that define their own
+fallback, which must attach the gate middleware (`GateTurn`, or a group
+the gate was pushed to) to theirs, or their unrouted requests go unprobed.
 
 **Tag cookie** (`web` surface only). Name `_lsd` (configurable). Value
 `base64url(id || issued_at) . "." . base64url(mac)`: `id` 16 random bytes,
@@ -392,7 +404,9 @@ JSON when the request expects JSON); no Leeside headers on the wire.
 ],
 'capture' => [
     // parameter names redacted to [redacted] in sample_query/body_slice, before truncation
-    'redact_params' => ['password', 'token', 'otp', 'card', 'secret'],  // env LEESIDE_REDACT_PARAMS, comma-separated
+    'redact_params' => ['password', 'token', 'otp', 'card', 'secret',  // comma-separated env
+        'email', 'phone', 'name', 'address'],  // LEESIDE_REDACT_PARAMS
+    'fallback' => true,  // env LEESIDE_CAPTURE_FALLBACK; false when the app defines its own fallback
 ],
 ```
 

@@ -12,6 +12,12 @@ class RouteName
             return '_unrouted';
         }
 
+        // A fallback route matched, package or app: the request is still
+        // unrouted, so the gate, the capture and leesided agree on one name.
+        if ($route->isFallback) {
+            return '_unrouted';
+        }
+
         $name = $route->getName();
         if (is_string($name) && $name !== '') {
             return $name;

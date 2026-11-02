@@ -33,6 +33,9 @@ abstract class SampleAppTestCase extends TestCase
         $app['config']->set('database.default', 'sqlite');
         $app['config']->set('database.connections.sqlite.database', ':memory:');
         $app['config']->set('app.key', 'base64:'.base64_encode(str_repeat('t', 32)));
+        // Routes below are defined after boot; an auto-registered catch-all
+        // would shadow them all. FallbackTest registers it explicitly, last.
+        $app['config']->set('leeside.capture.fallback', false);
     }
 
     protected function setUp(): void

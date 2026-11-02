@@ -24,6 +24,7 @@ final class Flags
     public const BEARER_WITH_SEC_FETCH = 'bearer_with_sec_fetch';
     public const TAG_BAD_MAC = 'tag_bad_mac';
     public const PROXY_HEADER_UNTRUSTED = 'proxy_header_untrusted';
+    public const UNROUTED = 'unrouted';
 
     /**
      * @param  string[]  $cookieNames  the request's cookie names (sorted, from RequestShape)
@@ -73,6 +74,9 @@ final class Flags
         }
         if ($proxyHeaderUntrusted) {
             $flags[] = self::PROXY_HEADER_UNTRUSTED;
+        }
+        if ($request->route()?->isFallback) {
+            $flags[] = self::UNROUTED;
         }
 
         return $flags;

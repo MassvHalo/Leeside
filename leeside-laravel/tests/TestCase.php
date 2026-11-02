@@ -15,4 +15,11 @@ abstract class TestCase extends BaseTestCase
     {
         return [LeesideServiceProvider::class];
     }
+
+    protected function defineEnvironment($app): void
+    {
+        // Tests define routes after boot; an auto-registered catch-all would
+        // shadow them all. FallbackTest registers it explicitly, last.
+        $app['config']->set('leeside.capture.fallback', false);
+    }
 }

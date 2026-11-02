@@ -3,6 +3,7 @@
 namespace Leeside\Laravel\Tests\Unit;
 
 use Illuminate\Http\Request;
+use Illuminate\Routing\Route;
 use Leeside\Laravel\Shape\Flags;
 use PHPUnit\Framework\TestCase;
 
@@ -93,5 +94,22 @@ class FlagsTest extends TestCase
         $this->assertSame([Flags::TAG_BAD_MAC], $this->flags($this->request([]), 'api', 'library', 'bad_mac'));
         $this->assertSame([], $this->flags($this->request([]), 'api', 'library', 'valid'));
         $this->assertSame([Flags::PROXY_HEADER_UNTRUSTED], $this->flags($this->request([]), 'api', 'library', null, [], true));
+    }
+
+    public function test_fallback_route_flags_unrouted(): void
+    {
+        $route = new Route(['GET'], '{leesideFallback}', fn () => null);
+        $route->where('leesideFallback', '.*')->fallback();
+        $request = $this->request([]);
+        $request->setRouteResolver(fn () => $route);
+
+        $this->assertSame(
+            [Flags::LIBRARY_UA_ON_WEB, Flags::UNROUTED],
+            $this->flags($request, 'web', 'library')
+        );
+        $this->assertSame(
+            [Flags::LIBRARY_UA_ON_WEB],
+            $this->flags($this->request([]), 'web', 'library')
+        );
     }
 }

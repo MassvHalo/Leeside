@@ -3,7 +3,10 @@
 The Leeside capture layer for Laravel 11+: one PII-free turn event per
 request to leesided over a Unix datagram socket, and a sub-millisecond rule
 check over a Unix stream socket that acts only in enforce mode. The
-contract is `../docs/brief.md`.
+contract is `../docs/brief.md`. The turn event carries hashes and shapes
+only, save for the brief's bounded payload capture: `path` on unrouted
+requests, redacted and truncated `sample_query`/`body_slice` on unrouted,
+4xx or honeypot turns.
 
 ## Install
 
@@ -119,6 +122,18 @@ that order of precedence. Routes under odd prefixes can be forced in
     'force'   => ['/partner/' => 'api'],
 ],
 ```
+
+## Unrouted fallback
+
+Unmatched requests still pass the gate: the package registers a fallback
+route under the `web` group that records surface `web` with the `unrouted`
+flag and answers the 404. An app with its own fallback disables the
+package's with `'capture' => ['fallback' => false]` (or
+`LEESIDE_CAPTURE_FALLBACK=false`) and attaches `GateTurn` to its own
+route, or its unrouted requests go unprobed. The package fallback also
+skips the group's CSRF check so unrouted POSTs 404 instead of 419; an
+app-owned fallback under `web` that wants the same skips it on its
+route the same way.
 
 ## Development
 

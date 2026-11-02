@@ -14,6 +14,9 @@ acts only when the verdict says enforce. Read ../docs/brief.md first.
   address travels on the socket to leesided only, which hashes it and never
   stores it, and the log and array transports null it),
   validation messages or exception messages, ever.
+  The brief's third exception is the bounded payload capture: `path` on
+  unrouted requests, redacted and truncated `sample_query` and
+  `body_slice` on unrouted, 4xx or honeypot turns, socket only.
 - No model call anywhere in this package. The sync check talks to leesided
   only, bounded by check.timeout_ms, and fails open on every failure.
 - Capture never adds to the response path: handle() stamps the clock,

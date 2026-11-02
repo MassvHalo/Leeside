@@ -11,6 +11,8 @@ use Illuminate\Auth\Events\Registered;
 use Illuminate\Auth\Events\Verified;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
+use Illuminate\Foundation\Http\Middleware\VerifyCsrfToken;
 use Illuminate\Routing\Events\RouteMatched;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Support\ServiceProvider;
@@ -120,6 +122,37 @@ class LeesideServiceProvider extends ServiceProvider
         if ($this->app['config']->get('leeside.register_middleware', true)) {
             $this->registerMiddleware();
         }
+
+        if ($this->app['config']->get('leeside.capture.fallback', true)) {
+            // Fallbacks are order-matched catch-alls, so this registers after
+            // the app's routes load. Apps that define their own fallback set
+            // capture.fallback false instead.
+            $this->app->booted(fn () => $this->registerFallbackRoute());
+        }
+    }
+
+    /**
+     * The unrouted fallback: every method, under the web group so the gate
+     * probes, the surface records web with the unrouted flag, and the client
+     * still gets its 404. CSRF is skipped — a 404 has nothing to forge, and
+     * the check otherwise 419s unrouted POSTs ahead of the gate. Public so
+     * tests register it after their routes.
+     */
+    public function registerFallbackRoute(): void
+    {
+        $this->app['router']
+            ->match(
+                ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+                '{leesideFallback}',
+                fn () => abort(404)
+            )
+            ->where('leesideFallback', '.*')
+            ->fallback()
+            ->middleware('web')
+            // PreventRequestForgery is what validateCsrfTokens installs;
+            // VerifyCsrfToken covers older-style kernels. Skipping an
+            // absent name is a no-op, and ::class never autoloads.
+            ->withoutMiddleware([PreventRequestForgery::class, VerifyCsrfToken::class]);
     }
 
     private function registerExceptionHook(): void

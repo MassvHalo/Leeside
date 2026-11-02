@@ -187,6 +187,16 @@ class TurnEventFactory
         return $out;
     }
 
+    /** An email address anywhere in a value. */
+    private const EMAIL_PATTERN = '/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/';
+    /** A run of 13 or more digits: the card-number range starts at 13. */
+    private const DIGIT_RUN_PATTERN = '/\d{13,}/';
+    /**
+     * Parse inputs are capped before redaction: only the head can survive
+     * the sample caps, and replacement never pulls later bytes forward.
+     */
+    private const PARSE_CAP = 8192;
+
     /** @return string[] lowercased, blanks dropped */
     private function redactParams(): array
     {
@@ -195,7 +205,7 @@ class TurnEventFactory
             $list = explode(',', $list);
         }
         if (! is_array($list) || $list === []) {
-            $list = ['password', 'token', 'otp', 'card', 'secret'];
+            $list = ['password', 'token', 'otp', 'card', 'secret', 'email', 'phone', 'name', 'address'];
         }
 
         return array_values(array_filter(array_map(
@@ -204,12 +214,31 @@ class TurnEventFactory
         )));
     }
 
+    /** A value shaped like personal data, whatever its name. */
+    private function matchesPersonalData(string $value): bool
+    {
+        return preg_match(self::EMAIL_PATTERN, $value) === 1
+            || preg_match(self::DIGIT_RUN_PATTERN, $value) === 1;
+    }
+
+    /** Scrub the shapes out of opaque text, keeping the rest. */
+    private function scrubText(string $text): string
+    {
+        $out = preg_replace(
+            [self::EMAIL_PATTERN, self::DIGIT_RUN_PATTERN],
+            '[redacted]',
+            $text
+        );
+
+        return is_string($out) ? $out : '[redacted]';
+    }
+
     private function sampleQuery(string $query, array $redact): ?string
     {
         if ($query === '') {
             return null;
         }
-        $out = substr($this->redactPairs($query, $redact, 64), 0, 512);
+        $out = substr($this->redactPairs(substr($query, 0, self::PARSE_CAP), $redact, 64), 0, 512);
         if ($out === '') {
             return null;
         }
@@ -225,6 +254,7 @@ class TurnEventFactory
         if (! is_string($content) || $content === '') {
             return null;
         }
+        $content = substr($content, 0, self::PARSE_CAP);
         if ($request->isJson()) {
             $decoded = json_decode($content, true);
             if (is_array($decoded)) {
@@ -234,21 +264,28 @@ class TurnEventFactory
                 );
                 if (is_string($encoded)) {
                     $content = $encoded;
+                } else {
+                    $content = $this->scrubText($content);
                 }
+            } else {
+                $content = $this->scrubText($content);
             }
         } elseif (str_contains(
             (string) $request->headers->get('Content-Type', ''),
             'application/x-www-form-urlencoded'
         )) {
             $content = $this->redactPairs($content, $redact, null);
+        } else {
+            $content = $this->scrubText($content);
         }
 
         return substr($content, 0, 2048);
     }
 
     /**
-     * Walk name=value pairs: redact listed names, cut other values to
-     * $valueCut characters when set, re-encode. Duplicates and order kept.
+     * Walk name=value pairs: redact listed names and personal-data shapes,
+     * cut other values to $valueCut characters when set, re-encode.
+     * Duplicates and order kept.
      */
     private function redactPairs(string $pairs, array $redact, ?int $valueCut): string
     {
@@ -261,7 +298,7 @@ class TurnEventFactory
             // urldecode: '+' is a space in query strings and forms.
             $name = urldecode($name);
             $value = urldecode($value);
-            if (in_array(strtolower($name), $redact, true)) {
+            if (in_array(strtolower($name), $redact, true) || $this->matchesPersonalData($value)) {
                 $value = '[redacted]';
             } elseif ($valueCut !== null) {
                 $cut = mb_substr($value, 0, $valueCut, 'UTF-8');
@@ -275,6 +312,9 @@ class TurnEventFactory
 
     private function redactDeep(mixed $value, array $redact): mixed
     {
+        if (is_string($value) && $this->matchesPersonalData($value)) {
+            return '[redacted]';
+        }
         if (! is_array($value)) {
             return $value;
         }

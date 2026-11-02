@@ -42,6 +42,16 @@ class SurfaceClassifierTest extends TestCase
         $this->assertSame('web', $c->classify($this->request('/nope'), null));
     }
 
+    public function test_fallback_is_web_despite_api_markers(): void
+    {
+        $c = $this->classifier();
+        $route = $this->route('{leesideFallback}', null, ['web']);
+        $route->where('leesideFallback', '.*')->fallback();
+        $request = $this->request('/api/nope', ['Authorization' => 'Bearer abc']);
+
+        $this->assertSame('web', $c->classify($request, $route));
+    }
+
     public function test_api_by_group_prefix_bearer_or_key_header(): void
     {
         $c = $this->classifier();

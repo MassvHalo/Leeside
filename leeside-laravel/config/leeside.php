@@ -76,8 +76,15 @@ return [
     'capture' => [
         'redact_params' => array_values(array_filter(array_map(
             'trim',
-            explode(',', (string) env('LEESIDE_REDACT_PARAMS', 'password,token,otp,card,secret'))
+            explode(',', (string) env(
+                'LEESIDE_REDACT_PARAMS',
+                'password,token,otp,card,secret,email,phone,name,address'
+            ))
         ))),
+        // The package registers an all-method fallback route under the web
+        // group so unrouted requests are gated. Apps that define their own
+        // fallback set this false and attach GateTurn to theirs.
+        'fallback' => filter_var(env('LEESIDE_CAPTURE_FALLBACK', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
     // Schema v2: which kind of client a request belongs to. Evaluated in

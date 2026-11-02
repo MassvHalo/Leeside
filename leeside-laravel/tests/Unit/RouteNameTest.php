@@ -27,6 +27,14 @@ class RouteNameTest extends TestCase
         $this->assertSame('_unrouted', RouteName::fromRoute(null));
     }
 
+    public function test_fallback_routes_are_unrouted(): void
+    {
+        $route = new Route(['GET'], '{leesideFallback}', fn () => null);
+        $route->where('leesideFallback', '.*')->fallback();
+
+        $this->assertSame('_unrouted', RouteName::fromRoute($route));
+    }
+
     public function test_ignore_matches_names_and_uri_patterns(): void
     {
         $named = new Route(['GET'], 'telescope/entries', ['as' => 'telescope.index', 'uses' => fn () => null]);

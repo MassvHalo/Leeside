@@ -377,7 +377,7 @@ class TurnEventFactoryTest extends TestCase
 
         $this->assertNull($event['path']);
         $this->assertSame('next=%2F', $event['sample_query']);
-        $this->assertSame('phone=123&otp=%5Bredacted%5D', $event['body_slice']);
+        $this->assertSame('phone=%5Bredacted%5D&otp=%5Bredacted%5D', $event['body_slice']);
     }
 
     public function test_capture_truncates_values_total_and_body(): void
@@ -420,6 +420,72 @@ class TurnEventFactoryTest extends TestCase
         $event = $this->factory->build($request, new Response('x', 404), $this->begun());
 
         $this->assertSame('Token=%5Bredacted%5D&OTP=%5Bredacted%5D', $event['sample_query']);
+    }
+
+    public function test_personal_names_redact_by_default(): void
+    {
+        $request = Request::create('/x?email=a%40b.com&phone=0661111111&name=Jo&address=Main+1', 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame(
+            'email=%5Bredacted%5D&phone=%5Bredacted%5D&name=%5Bredacted%5D&address=%5Bredacted%5D',
+            $event['sample_query']
+        );
+    }
+
+    public function test_email_and_digit_runs_redact_regardless_of_name(): void
+    {
+        $request = Request::create('/x?q=ops%40example.com&id=4111111111111111&short=123456789012', 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame(
+            'q=%5Bredacted%5D&id=%5Bredacted%5D&short=123456789012',
+            $event['sample_query']
+        );
+    }
+
+    public function test_thirteen_digit_runs_redact(): void
+    {
+        // A millisecond timestamp is 13 digits: the card range takes it too.
+        $request = Request::create('/x?ts=1761600000123', 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame('ts=%5Bredacted%5D', $event['sample_query']);
+    }
+
+    public function test_unnamed_json_values_redact_by_shape(): void
+    {
+        $request = Request::create(
+            '/x', 'POST', [], [], [],
+            ['CONTENT_TYPE' => 'application/json'],
+            '{"ids":["4111111111111111","ok"],"mail":"a@b.co"}'
+        );
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame(
+            '{"ids":["[redacted]","ok"],"mail":"[redacted]"}',
+            $event['body_slice']
+        );
+    }
+
+    public function test_opaque_bodies_scrub_shapes_not_names(): void
+    {
+        $request = Request::create(
+            '/x', 'POST', [], [], [],
+            ['CONTENT_TYPE' => 'text/plain'],
+            'call me at jane@example.com or 4111111111111111 tomorrow'
+        );
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame(
+            'call me at [redacted] or [redacted] tomorrow',
+            $event['body_slice']
+        );
     }
 
     private function begun(): TurnContext
