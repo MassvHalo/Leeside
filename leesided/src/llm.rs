@@ -903,7 +903,7 @@ pub fn enqueue_label(
 /// Per-point daily totals for `/health`: (calls, tokens) from the
 /// call log. Tokens are prompt + completion, and completion includes
 /// reasoning, so the budgets already count what reasoning costs.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PointTotals {
     pub label: (i64, i64),
     pub explain: (i64, i64),

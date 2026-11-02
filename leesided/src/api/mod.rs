@@ -50,6 +50,28 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route("/ui/jobs", get(crate::console::jobs_list))
         .route("/ui/jobs/{id}/retry", post(crate::console::job_retry))
         .route("/ui/jobs/{id}/cancel", post(crate::console::job_cancel))
+        .route("/ui/turns/{turn_id}", get(crate::console::turn_detail))
+        .route("/ui/trace/{turn_id}", get(crate::console::trace_view))
+        .route("/ui/actors", get(crate::console::actors_list))
+        .route("/ui/actors/{id}", get(crate::console::actor_detail))
+        .route("/ui/actors/{id}/label", post(crate::console::actor_label))
+        .route("/ui/actors/{id}/block", post(crate::console::actor_block))
+        .route(
+            "/ui/actors/{id}/unblock",
+            post(crate::console::actor_unblock),
+        )
+        .route("/ui/clusters", get(crate::console::clusters_list))
+        .route("/ui/clusters/{key}", get(crate::console::cluster_detail))
+        .route(
+            "/ui/clusters/{key}/label",
+            post(crate::console::cluster_label),
+        )
+        .route("/ui/review", get(crate::console::review_list))
+        .route("/ui/review/decide", post(crate::console::review_decide))
+        .route("/ui/labels", get(crate::console::labels_list))
+        .route("/ui/rules", get(crate::console::rules_list))
+        .route("/ui/model", get(crate::console::model_page))
+        .route("/ui/features", get(crate::console::features_page))
         .with_state(engine)
 }
 

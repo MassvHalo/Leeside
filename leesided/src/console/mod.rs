@@ -115,6 +115,18 @@ fn ui_error(e: QueryError) -> Response {
             StatusCode::NOT_FOUND,
             pages::error_page(404, "No such job", &format!("no llm job {id}")),
         ),
+        QueryError::NoTurn(id) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "No such turn", &format!("no turn {id}")),
+        ),
+        QueryError::NoActor(id) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "No such actor", &format!("no actor {id}")),
+        ),
+        QueryError::NoCluster(key) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "No such cluster", &format!("no cluster {key}")),
+        ),
         e => page(
             StatusCode::INTERNAL_SERVER_ERROR,
             pages::error_page(500, "Inspector error", &e.to_string()),
@@ -217,9 +229,11 @@ fn forbidden() -> Response {
 }
 
 pub async fn ui_root(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    // The dashboard is step 4; until then the root forwards.
     let _ = or_return!(require(&e, &headers, &uri));
-    Redirect::to("/ui/llm").into_response()
+    let now = store::now_s();
+    let health = e.health();
+    let dash = or_return!(read(&e, |ctx| ctx.dashboard(now)));
+    page(StatusCode::OK, pages::dashboard(&health, &dash, now))
 }
 
 #[derive(Deserialize)]
@@ -434,4 +448,503 @@ pub async fn resend(
             pages::error_page(500, "Re-send failed", "the call went out but logged no row"),
         ),
     }
+}
+
+fn thresholds(e: &Engine) -> std::collections::HashMap<String, f64> {
+    e.windside
+        .loaded
+        .as_ref()
+        .map(|l| l.manifest.thresholds.clone())
+        .unwrap_or_default()
+}
+
+pub async fn turn_detail(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(turn_id): Path<String>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let turn = or_return!(read(&e, |ctx| ctx.turn(&turn_id)));
+    let tap = queries::tap_info(
+        &e.ja4_classes,
+        turn.ja4.as_deref(),
+        turn.ua_class.as_deref(),
+    );
+    let (features, scores) = or_return!(read(&e, |ctx| ctx.trace_features(&turn)));
+    page(
+        StatusCode::OK,
+        pages::turn_detail(&turn, &tap, &features, &scores, &thresholds(&e)),
+    )
+}
+
+pub async fn trace_view(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(turn_id): Path<String>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let turn = or_return!(read(&e, |ctx| ctx.turn(&turn_id)));
+    let idents = queries::idents_for_turn(&e.resolver, &turn);
+    let now = store::now_s();
+    let trace = or_return!(read(&e, |ctx| ctx.trace(&turn, &idents, now)));
+    page(
+        StatusCode::OK,
+        pages::trace_view(&trace, &thresholds(&e), now),
+    )
+}
+
+pub async fn actors_list(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let page_no = q.page.unwrap_or(0).max(0);
+    let now = store::now_s();
+    let (rows, total) = or_return!(read(&e, |ctx| Ok((
+        ctx.actors(page_no, now)?,
+        ctx.actor_count()?
+    ))));
+    page(
+        StatusCode::OK,
+        pages::actors_list(&rows, page_no, total, &thresholds(&e)),
+    )
+}
+
+pub async fn actor_detail(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    let now = store::now_s();
+    let detail = or_return!(read(&e, |ctx| {
+        ctx.actor_detail(&id, q.page.unwrap_or(0), now, &thresholds(&e))
+    }));
+    let tap = queries::tap_info(
+        &e.ja4_classes,
+        detail.client.ja4.as_deref(),
+        detail.client.ua_class.as_deref(),
+    );
+    page(
+        StatusCode::OK,
+        pages::actor_detail_page(&detail, &tap, &thresholds(&e), &session.csrf, now),
+    )
+}
+
+pub async fn clusters_list(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let page_no = q.page.unwrap_or(0).max(0);
+    let (rows, total) = or_return!(read(&e, |ctx| Ok((
+        ctx.clusters(page_no)?,
+        ctx.cluster_count()?
+    ))));
+    page(
+        StatusCode::OK,
+        pages::clusters_list(&rows, page_no, total, &thresholds(&e)),
+    )
+}
+
+pub async fn cluster_detail(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(key): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    let detail = or_return!(read(&e, |ctx| {
+        ctx.cluster_detail(&key, q.page.unwrap_or(0), &thresholds(&e))
+    }));
+    page(
+        StatusCode::OK,
+        pages::cluster_detail_page(&detail, &thresholds(&e), &session.csrf),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct LabelForm {
+    csrf: String,
+    label: String,
+    note: Option<String>,
+    window_end_ts: i64,
+}
+
+fn bad_label(value: &str) -> Response {
+    page(
+        StatusCode::BAD_REQUEST,
+        pages::error_page(
+            400,
+            "Bad label",
+            &format!("label must be benign, malicious or unknown, not {value:?}"),
+        ),
+    )
+}
+
+fn stale_window() -> Response {
+    page(
+        StatusCode::CONFLICT,
+        pages::error_page(
+            409,
+            "Window moved",
+            "a newer window landed since the form rendered; reload and label again",
+        ),
+    )
+}
+
+/// One operator verdict on the subject's latest window. The form's
+/// window must still be the latest, or the label would land on the
+/// wrong one.
+pub async fn actor_label(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<LabelForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let label: &'static str = match f.label.as_str() {
+        "benign" => "benign",
+        "malicious" => "malicious",
+        "unknown" => "unknown",
+        _ => return bad_label(&f.label),
+    };
+    let now = store::now_s();
+    let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
+        &id,
+        0,
+        now,
+        &HashMap::new()
+    )));
+    let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
+        return stale_window();
+    };
+    if window_end_ts != f.window_end_ts {
+        return stale_window();
+    }
+    e.store.send(StoreOp::Label(store::LabelRow {
+        scope: "actor",
+        scope_id: detail.head.id.clone(),
+        surface,
+        window_end_ts,
+        label,
+        source: "operator",
+        confidence: 1.0,
+        kind: None,
+        note: f.note.filter(|n| !n.trim().is_empty()),
+        created_at: now,
+        signals: None,
+    }));
+    e.store.flush().await;
+    Redirect::to(&format!("/ui/actors/{}", detail.head.id)).into_response()
+}
+
+pub async fn cluster_label(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(key): Path<String>,
+    Form(f): Form<LabelForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let label: &'static str = match f.label.as_str() {
+        "benign" => "benign",
+        "malicious" => "malicious",
+        "unknown" => "unknown",
+        _ => return bad_label(&f.label),
+    };
+    let detail = or_return!(read(&e, |ctx| {
+        ctx.cluster_detail(&key, 0, &HashMap::new())
+    }));
+    let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
+        return stale_window();
+    };
+    if window_end_ts != f.window_end_ts {
+        return stale_window();
+    }
+    e.store.send(StoreOp::Label(store::LabelRow {
+        scope: "cluster",
+        scope_id: detail.row.key.clone(),
+        surface,
+        window_end_ts,
+        label,
+        source: "operator",
+        confidence: 1.0,
+        kind: None,
+        note: f.note.filter(|n| !n.trim().is_empty()),
+        created_at: store::now_s(),
+        signals: None,
+    }));
+    e.store.flush().await;
+    Redirect::to(&format!("/ui/clusters/{}", detail.row.key)).into_response()
+}
+
+/// A sticky actor-scope block, rule "operator", 24 h like the rule
+/// default. Re-blocking refreshes the expiry; the answer still honors
+/// the global mode.
+pub async fn actor_block(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let ids = or_return!(read(&e, |ctx| ctx.actor_ids(&id)));
+    let key = match crate::rules::windows::key16(&ids[0]) {
+        Some(k) => k,
+        None => {
+            return page(
+                StatusCode::NOT_FOUND,
+                pages::error_page(404, "No such actor", &format!("no actor {id}")),
+            );
+        }
+    };
+    let now = store::now_s();
+    let d = crate::rules::decisions::Decision {
+        scope: crate::rules::model::Scope::Actor,
+        key,
+        action: crate::rules::model::Action::Block,
+        mode: e.mode(),
+        rule: std::sync::Arc::from("operator"),
+        rule_version: 0,
+        created_at: now,
+        expires_at: now + crate::rules::compile::BLOCK_TTL_S as i64,
+    };
+    e.decisions.insert(d.clone());
+    e.store.send(StoreOp::DecisionUpsert(d));
+    e.store.flush().await;
+    Redirect::to(&format!("/ui/actors/{}", ids[0])).into_response()
+}
+
+pub async fn actor_unblock(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(id): Path<String>,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let ids = or_return!(read(&e, |ctx| ctx.actor_ids(&id)));
+    let key = match crate::rules::windows::key16(&ids[0]) {
+        Some(k) => k,
+        None => {
+            return page(
+                StatusCode::NOT_FOUND,
+                pages::error_page(404, "No such actor", &format!("no actor {id}")),
+            );
+        }
+    };
+    if !e.decisions.remove(crate::rules::model::Scope::Actor, key) {
+        return page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(404, "Nothing to lift", "no live block on this actor"),
+        );
+    }
+    e.store.send(StoreOp::DecisionDelete {
+        scope: crate::rules::model::Scope::Actor,
+        key,
+    });
+    e.store.flush().await;
+    Redirect::to(&format!("/ui/actors/{}", ids[0])).into_response()
+}
+
+pub async fn review_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    let rows = or_return!(read(&e, |ctx| ctx.review_queue(&thresholds(&e), 20)));
+    page(
+        StatusCode::OK,
+        pages::review_list(&rows, &thresholds(&e), &session.csrf),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct DecideForm {
+    csrf: String,
+    scope_id: String,
+    window_end_ts: i64,
+    verdict: String,
+}
+
+/// One review decision: confirm takes the proposed value (noted as
+/// confirmed), the verdicts take theirs (noted as the console). CLI
+/// parity, through the writer.
+pub async fn review_decide(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(f): Form<DecideForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden();
+    }
+    let now = store::now_s();
+    let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
+        &f.scope_id,
+        0,
+        now,
+        &thresholds(&e)
+    )));
+    let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
+        return stale_window();
+    };
+    if window_end_ts != f.window_end_ts {
+        return stale_window();
+    }
+    let (label, note): (&'static str, String) = match f.verdict.as_str() {
+        "confirm" => match &detail.proposal {
+            Some(p) => match p.label.label.as_str() {
+                "benign" => ("benign", "confirmed llm_proposed".to_string()),
+                "malicious" => ("malicious", "confirmed llm_proposed".to_string()),
+                "unknown" => ("unknown", "confirmed llm_proposed".to_string()),
+                _ => return bad_label(&p.label.label),
+            },
+            None => {
+                return page(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    pages::error_page(422, "Nothing to confirm", "this row has no proposal"),
+                );
+            }
+        },
+        "benign" => ("benign", "review console".to_string()),
+        "malicious" => ("malicious", "review console".to_string()),
+        "unknown" => ("unknown", "review console".to_string()),
+        _ => return bad_label(&f.verdict),
+    };
+    e.store.send(StoreOp::Label(store::LabelRow {
+        scope: "actor",
+        scope_id: detail.head.id.clone(),
+        surface,
+        window_end_ts,
+        label,
+        source: "operator",
+        confidence: 1.0,
+        kind: None,
+        note: Some(note),
+        created_at: now,
+        signals: None,
+    }));
+    e.store.flush().await;
+    Redirect::to("/ui/review").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct LabelsQuery {
+    source: Option<String>,
+    label: Option<String>,
+    page: Option<i64>,
+}
+
+pub async fn labels_list(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Query(q): Query<LabelsQuery>,
+) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    if let Some(l) = q.label.as_deref() {
+        if !["benign", "malicious", "unknown"].contains(&l) {
+            return bad_label(l);
+        }
+    }
+    let page_no = q.page.unwrap_or(0).max(0);
+    let (labels, total, sources) = or_return!(read(&e, |ctx| {
+        Ok((
+            ctx.labels(q.source.as_deref(), q.label.as_deref(), page_no)?,
+            ctx.label_count(q.source.as_deref(), q.label.as_deref())?,
+            ctx.label_sources()?,
+        ))
+    }));
+    page(
+        StatusCode::OK,
+        pages::labels_list(
+            &labels,
+            &sources,
+            q.source.as_deref(),
+            q.label.as_deref(),
+            page_no,
+            total,
+        ),
+    )
+}
+
+pub async fn rules_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let now = store::now_s();
+    let (rules, drafts) = or_return!(read(&e, |ctx| Ok((ctx.rules(now)?, ctx.rule_drafts()?))));
+    page(StatusCode::OK, pages::rules_list(&rules, &drafts))
+}
+
+pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    let loaded = e.windside.loaded.as_ref();
+    let thresholds: Vec<(String, f64)> = loaded
+        .map(|l| {
+            l.manifest
+                .thresholds
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        })
+        .unwrap_or_default();
+    let manifest_pretty: Option<String> = e.cfg.windside_model.as_deref().and_then(|dir| {
+        let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        // The file carries the metrics; the model keeps the thresholds.
+        let metrics = v.get("metrics").unwrap_or(&v);
+        serde_json::to_string_pretty(metrics).ok()
+    });
+    let db = e.cfg.db.clone();
+    let model_dir = e.cfg.windside_model.clone();
+    let shadow =
+        tokio::task::spawn_blocking(move || crate::report::shadow(&db, model_dir.as_deref(), 0))
+            .await;
+    let (shadow, shadow_error) = match shadow {
+        Ok(Ok(r)) => (Some(r), None),
+        Ok(Err(err)) => (None, Some(err.to_string())),
+        Err(err) => (None, Some(err.to_string())),
+    };
+    page(
+        StatusCode::OK,
+        pages::model_page(&queries::ModelView {
+            windside_mode: e.windside.mode.as_str().to_string(),
+            model_version: loaded.map(|l| l.manifest.model_version.clone()),
+            features_version: loaded.map(|l| l.manifest.features_version),
+            thresholds,
+            manifest_pretty,
+            shadow,
+            shadow_error,
+        }),
+    )
+}
+
+pub async fn features_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
+    let _ = or_return!(require(&e, &headers, &uri));
+    page(
+        StatusCode::OK,
+        pages::features_page(&queries::feature_table()),
+    )
 }

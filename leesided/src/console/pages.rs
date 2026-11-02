@@ -6,7 +6,12 @@
 //! Tokens are `docs/console.md` section 5, dark first. Fonts fall back
 //! to the system stacks; the box carries no webfonts.
 
-use super::queries::{Call, CallRow, Job, LabelRef, Outcome};
+use super::queries::{
+    ActorDetail, ActorRow, Call, CallRow, ClusterDetail, ClusterRow, DecisionView, FeatureRowView,
+    Job, LabelRef, ModelView, Outcome, ReviewFull, RuleView, ScoreView, TapInfo, Trace,
+    TraceProposal, Turn, TurnLite,
+};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 /// Escape everything from the store.
@@ -209,7 +214,18 @@ document.addEventListener("click", function (ev) {
 /// The nav only links pages that exist; later steps extend it.
 fn nav(active: &str) -> String {
     let mut out = String::from("<nav>");
-    for (path, name) in [("/ui/llm", "LLM calls"), ("/ui/jobs", "Jobs")] {
+    for (path, name) in [
+        ("/ui/", "Overview"),
+        ("/ui/review", "Review"),
+        ("/ui/actors", "Actors"),
+        ("/ui/clusters", "Clusters"),
+        ("/ui/labels", "Labels"),
+        ("/ui/llm", "LLM calls"),
+        ("/ui/jobs", "Jobs"),
+        ("/ui/rules", "Rules"),
+        ("/ui/model", "Model"),
+        ("/ui/features", "Features"),
+    ] {
         let on = if active == path { " class=\"on\"" } else { "" };
         let _ = write!(out, "<a href=\"{path}\"{on}>{name}</a>");
     }
@@ -651,6 +667,1320 @@ pub fn jobs_list(jobs: &[Job], status: Option<&str>, page: i64, total: i64, csrf
     };
     body.push_str(&pager(&base, page, total));
     layout("Jobs", "/ui/jobs", &body)
+}
+
+fn score_chip(score: f64, threshold: Option<f64>) -> String {
+    let text = format!("{score:.4}");
+    match threshold {
+        Some(t) if score >= t => chip(&format!("{text} ≥ {t}"), "bad"),
+        Some(t) => chip(&format!("{text} < {t}"), "good"),
+        None => chip(&text, "muted"),
+    }
+}
+
+fn verdict_chip(verdict: &str) -> String {
+    let class = match verdict {
+        "block" => "bad",
+        "allow" => "good",
+        _ => "warn",
+    };
+    chip(verdict, class)
+}
+
+fn opt_f64(v: Option<f64>) -> String {
+    v.map(|n| format!("{n:.2}"))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn turn_link(turn_id: &Option<String>) -> String {
+    match turn_id {
+        Some(t) => format!("<a href=\"/ui/turns/{}\">{}</a>", esc(t), mono(t)),
+        None => "—".to_string(),
+    }
+}
+
+fn actor_link(id: &str) -> String {
+    format!("<a href=\"/ui/actors/{}\">{}</a>", esc(id), mono(id))
+}
+
+fn cluster_link(key: &str) -> String {
+    format!("<a href=\"/ui/clusters/{}\">{}</a>", esc(key), mono(key))
+}
+
+fn turn_table(turns: &[TurnLite]) -> String {
+    if turns.is_empty() {
+        return "<p class=\"empty\">No turns.</p>".to_string();
+    }
+    let mut out = String::from(
+        "<table><tr><th>Time</th><th>Turn</th><th>Route</th><th>Verb</th>\
+         <th>Status</th><th>Surface</th><th>Verdict</th><th>Actor</th></tr>",
+    );
+    for t in turns {
+        let _ = write!(
+            out,
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
+             <td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            esc(&fmt_ts_us(t.ts_us)),
+            turn_link(&t.turn_id),
+            mono(&t.route),
+            mono(&t.verb),
+            t.status,
+            mono(opt(&t.surface)),
+            t.verdict
+                .as_deref()
+                .map(verdict_chip)
+                .unwrap_or_else(|| "—".to_string()),
+            t.actor_id
+                .as_deref()
+                .map(actor_link)
+                .unwrap_or_else(|| "—".to_string()),
+        );
+    }
+    out.push_str("</table>");
+    out
+}
+
+fn label_table(labels: &[LabelRef]) -> String {
+    if labels.is_empty() {
+        return "<p class=\"empty\">No labels.</p>".to_string();
+    }
+    let mut out = String::from(
+        "<table><tr><th>Created</th><th>Label</th><th>Source</th><th>Confidence</th>\
+         <th>Surface</th><th>Window end</th><th>Kind</th><th>Note</th></tr>",
+    );
+    for l in labels {
+        let _ = write!(
+            out,
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td>\
+             <td class=\"num\">{}</td><td>{}</td><td class=\"mono\">{}</td>\
+             <td>{}</td><td>{}</td></tr>",
+            esc(&fmt_ts_s(l.created_at)),
+            label_chip(&l.label),
+            mono(&l.source),
+            l.confidence,
+            mono(opt(&l.surface)),
+            esc(&fmt_ts_us(l.window_end_ts)),
+            mono(opt(&l.kind)),
+            mono(opt(&l.note)),
+        );
+    }
+    out.push_str("</table>");
+    out
+}
+
+fn proposal_block(p: &TraceProposal) -> String {
+    let mut out = String::from("<dl class=\"kv\">");
+    let _ = write!(
+        out,
+        "<dt>Label</dt><dd>{}</dd>\
+         <dt>Confidence</dt><dd class=\"mono\">{}</dd>\
+         <dt>Reason</dt><dd>{}</dd>\
+         <dt>Signals</dt><dd>{}</dd>",
+        label_chip(&p.label.label),
+        p.label.confidence,
+        mono(&p.reason),
+        mono(opt(&p.label.signals)),
+    );
+    match p.call_id {
+        Some(id) => {
+            let _ = write!(
+                out,
+                "<dt>Exchange</dt><dd><a href=\"/ui/llm/{id}\">call {id}</a></dd>"
+            );
+        }
+        None => out.push_str("<dt>Exchange</dt><dd>—</dd>"),
+    }
+    out.push_str("</dl>");
+    out
+}
+
+fn score_block(s: &ScoreView, threshold: Option<f64>) -> String {
+    let mut out = String::from("<dl class=\"kv\">");
+    let _ = write!(
+        out,
+        "<dt>Score</dt><dd>{}</dd>\
+         <dt>Model</dt><dd>{}</dd>\
+         <dt>Surface</dt><dd>{}</dd>\
+         <dt>Scored</dt><dd class=\"mono\">{}</dd>",
+        score_chip(s.score, threshold),
+        mono(&s.model_version),
+        mono(opt(&s.surface)),
+        esc(&fmt_ts_us(s.ts_us)),
+    );
+    if !s.top3.is_empty() {
+        out.push_str("<dt>Top 3</dt><dd><table>");
+        for (name, gain) in &s.top3 {
+            let _ = write!(
+                out,
+                "<tr><td>{}</td><td class=\"num\">{gain:.4}</td></tr>",
+                mono(name),
+            );
+        }
+        out.push_str("</table></dd>");
+    }
+    out.push_str("</dl>");
+    out
+}
+
+fn feature_block(f: &FeatureRowView) -> String {
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "<h2>Feature row ({} {})</h2>\
+         <p class=\"sub\">version {} · {} · anomalies {}</p>",
+        esc(&f.scope),
+        mono(&f.key),
+        f.version,
+        esc(&fmt_ts_us(f.ts_us)),
+        f.clock_anomalies,
+    );
+    out.push_str("<table><tr><th>Feature</th><th>Value</th></tr>");
+    for (name, v) in &f.values {
+        let _ = write!(
+            out,
+            "<tr><td>{}</td><td class=\"num\">{v}</td></tr>",
+            mono(name)
+        );
+    }
+    out.push_str("</table>");
+    out
+}
+
+fn decision_table(decisions: &[DecisionView], now_s: i64) -> String {
+    if decisions.is_empty() {
+        return "<p class=\"empty\">No sticky decisions.</p>".to_string();
+    }
+    let mut out = String::from(
+        "<table><tr><th>Scope</th><th>Key</th><th>Action</th><th>Mode</th>\
+         <th>Rule</th><th>Since</th><th>Expires</th><th></th></tr>",
+    );
+    for d in decisions {
+        let live = d.expires_at > now_s;
+        let _ = write!(
+            out,
+            "<tr><td>{}</td><td class=\"mono\">{}</td><td>{}</td><td>{}</td>\
+             <td>{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
+            mono(&d.scope),
+            esc(&d.key),
+            verdict_chip(&d.action),
+            mono(&d.mode),
+            mono(&format!("{} v{}", d.rule, d.rule_version)),
+            esc(&fmt_ts_s(d.created_at)),
+            esc(&fmt_ts_s(d.expires_at)),
+            if live {
+                chip("live", "warn")
+            } else {
+                chip("expired", "muted")
+            },
+        );
+    }
+    out.push_str("</table>");
+    out
+}
+
+/// `/ui/turns/{turn_id}`: every stored column, the probe answer, the
+/// resolution, the tap join, the rows and scores it produced.
+pub fn turn_detail(
+    t: &Turn,
+    tap: &TapInfo,
+    features: &[FeatureRowView],
+    scores: &[ScoreView],
+    thresholds: &HashMap<String, f64>,
+) -> String {
+    let title = t.turn_id.as_deref().unwrap_or("?");
+    let mut body = format!(
+        "<h1>Turn {}</h1><p class=\"sub\">{} · ingest #{}</p>",
+        mono(title),
+        esc(&fmt_ts_us(t.ts_us)),
+        t.ingest_seq
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    body.push_str("<h2>Probe answer and verdict</h2><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>Verdict</dt><dd>{}</dd>\
+         <dt>Gate</dt><dd>{}</dd>\
+         <dt>Rules matched</dt><dd>{}</dd>",
+        t.verdict
+            .as_deref()
+            .map(verdict_chip)
+            .unwrap_or_else(|| "—".to_string()),
+        match &t.gate {
+            Some(g) => format!("<pre>{}</pre>", esc(&pretty_json(g))),
+            None => "—".to_string(),
+        },
+        match &t.rules_matched {
+            Some(r) => format!("<pre>{}</pre>", esc(&pretty_json(r))),
+            None => "—".to_string(),
+        },
+    );
+    body.push_str("</dl><h2>Resolution</h2><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>Actor</dt><dd>{}</dd><dt>Cluster</dt><dd>{}</dd>",
+        t.actor_id
+            .as_deref()
+            .map(actor_link)
+            .unwrap_or_else(|| "—".to_string()),
+        t.cluster_key
+            .as_deref()
+            .map(cluster_link)
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    body.push_str("</dl><h2>Tap join</h2><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>JA4</dt><dd>{}</dd><dt>JA4T</dt><dd>{}</dd>\
+         <dt>Class</dt><dd>{}</dd><dt>Mismatch</dt><dd>{}</dd>",
+        mono(opt(&t.ja4)),
+        mono(opt(&t.ja4t)),
+        mono(&tap.class),
+        if tap.mismatch {
+            chip("ua_vs_ja4_mismatch", "warn")
+        } else {
+            chip("no", "muted")
+        },
+    );
+    body.push_str("</dl><h2>Scores</h2>");
+    if scores.is_empty() {
+        body.push_str(
+            "<p class=\"empty\">This turn scored nothing (below the floor, or Windside off).</p>",
+        );
+    }
+    for s in scores {
+        body.push_str(&score_block(
+            s,
+            s.surface
+                .as_deref()
+                .and_then(|surface| thresholds.get(surface).copied()),
+        ));
+    }
+    for f in features {
+        body.push_str(&feature_block(f));
+    }
+    body.push_str("<h2>Every stored column</h2><dl class=\"kv\">");
+    let hex = |b: &Option<Vec<u8>>| {
+        b.as_ref()
+            .map(|v| v.iter().map(|x| format!("{x:02x}")).collect::<String>())
+    };
+    let rows: &[(&str, String)] = &[
+        (
+            "turn_id",
+            t.turn_id.clone().unwrap_or_else(|| "—".to_string()),
+        ),
+        ("ts_us", t.ts_us.to_string()),
+        ("ts", t.ts.to_string()),
+        ("ts_ms", opt_int(t.ts_ms)),
+        ("ingest_seq", opt_int(t.ingest_seq)),
+        ("session_key", t.session_key.clone()),
+        ("peer_key", t.peer_key.clone()),
+        ("principal", t.principal.clone()),
+        ("verb", t.verb.clone()),
+        ("route", t.route.clone()),
+        ("status", t.status.to_string()),
+        ("surface", opt(&t.surface).to_string()),
+        ("is_asset", opt_int(t.is_asset)),
+        ("latency_ms", t.latency_ms.to_string()),
+        ("bytes_in", t.bytes_in.to_string()),
+        ("bytes_out", t.bytes_out.to_string()),
+        ("req_shape", t.req_shape.clone()),
+        ("resp_shape", t.resp_shape.clone()),
+        ("bound", t.bound.clone()),
+        ("shape", opt(&t.shape).to_string()),
+        ("shape_hash", opt(&t.shape_hash).to_string()),
+        ("flags", opt(&t.flags).to_string()),
+        ("validation_failed", opt(&t.validation_failed).to_string()),
+        ("exception", opt(&t.exception).to_string()),
+        ("auth_event", opt(&t.auth_event).to_string()),
+        ("credential_kind", opt(&t.credential_kind).to_string()),
+        ("credential_hash", opt(&t.credential_hash).to_string()),
+        ("credential_status", opt(&t.credential_status).to_string()),
+        ("tag_id", opt(&t.tag_id).to_string()),
+        ("tag_status", opt(&t.tag_status).to_string()),
+        ("ip_hash", opt(&t.ip_hash).to_string()),
+        ("net_hash", opt(&t.net_hash).to_string()),
+        ("asn", opt_int(t.asn)),
+        ("country", opt(&t.country).to_string()),
+        ("ip_trust", opt(&t.ip_trust).to_string()),
+        ("ua_hash", t.ua_hash.clone()),
+        ("ua_class", opt(&t.ua_class).to_string()),
+        ("ja4", opt(&t.ja4).to_string()),
+        ("ja4t", opt(&t.ja4t).to_string()),
+        ("h2_fp", opt(&t.h2_fp).to_string()),
+        ("remote_port", opt_int(t.remote_port)),
+        ("actor_id", opt(&t.actor_id).to_string()),
+        ("cluster_key", opt(&t.cluster_key).to_string()),
+        ("verdict", opt(&t.verdict).to_string()),
+        (
+            "ruleset_hash",
+            hex(&t.ruleset_hash).unwrap_or_else(|| "—".to_string()),
+        ),
+        ("dropped_since_last", t.dropped_since_last.to_string()),
+    ];
+    for (k, v) in rows {
+        let _ = write!(body, "<dt>{k}</dt><dd>{}</dd>", mono(v));
+    }
+    body.push_str("</dl>");
+    layout(&format!("Turn {title}"), "", &body)
+}
+
+fn pretty_json(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()))
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// `/ui/trace/{turn_id}`: the seven steps as a vertical list.
+pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> String {
+    let title = t.turn.turn_id.as_deref().unwrap_or("?");
+    let mut body = format!(
+        "<h1>Trace {}</h1><p class=\"sub\">{} · seven steps from request to decision</p>",
+        mono(title),
+        esc(&fmt_ts_us(t.turn.ts_us)),
+    );
+    // 1. turn
+    body.push_str("<h2>1 · Turn</h2><p class=\"sub\">from the turns row, ingested ");
+    body.push_str(&esc(&fmt_ts_us(t.turn.ts_us)));
+    let _ = write!(
+        body,
+        "</p><p>{} {} {} → {} · {}</p>",
+        mono(&t.turn.verb),
+        mono(&t.turn.route),
+        t.turn.status,
+        t.turn
+            .verdict
+            .as_deref()
+            .map(verdict_chip)
+            .unwrap_or_else(|| "—".to_string()),
+        turn_link(&t.turn.turn_id),
+    );
+    // 2. resolution
+    body.push_str("<h2>2 · Resolution</h2><p class=\"sub\">from actor_bindings, live; the turn's identifiers replayed from its columns</p>");
+    match &t.resolution.actor {
+        Some(a) => {
+            let _ = write!(
+                body,
+                "<dl class=\"kv\"><dt>Actor</dt><dd>{} {}</dd>\
+                 <dt>Confirmed</dt><dd>{}</dd>\
+                 <dt>Opened</dt><dd class=\"mono\">{}</dd>\
+                 <dt>Turns</dt><dd class=\"mono\">{}</dd></dl>",
+                actor_link(&a.id),
+                id_cell(&a.id),
+                if a.confirmed {
+                    chip("confirmed", "good")
+                } else {
+                    chip("provisional", "warn")
+                },
+                esc(&fmt_ts_us(a.opened_us)),
+                a.turns,
+            );
+        }
+        None => {
+            body.push_str("<p class=\"empty\">No actor: the turn carried no strong identifier.</p>")
+        }
+    }
+    if let Some(c) = &t.resolution.cluster_key {
+        let _ = write!(body, "<p>Cluster {}</p>", cluster_link(c));
+    }
+    if !t.resolution.bindings.is_empty() {
+        body.push_str("<table><tr><th>Kind</th><th>Value</th><th>First</th><th>Last</th><th>Returned</th><th></th></tr>");
+        for b in &t.resolution.bindings {
+            let _ = write!(
+                body,
+                "<tr><td>{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td>\
+                 <td class=\"mono\">{}</td><td>{}</td><td>{}</td></tr>",
+                mono(&b.kind),
+                esc(&b.value),
+                esc(&fmt_ts_us(b.first_seen)),
+                esc(&fmt_ts_us(b.last_seen)),
+                if b.returned { "yes" } else { "no" },
+                if b.on_this_turn {
+                    chip("on this turn", "info")
+                } else {
+                    String::new()
+                },
+            );
+        }
+        body.push_str("</table>");
+    }
+    // 3. features
+    body.push_str(
+        "<h2>3 · Feature rows</h2><p class=\"sub\">from feature_vectors, keyed by turn</p>",
+    );
+    if t.features.is_empty() {
+        body.push_str("<p class=\"empty\">No feature row: a provisional actor holds one turn and is noise, or the window never formed.</p>");
+    }
+    for f in &t.features {
+        body.push_str(&feature_block(f));
+    }
+    // 4. scores
+    body.push_str("<h2>4 · Scores</h2><p class=\"sub\">from scores, keyed by turn</p>");
+    if t.scores.is_empty() {
+        body.push_str(
+            "<p class=\"empty\">No score: below the cold-start floor, or Windside off.</p>",
+        );
+    }
+    for s in &t.scores {
+        body.push_str(&score_block(
+            s,
+            s.surface
+                .as_deref()
+                .and_then(|surface| thresholds.get(surface).copied()),
+        ));
+    }
+    // 5. proposal
+    body.push_str(
+        "<h2>5 · Proposal</h2><p class=\"sub\">the latest llm_proposed label for the subject</p>",
+    );
+    match &t.proposal {
+        Some(p) => body.push_str(&proposal_block(p)),
+        None => body.push_str("<p class=\"empty\">No proposal for this subject.</p>"),
+    }
+    // 6. labels
+    body.push_str(
+        "<h2>6 · Labels</h2><p class=\"sub\">every label on the subject, newest first</p>",
+    );
+    body.push_str(&label_table(&t.labels));
+    // 7. decision
+    body.push_str("<h2>7 · Decision</h2><p class=\"sub\">the verdict plus the live sticky decision on the actor</p>");
+    let _ = write!(
+        body,
+        "<dl class=\"kv\"><dt>Verdict</dt><dd>{}</dd></dl>",
+        t.decision
+            .verdict
+            .as_deref()
+            .map(verdict_chip)
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    if let Some(g) = &t.decision.gate_pretty {
+        body.push_str("<h2>Gate answer</h2>");
+        let _ = write!(body, "<pre>{}</pre>", esc(g));
+    }
+    if let Some(r) = &t.decision.rules_pretty {
+        body.push_str("<h2>Rules matched</h2>");
+        let _ = write!(body, "<pre>{}</pre>", esc(r));
+    }
+    match &t.decision.actor_decision {
+        Some(d) => body.push_str(&decision_table(std::slice::from_ref(d), now_s)),
+        None => body.push_str("<p class=\"empty\">No live sticky decision on this actor.</p>"),
+    }
+    layout(&format!("Trace {title}"), "", &body)
+}
+
+/// `/ui/actors`: actors by latest score.
+pub fn actors_list(
+    rows: &[ActorRow],
+    page: i64,
+    total: i64,
+    thresholds: &HashMap<String, f64>,
+) -> String {
+    let mut body = String::from("<h1>Actors</h1>");
+    if rows.is_empty() {
+        body.push_str("<p class=\"empty\">No actors yet.</p>");
+        return layout("Actors", "/ui/actors", &body);
+    }
+    body.push_str(
+        "<table><tr><th>Actor</th><th>Kind</th><th>Surfaces</th><th>Confirmed</th>\
+         <th>Turns held</th><th>Score</th><th>State</th><th>Cluster</th></tr>",
+    );
+    for r in rows {
+        let state = [
+            r.blocked.then(|| chip("blocked", "bad")),
+            r.proposal_pending.then(|| chip("proposal", "info")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        let _ = write!(
+            body,
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+             <td class=\"num\">{}</td><td>{}</td><td>{} {}</td><td>{}</td></tr>",
+            actor_link(&r.id),
+            esc(&r.kind),
+            esc(&r.surfaces.join(", ")),
+            if r.confirmed { "yes" } else { "no" },
+            r.turns_held
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            r.score
+                .map(|s| score_chip(
+                    s,
+                    r.score_surface
+                        .as_deref()
+                        .and_then(|surface| thresholds.get(surface).copied()),
+                ))
+                .unwrap_or_else(|| "—".to_string()),
+            state,
+            esc(r.latest_label.as_deref().unwrap_or("")),
+            r.cluster
+                .as_deref()
+                .map(cluster_link)
+                .unwrap_or_else(|| "—".to_string()),
+        );
+    }
+    body.push_str("</table>");
+    body.push_str(&pager("/ui/actors?", page, total));
+    layout("Actors", "/ui/actors", &body)
+}
+
+fn activity_block(a: &super::queries::ActivityView) -> String {
+    let mut out = String::from("<dl class=\"kv\">");
+    let _ = write!(
+        out,
+        "<dt>Turns</dt><dd class=\"mono\">{}</dd>\
+         <dt>Active</dt><dd class=\"mono\">{} s</dd>\
+         <dt>Assets</dt><dd class=\"mono\">{}</dd>\
+         <dt>Status</dt><dd class=\"mono\">2xx {} · 3xx {} · 404 {} · 401/403 {} · 429 {} · 5xx {}</dd>\
+         <dt>IRI median</dt><dd class=\"mono\">{}</dd>\
+         <dt>IRI CV</dt><dd class=\"mono\">{}</dd>\
+         <dt>Routes</dt><dd class=\"mono\">{}</dd>",
+        a.turns,
+        a.active_s,
+        a.assets,
+        a.ok_2xx,
+        a.redirects,
+        a.not_found,
+        a.denied,
+        a.limited,
+        a.errors_5xx,
+        a.iri_median_ms.map(|n| format!("{n:.0} ms")).unwrap_or_else(|| "—".to_string()),
+        opt_f64(a.iri_cv),
+        a.distinct_routes,
+    );
+    out.push_str("</dl>");
+    out
+}
+
+fn label_form(scope: &str, id: &str, window_end_ts: Option<i64>, csrf: &str) -> String {
+    let action = if scope == "actor" {
+        format!("/ui/actors/{id}/label")
+    } else {
+        format!("/ui/clusters/{id}/label")
+    };
+    match window_end_ts {
+        Some(ts) => format!(
+            "<form method=\"post\" action=\"{action}\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <input type=\"hidden\" name=\"window_end_ts\" value=\"{ts}\">\
+             <label>Verdict \
+             <select name=\"label\">\
+             <option value=\"benign\">benign</option>\
+             <option value=\"malicious\">malicious</option>\
+             <option value=\"unknown\">unknown</option>\
+             </select></label> \
+             <label>Note <input type=\"text\" name=\"note\" size=\"40\" maxlength=\"280\"></label> \
+             <button class=\"btn\" type=\"submit\">Label this window</button></form>\
+             <p class=\"sub\">Appends an operator label at 1.0 on window {ts}; latest wins on read.</p>",
+        ),
+        None => "<p class=\"empty\">No window yet: nothing to label.</p>".to_string(),
+    }
+}
+
+/// `/ui/actors/{id}`: everything console.md §3 lists, in plain tables.
+pub fn actor_detail_page(
+    d: &ActorDetail,
+    tap: &TapInfo,
+    thresholds: &HashMap<String, f64>,
+    csrf: &str,
+    now_s: i64,
+) -> String {
+    let mut body = format!(
+        "<h1>Actor {}</h1><p class=\"sub\">{} · {} · {}</p>",
+        mono(&d.head.id),
+        esc(&d.row.kind),
+        if d.head.confirmed {
+            chip("confirmed", "good")
+        } else {
+            chip("provisional", "warn")
+        },
+        if d.row.blocked {
+            chip("blocked", "bad")
+        } else {
+            chip("not blocked", "muted")
+        },
+    );
+    body.push_str("<h2>Header</h2><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>Actor id</dt><dd>{}</dd>\
+         <dt>First seen</dt><dd class=\"mono\">{}</dd>\
+         <dt>Last seen</dt><dd class=\"mono\">{}</dd>\
+         <dt>Turns</dt><dd class=\"mono\">{}</dd>\
+         <dt>Turns held</dt><dd class=\"mono\">{}</dd>\
+         <dt>Surfaces</dt><dd>{}</dd>",
+        id_cell(&d.head.id),
+        esc(&fmt_ts_us(d.head.opened_us)),
+        esc(&fmt_ts_us(d.head.last_us)),
+        d.head.turns,
+        d.row
+            .turns_held
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        esc(&d.row.surfaces.join(", ")),
+    );
+    if !d.merged_from.is_empty() {
+        body.push_str("<dt>Merged from</dt><dd>");
+        for (i, m) in d.merged_from.iter().enumerate() {
+            if i > 0 {
+                body.push_str(" · ");
+            }
+            body.push_str(&actor_link(m));
+        }
+        body.push_str("</dd>");
+    }
+    body.push_str("</dl><h2>Bindings</h2>");
+    if d.bindings.is_empty() {
+        body.push_str("<p class=\"empty\">No bindings stored.</p>");
+    } else {
+        body.push_str("<table><tr><th>Kind</th><th>Value</th><th>First</th><th>Last</th><th>Expires</th><th>State</th></tr>");
+        for b in &d.bindings {
+            let _ = write!(
+                body,
+                "<tr><td>{}</td><td>{}</td><td class=\"mono\">{}</td>\
+                 <td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{} {}</td></tr>",
+                mono(&b.kind),
+                id_cell(&b.value),
+                esc(&fmt_ts_us(b.first_seen)),
+                esc(&fmt_ts_us(b.last_seen)),
+                esc(&fmt_ts_us(b.expires_at)),
+                if b.provisional {
+                    chip("provisional", "warn")
+                } else {
+                    chip("strong", "muted")
+                },
+                if b.returned {
+                    chip("returned", "good")
+                } else {
+                    String::new()
+                },
+            );
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("<h2>Client</h2><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>UA class</dt><dd>{}</dd>\
+         <dt>JA4</dt><dd>{} ({})</dd>\
+         <dt>JA4T</dt><dd>{}</dd>\
+         <dt>Mismatch</dt><dd>{}</dd>\
+         <dt>Shape</dt><dd>{} ({} distinct)</dd>\
+         <dt>Flag rates</dt><dd class=\"mono\">{}</dd>",
+        mono(opt(&d.client.ua_class)),
+        mono(opt(&d.client.ja4)),
+        mono(&tap.class),
+        mono(opt(&d.client.ja4t)),
+        if tap.mismatch {
+            chip("ua_vs_ja4_mismatch", "warn")
+        } else {
+            chip("no", "muted")
+        },
+        mono(opt(&d.client.shape_prefix)),
+        d.client.shape_count,
+        if d.client.flag_rates.is_empty() {
+            "—".to_string()
+        } else {
+            d.client
+                .flag_rates
+                .iter()
+                .map(|(f, r)| format!("{f} {r:.2}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        },
+    );
+    body.push_str("</dl><h2>Cluster</h2>");
+    match &d.row.cluster {
+        Some(c) => {
+            let _ = write!(
+                body,
+                "<p>{} · {} actors</p>",
+                cluster_link(c),
+                d.cluster_actors
+            );
+        }
+        None => body.push_str("<p class=\"empty\">No cluster key on this actor's turns.</p>"),
+    }
+    body.push_str("<h2>Activity</h2>");
+    body.push_str(&activity_block(&d.activity));
+    body.push_str("<h2>Scores</h2>");
+    match &d.scores.latest {
+        Some(s) => {
+            body.push_str(&score_block(
+                s,
+                s.surface
+                    .as_deref()
+                    .and_then(|surface| thresholds.get(surface).copied()),
+            ));
+            let _ = write!(body, "<p>{}</p>", esc(&d.scores.explanation));
+        }
+        None => body.push_str("<p class=\"empty\">No scores yet.</p>"),
+    }
+    if !d.scores.history.is_empty() {
+        body.push_str("<h2>Score history</h2><table><tr><th>Time</th><th>Score</th></tr>");
+        for (ts, v) in &d.scores.history {
+            let _ = write!(
+                body,
+                "<tr><td class=\"mono\">{}</td><td class=\"num\">{v:.4}</td></tr>",
+                esc(&fmt_ts_us(*ts)),
+            );
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("<h2>Labels</h2>");
+    body.push_str(&label_table(&d.labels));
+    body.push_str("<h2>Pending proposal</h2>");
+    match &d.proposal {
+        Some(p) => body.push_str(&proposal_block(p)),
+        None => body.push_str("<p class=\"empty\">No proposal for this actor.</p>"),
+    }
+    body.push_str("<h2>Label verdicts</h2>");
+    body.push_str(&label_form("actor", &d.head.id, d.window_end_ts, csrf));
+    body.push_str("<h2>Decisions</h2>");
+    body.push_str(&decision_table(&d.decisions, now_s));
+    if d.row.blocked {
+        let _ = write!(
+            body,
+            "<form method=\"post\" action=\"/ui/actors/{}/unblock\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <button class=\"btn\" type=\"submit\">Unblock this actor</button></form>",
+            d.head.id,
+        );
+    } else {
+        let _ = write!(
+            body,
+            "<form method=\"post\" action=\"/ui/actors/{}/block\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <button class=\"btn btn-warn\" type=\"submit\">Block this actor for 24 h</button></form>\
+             <p class=\"sub\">A sticky actor-scope block, rule “operator”; it answers only in enforce mode.</p>",
+            d.head.id,
+        );
+    }
+    body.push_str("<h2>Similar actors</h2>");
+    if d.similar.is_empty() {
+        body.push_str("<p class=\"empty\">No other actor shares this cluster.</p>");
+    } else {
+        body.push_str("<table><tr><th>Actor</th><th>Kind</th><th>Score</th><th>Turns</th><th>Last seen</th></tr>");
+        for s in &d.similar {
+            let _ = write!(
+                body,
+                "<tr><td>{}</td><td>{}</td><td class=\"num\">{}</td>\
+                 <td class=\"num\">{}</td><td class=\"mono\">{}</td></tr>",
+                actor_link(&s.id),
+                esc(&s.kind),
+                s.score
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "—".to_string()),
+                s.turns,
+                esc(&fmt_ts_us(s.last_us)),
+            );
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("<h2>Turns</h2>");
+    body.push_str(&turn_table(&d.turns));
+    body.push_str(&pager(
+        &format!("/ui/actors/{}?", d.head.id),
+        d.page,
+        d.turn_total,
+    ));
+    layout(&format!("Actor {}", d.head.id), "/ui/actors", &body)
+}
+
+/// `/ui/clusters`: clusters by latest score.
+pub fn clusters_list(
+    rows: &[ClusterRow],
+    page: i64,
+    total: i64,
+    thresholds: &HashMap<String, f64>,
+) -> String {
+    let mut body = String::from("<h1>Clusters</h1>");
+    if rows.is_empty() {
+        body.push_str("<p class=\"empty\">No clusters yet.</p>");
+        return layout("Clusters", "/ui/clusters", &body);
+    }
+    body.push_str(
+        "<table><tr><th>Cluster</th><th>Turns</th><th>Actors</th><th>Surfaces</th>\
+         <th>Score</th><th>State</th></tr>",
+    );
+    for r in rows {
+        let _ = write!(
+            body,
+            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td>\
+             <td>{}</td><td>{} {}</td></tr>",
+            cluster_link(&r.key),
+            r.turns,
+            r.actors,
+            esc(&r.surfaces.join(", ")),
+            r.score
+                .map(|s| score_chip(
+                    s,
+                    r.score_surface
+                        .as_deref()
+                        .and_then(|surface| thresholds.get(surface).copied()),
+                ))
+                .unwrap_or_else(|| "—".to_string()),
+            if r.proposal_pending {
+                chip("proposal", "info")
+            } else {
+                String::new()
+            },
+            esc(r.latest_label.as_deref().unwrap_or("")),
+        );
+    }
+    body.push_str("</table>");
+    body.push_str(&pager("/ui/clusters?", page, total));
+    layout("Clusters", "/ui/clusters", &body)
+}
+
+/// `/ui/clusters/{key}`: the cluster scope in the same shape.
+pub fn cluster_detail_page(
+    d: &ClusterDetail,
+    thresholds: &HashMap<String, f64>,
+    csrf: &str,
+) -> String {
+    let mut body = format!(
+        "<h1>Cluster {}</h1><p class=\"sub\">{} turns · {} actors</p>",
+        mono(&d.row.key),
+        d.row.turns,
+        d.row.actors,
+    );
+    body.push_str("<dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>Key</dt><dd>{}</dd>\
+         <dt>Surfaces</dt><dd>{}</dd>\
+         <dt>Last activity</dt><dd class=\"mono\">{}</dd>",
+        id_cell(&d.row.key),
+        esc(&d.row.surfaces.join(", ")),
+        esc(&fmt_ts_us(d.row.last_us)),
+    );
+    body.push_str("</dl><h2>Actors</h2>");
+    if d.actor_ids.is_empty() {
+        body.push_str("<p class=\"empty\">No actor bound any of this cluster's turns.</p>");
+    } else {
+        body.push_str("<p>");
+        for (i, a) in d.actor_ids.iter().enumerate() {
+            if i > 0 {
+                body.push_str(" · ");
+            }
+            body.push_str(&actor_link(a));
+        }
+        body.push_str("</p>");
+    }
+    body.push_str("<h2>Activity</h2>");
+    body.push_str(&activity_block(&d.activity));
+    body.push_str("<h2>Scores</h2>");
+    match &d.scores.latest {
+        Some(s) => {
+            body.push_str(&score_block(
+                s,
+                s.surface
+                    .as_deref()
+                    .and_then(|surface| thresholds.get(surface).copied()),
+            ));
+            let _ = write!(body, "<p>{}</p>", esc(&d.scores.explanation));
+        }
+        None => body.push_str("<p class=\"empty\">No scores yet.</p>"),
+    }
+    body.push_str("<h2>Labels</h2>");
+    body.push_str(&label_table(&d.labels));
+    body.push_str("<h2>Pending proposal</h2>");
+    match &d.proposal {
+        Some(p) => body.push_str(&proposal_block(p)),
+        None => body.push_str("<p class=\"empty\">No proposal for this cluster.</p>"),
+    }
+    body.push_str("<h2>Label verdicts</h2>");
+    body.push_str(&label_form("cluster", &d.row.key, d.window_end_ts, csrf));
+    body.push_str("<h2>Turns</h2>");
+    body.push_str(&turn_table(&d.turns));
+    body.push_str(&pager(
+        &format!("/ui/clusters/{}?", d.row.key),
+        d.page,
+        d.turn_total,
+    ));
+    layout(&format!("Cluster {}", d.row.key), "/ui/clusters", &body)
+}
+
+/// `/ui/review`: the queue in the CLI's order, with `why_in_queue`.
+pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf: &str) -> String {
+    let mut body = String::from("<h1>Review</h1><p class=\"sub\">Top 20 by score, as the CLI orders them. Decided rows keep their form: labels are append-only.</p>");
+    if rows.is_empty() {
+        body.push_str("<p class=\"empty\">Nothing scored yet: no queue.</p>");
+        return layout("Review", "/ui/review", &body);
+    }
+    for r in rows {
+        let _ = write!(
+            body,
+            "<h2>{}</h2><p class=\"sub\">{}</p>",
+            actor_link(&r.row.scope_id),
+            esc(&r.why.join(" · ")),
+        );
+        body.push_str("<dl class=\"kv\">");
+        let _ = write!(
+            body,
+            "<dt>Score</dt><dd>{}</dd>\
+             <dt>Surface</dt><dd>{}</dd>\
+             <dt>Top features</dt><dd>{}</dd>\
+             <dt>Turns held</dt><dd class=\"mono\">{}</dd>\
+             <dt>Window end</dt><dd class=\"mono\">{}</dd>",
+            score_chip(
+                r.row.score,
+                r.row
+                    .surface
+                    .as_deref()
+                    .and_then(|s| thresholds.get(s).copied()),
+            ),
+            mono(opt(&r.row.surface)),
+            esc(&r.row.top.join(", ")),
+            r.row.held,
+            esc(&fmt_ts_us(r.row.window_end_ts)),
+        );
+        body.push_str("</dl>");
+        match &r.row.proposal {
+            Some(p) => {
+                let _ = write!(
+                    body,
+                    "<dl class=\"kv\"><dt>Proposal</dt><dd>{} {:.2}</dd>\
+                     <dt>Signals</dt><dd>{}</dd>\
+                     <dt>Reason</dt><dd>{}</dd></dl>",
+                    label_chip(&p.label),
+                    p.confidence,
+                    esc(&p.signals.join(", ")),
+                    mono(&p.reason),
+                );
+            }
+            None => body.push_str("<p class=\"empty\">No proposal for this actor.</p>"),
+        }
+        if let Some(o) = &r.operator {
+            let _ = write!(
+                body,
+                "<p>Operator: {} {} <span class=\"mono\">{}</span></p>",
+                label_chip(&o.label),
+                mono(opt(&o.note)),
+                esc(&fmt_ts_s(o.created_at)),
+            );
+        }
+        let _ = write!(
+            body,
+            "<form method=\"post\" action=\"/ui/review/decide\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <input type=\"hidden\" name=\"scope_id\" value=\"{}\">\
+             <input type=\"hidden\" name=\"window_end_ts\" value=\"{}\">",
+            esc(&r.row.scope_id),
+            r.row.window_end_ts,
+        );
+        if r.row.proposal.is_some() {
+            body.push_str("<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"confirm\">confirm</button> ");
+        }
+        body.push_str(
+            "<button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"benign\">benign</button> \
+             <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"malicious\">malicious</button> \
+             <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"unknown\">unknown</button></form>",
+        );
+    }
+    layout("Review", "/ui/review", &body)
+}
+
+/// `/ui/labels`: every label, with source and value filters.
+pub fn labels_list(
+    labels: &[LabelRef],
+    sources: &[String],
+    source: Option<&str>,
+    label: Option<&str>,
+    page: i64,
+    total: i64,
+) -> String {
+    let mut body = String::from("<h1>Labels</h1><p class=\"sub\">Source: ");
+    let link = |text: &str, href: Option<String>| {
+        href.map(|h| format!("<a href=\"{h}\">{text}</a>"))
+            .unwrap_or_else(|| format!("<strong>{text}</strong>"))
+    };
+    let base = |s: Option<&str>, l: Option<&str>| {
+        let mut q = String::from("/ui/labels?");
+        if let Some(s) = s {
+            q.push_str(&format!("source={s}&"));
+        }
+        if let Some(l) = l {
+            q.push_str(&format!("label={l}&"));
+        }
+        q
+    };
+    body.push_str(&link(
+        "all",
+        (source.is_some() || label.is_some()).then(|| base(None, label)),
+    ));
+    for s in sources {
+        body.push_str(" · ");
+        let active = source == Some(s.as_str());
+        body.push_str(&link(s, (!active).then(|| base(Some(s), label))));
+    }
+    body.push_str("<br>Label: ");
+    body.push_str(&link("all", label.map(|_| base(source, None))));
+    for v in ["benign", "malicious", "unknown"] {
+        body.push_str(" · ");
+        let active = label == Some(v);
+        body.push_str(&link(v, (!active).then(|| base(source, Some(v)))));
+    }
+    body.push_str("</p>");
+    if labels.is_empty() {
+        body.push_str("<p class=\"empty\">No labels under these filters.</p>");
+        return layout("Labels", "/ui/labels", &body);
+    }
+    body.push_str(
+        "<table><tr><th>Created</th><th>Subject</th><th>Scope</th><th>Source</th>\
+         <th>Label</th><th>Confidence</th><th>Kind</th><th>Surface</th><th>Signals</th><th>Note</th></tr>",
+    );
+    for l in labels {
+        let subject = if l.scope == "actor" {
+            actor_link(&l.scope_id)
+        } else {
+            cluster_link(&l.scope_id)
+        };
+        let _ = write!(
+            body,
+            "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
+             <td>{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            esc(&fmt_ts_s(l.created_at)),
+            subject,
+            mono(&l.scope),
+            mono(&l.source),
+            label_chip(&l.label),
+            l.confidence,
+            mono(opt(&l.kind)),
+            mono(opt(&l.surface)),
+            mono(opt(&l.signals)),
+            mono(opt(&l.note)),
+        );
+    }
+    body.push_str("</table>");
+    body.push_str(&pager(&base(source, label), page, total));
+    layout("Labels", "/ui/labels", &body)
+}
+
+/// `/ui/rules`: the install set and the overrides, plus the drafts
+/// section (empty until the draft point lands).
+pub fn rules_list(rules: &[RuleView], drafts: &[RuleView]) -> String {
+    let mut body = String::from("<h1>Rules</h1>");
+    if rules.is_empty() {
+        body.push_str("<p class=\"empty\">No rules installed.</p>");
+    } else {
+        body.push_str(
+            "<table><tr><th>Id</th><th>Version</th><th>State</th><th>Mode</th><th>Action</th>\
+             <th>Origin</th><th>Note</th><th>Matched 24h</th><th>Would act</th><th>Acted</th></tr>",
+        );
+        for r in rules {
+            let _ = write!(
+                body,
+                "<tr><td>{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
+                 <td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+                 <td class=\"num\">{}</td></tr>",
+                mono(&r.id),
+                r.version,
+                mono(&r.state),
+                mono(&r.mode),
+                mono(&r.action),
+                mono(&r.origin_kind),
+                esc(&r.note),
+                r.matched_24h,
+                r.would_act_24h,
+                r.acted_24h,
+            );
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("<h2>Drafts</h2>");
+    if drafts.is_empty() {
+        body.push_str("<p class=\"empty\">No drafts: the draft point is not built yet.</p>");
+    }
+    layout("Rules", "/ui/rules", &body)
+}
+
+/// `/ui/model`: version, mode, thresholds, manifest, shadow report.
+pub fn model_page(m: &ModelView) -> String {
+    let mut body = String::from("<h1>Model</h1><dl class=\"kv\">");
+    let _ = write!(
+        body,
+        "<dt>Windside mode</dt><dd>{}</dd>\
+         <dt>Model version</dt><dd>{}</dd>\
+         <dt>Features version</dt><dd class=\"mono\">{}</dd>",
+        mono(&m.windside_mode),
+        mono(m.model_version.as_deref().unwrap_or("—")),
+        m.features_version
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    body.push_str("</dl><h2>Thresholds</h2>");
+    if m.thresholds.is_empty() {
+        body.push_str("<p class=\"empty\">No model loaded: no thresholds.</p>");
+    } else {
+        body.push_str("<table><tr><th>Surface</th><th>Threshold</th></tr>");
+        let mut ts = m.thresholds.clone();
+        ts.sort_by(|a, b| a.0.cmp(&b.0));
+        for (s, t) in ts {
+            let _ = write!(
+                body,
+                "<tr><td>{}</td><td class=\"num\">{t}</td></tr>",
+                mono(&s)
+            );
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("<h2>Manifest metrics</h2>");
+    match &m.manifest_pretty {
+        Some(manifest) => {
+            let _ = write!(body, "<pre>{}</pre>", esc(manifest));
+        }
+        None => body.push_str("<p class=\"empty\">No manifest on disk.</p>"),
+    }
+    body.push_str("<h2>Shadow report</h2>");
+    if let Some(e) = &m.shadow_error {
+        let _ = write!(body, "<p class=\"error\">{}</p>", esc(e));
+    }
+    match &m.shadow {
+        None => body.push_str("<p class=\"empty\">No shadow report.</p>"),
+        Some(r) => {
+            let _ = write!(
+                body,
+                "<dl class=\"kv\"><dt>Since</dt><dd class=\"mono\">{}</dd>\
+                 <dt>Model</dt><dd>{}</dd>\
+                 <dt>Agreement</dt><dd class=\"mono\">{} of {}</dd>\
+                 <dt>Above without block</dt><dd class=\"mono\">{}</dd>\
+                 <dt>Below with block</dt><dd class=\"mono\">{}</dd>\
+                 <dt>Rows without threshold</dt><dd class=\"mono\">{}</dd></dl>",
+                esc(&fmt_ts_us(r.since_us)),
+                mono(r.model_version.as_deref().unwrap_or("—")),
+                r.agreement.0,
+                r.agreement.1,
+                r.above_without_block,
+                r.below_with_block,
+                r.rows_without_threshold,
+            );
+            if !r.fp_by_surface.is_empty() {
+                body.push_str("<h2>Verified-credential FP by surface</h2><table><tr><th>Surface</th><th>Above</th><th>Rows</th><th>Threshold</th></tr>");
+                for (s, fp) in &r.fp_by_surface {
+                    let _ = write!(
+                        body,
+                        "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+                         <td class=\"num\">{}</td></tr>",
+                        mono(s),
+                        fp.above,
+                        fp.rows,
+                        fp.threshold
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "—".to_string()),
+                    );
+                }
+                body.push_str("</table>");
+            }
+            if !r.by_scope.is_empty() {
+                body.push_str("<h2>Rows by scope</h2><table><tr><th>Scope</th><th>Feature rows</th><th>Scored</th><th>Skipped</th></tr>");
+                for (s, c) in &r.by_scope {
+                    let _ = write!(
+                        body,
+                        "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
+                         <td class=\"num\">{}</td></tr>",
+                        mono(s),
+                        c.feature_rows,
+                        c.scored,
+                        c.skipped,
+                    );
+                }
+                body.push_str("</table>");
+            }
+            if !r.disagreements.is_empty() {
+                body.push_str("<h2>Disagreements</h2><table><tr><th>Actor</th><th>Surface</th><th>Score</th><th></th><th>Rule</th></tr>");
+                for d in &r.disagreements {
+                    let _ = write!(
+                        body,
+                        "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.4}</td><td>{}</td><td>{}</td></tr>",
+                        actor_link(&d.scope_id),
+                        mono(opt(&d.surface)),
+                        d.score,
+                        if d.above_without_block { "above, no block" } else { "below, blocked" },
+                        mono(opt(&d.rule)),
+                    );
+                }
+                body.push_str("</table>");
+                if r.disagreements_total > r.disagreements.len() {
+                    let _ = write!(
+                        body,
+                        "<p class=\"sub\">{} more not shown.</p>",
+                        r.disagreements_total - r.disagreements.len()
+                    );
+                }
+            }
+        }
+    }
+    layout("Model", "/ui/model", &body)
+}
+
+/// `/ui/features`: the feature names in order, with descriptions.
+pub fn features_page(table: &[(String, String)]) -> String {
+    let mut body = String::from(
+        "<h1>Features</h1><p class=\"sub\">v2 vector, in stored order, from the code's table.</p>",
+    );
+    body.push_str("<table><tr><th>#</th><th>Name</th><th>Description</th></tr>");
+    for (i, (n, d)) in table.iter().enumerate() {
+        let _ = write!(
+            body,
+            "<tr><td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
+            i,
+            mono(n),
+            esc(d),
+        );
+    }
+    body.push_str("</table>");
+    layout("Features", "/ui/features", &body)
+}
+
+/// `/ui/`: health, counts, today's LLM usage, the newest events.
+pub fn dashboard(health: &serde_json::Value, d: &super::queries::Dashboard, now_s: i64) -> String {
+    let mut body = String::from("<h1>Overview</h1><h2>Health</h2><dl class=\"kv\">");
+    if let Some(map) = health.as_object() {
+        let mut keys: Vec<&String> = map.keys().collect();
+        keys.sort();
+        for k in keys {
+            let v = &map[k];
+            let rendered = if v.is_string() {
+                v.as_str().unwrap_or("").to_string()
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            };
+            let _ = write!(body, "<dt>{}</dt><dd>{}</dd>", esc(k), mono(&rendered));
+        }
+    }
+    body.push_str("</dl><h2>Counts</h2><table><tr><th>Table</th><th>Rows</th></tr>");
+    for (t, n) in &d.counts {
+        let _ = write!(
+            body,
+            "<tr><td>{}</td><td class=\"num\">{n}</td></tr>",
+            mono(t)
+        );
+    }
+    body.push_str("</table><h2>Today's LLM calls</h2><table><tr><th>Point</th><th>Calls</th><th>Tokens</th></tr>");
+    for (point, (calls, tokens)) in [
+        ("label", d.today.label),
+        ("explain", d.today.explain),
+        ("classify", d.today.classify),
+        ("draft", d.today.draft),
+    ] {
+        let _ = write!(
+            body,
+            "<tr><td>{}</td><td class=\"num\">{calls}</td><td class=\"num\">{tokens}</td></tr>",
+            mono(point),
+        );
+    }
+    body.push_str("</table><h2>Latest turns</h2>");
+    body.push_str(&turn_table(&d.turns));
+    body.push_str("<h2>Latest decisions</h2>");
+    body.push_str(&decision_table(&d.decisions, now_s));
+    body.push_str("<h2>Latest proposals</h2>");
+    body.push_str(&label_table(&d.proposals));
+    body.push_str("<h2>Latest labels</h2>");
+    body.push_str(&label_table(&d.labels));
+    layout("Overview", "/ui/", &body)
 }
 
 #[cfg(test)]
