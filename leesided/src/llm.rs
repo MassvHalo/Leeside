@@ -51,7 +51,7 @@ pub const ENVELOPE_TURNS: i64 = 30;
 
 /// The point-1 schema of docs/llm.md section 8.1, sent as the
 /// `response_format` in schema mode.
-pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals","cited_turns"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]}},"cited_turns":{"type":"array","maxItems":10,"items":{"type":"integer","minimum":0}}}}"#;
+pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["name","turns"],"properties":{"name":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]},"turns":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":0}}}}}}}"#;
 
 /// The point-2 schema of docs/llm.md section 8.2.
 pub const EXPLAIN_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["explanation"],"properties":{"explanation":{"type":"string","maxLength":240}}}"#;
@@ -440,16 +440,16 @@ pub fn build_label_envelope_at(
         WindowSel::Earliest => ("ASC", -1),
         WindowSel::At(ts) => ("DESC", ts),
     };
-    let (window_ts, vector, surface): (i64, String, Option<String>) = conn
+    let (window_ts, vector, surface, anchor): (i64, String, Option<String>, i64) = conn
         .query_row(
             &format!(
-                "SELECT fv.ts_us, fv.vector, fv.surface FROM feature_vectors fv \
+                "SELECT fv.ts_us, fv.vector, fv.surface, t.rowid FROM feature_vectors fv \
                  JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
                  WHERE fv.scope = ?1 AND fv.key = ?2 AND fv.version = ?3 \
                  AND (?4 < 0 OR fv.ts_us = ?4) ORDER BY t.rowid {order} LIMIT 1",
             ),
             params![subject.scope, subject.id, features::VERSION, at],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
@@ -595,13 +595,16 @@ pub fn build_label_envelope_at(
     if let Some(cv) = window.get("gap_cv").cloned() {
         window.insert("iri_cv".to_string(), cv);
     }
+    // The turns pair with the window exactly: the last 64 at or
+    // before the window's own turn, so early and spread windows do
+    // not see later traffic.
     let asset_ratio: Option<f64> = conn
         .query_row(
             &format!(
                 "SELECT avg(is_asset = 1) FROM (SELECT is_asset FROM turns \
-                 WHERE {turn_col} = ?1 ORDER BY ts_us DESC LIMIT 64)"
+                 WHERE {turn_col} = ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT 64)"
             ),
-            params![subject.id],
+            params![subject.id, anchor],
             |r| r.get(0),
         )
         .ok()
@@ -614,10 +617,10 @@ pub fn build_label_envelope_at(
     let mut stmt = conn.prepare(&format!(
         "SELECT ts_us, verb, route, status, ua_class, flags, credential_status, tag_status, ja4, \
          surface, is_asset, credential_hash, path_pattern \
-         FROM turns WHERE {turn_col} = ?1 ORDER BY rowid DESC LIMIT {ENVELOPE_TURNS}"
+         FROM turns WHERE {turn_col} = ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT {ENVELOPE_TURNS}"
     ))?;
     let mut turns: Vec<serde_json::Value> = stmt
-        .query_map(params![subject.id], |r| {
+        .query_map(params![subject.id, anchor], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
@@ -839,14 +842,34 @@ fn check_str_len(
     Ok(s.to_string())
 }
 
-/// A validated point-1 proposal.
+/// A validated point-1 proposal. Each signal carries its own
+/// cited turns (at most 6); the union is derived, never sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelProposal {
     pub label: String,
     pub confidence: f64,
     pub reason: String,
-    pub signals: Vec<String>,
-    pub cited_turns: Vec<usize>,
+    pub signals: Vec<crate::faithfulness::CitedSignal>,
+}
+
+impl LabelProposal {
+    /// The sorted deduped union of every signal's turns, for the
+    /// `labels.cited_turns` column.
+    pub fn cited_union(&self) -> Vec<usize> {
+        let mut out: Vec<usize> = self
+            .signals
+            .iter()
+            .flat_map(|s| s.turns.iter().copied())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The surviving signal names, for the `labels.signals` column.
+    pub fn signal_names(&self) -> Vec<String> {
+        self.signals.iter().map(|s| s.name.clone()).collect()
+    }
 }
 
 /// The point-1 schema of docs/llm.md section 8.1 plus the cited
@@ -854,11 +877,7 @@ pub struct LabelProposal {
 /// JSON mode: enums match exactly, nothing is coerced.
 pub fn validate_label(v: &serde_json::Value) -> Result<LabelProposal, String> {
     let map = v.as_object().ok_or("label: not an object".to_string())?;
-    check_keys(
-        map,
-        &["label", "confidence", "reason", "signals", "cited_turns"],
-        "label",
-    )?;
+    check_keys(map, &["label", "confidence", "reason", "signals"], "label")?;
     let label = check_str_len(map.get("label"), "label", 16, "label")?;
     if !matches!(label.as_str(), "benign" | "malicious" | "unknown") {
         return Err(format!("label: `{label}` is not a label"));
@@ -874,34 +893,41 @@ pub fn validate_label(v: &serde_json::Value) -> Result<LabelProposal, String> {
     }
     let mut signals = Vec::with_capacity(signals_raw.len());
     for s in signals_raw {
-        let s = s
-            .as_str()
-            .ok_or("label: a signal is not a string".to_string())?;
-        if !LABEL_SIGNALS.contains(&s) {
-            return Err(format!("label: `{s}` is not a signal"));
+        let obj = s
+            .as_object()
+            .ok_or("label: a signal is not an object".to_string())?;
+        check_keys(obj, &["name", "turns"], "label")?;
+        let name = obj
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("label: a signal has no name".to_string())?;
+        if !LABEL_SIGNALS.contains(&name) {
+            return Err(format!("label: `{name}` is not a signal"));
         }
-        signals.push(s.to_string());
-    }
-    let cited_raw = map
-        .get("cited_turns")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("label: `cited_turns` is not an array".to_string())?;
-    if cited_raw.len() > 10 {
-        return Err("label: more than 10 cited turns".to_string());
-    }
-    let mut cited_turns = Vec::with_capacity(cited_raw.len());
-    for c in cited_raw {
-        let c = c
-            .as_u64()
-            .ok_or("label: a cited turn is not an index".to_string())?;
-        cited_turns.push(c as usize);
+        let turns_raw = obj
+            .get("turns")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("label: a signal's `turns` is not an array".to_string())?;
+        if turns_raw.len() > 6 {
+            return Err("label: more than 6 turns on a signal".to_string());
+        }
+        let mut turns = Vec::with_capacity(turns_raw.len());
+        for c in turns_raw {
+            let c = c
+                .as_u64()
+                .ok_or("label: a cited turn is not an index".to_string())?;
+            turns.push(c as usize);
+        }
+        signals.push(crate::faithfulness::CitedSignal {
+            name: name.to_string(),
+            turns,
+        });
     }
     Ok(LabelProposal {
         label,
         confidence,
         reason,
         signals,
-        cited_turns,
     })
 }
 
@@ -1427,17 +1453,19 @@ fn write_proposal(
             PROPOSED_CONFIDENCE,
             format!("{} [llm_call:{call_id}]", proposal.reason),
             now,
-            serde_json::to_string(&proposal.signals).unwrap_or_else(|_| "[]".to_string()),
-            serde_json::to_string(&proposal.cited_turns).unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(&proposal.signal_names()).unwrap_or_else(|_| "[]".to_string()),
+            serde_json::to_string(&proposal.cited_union()).unwrap_or_else(|_| "[]".to_string()),
         ],
     )?;
     Ok(())
 }
 
 /// Validate a label completion, check every claimed signal against
-/// the cited turns, and write the proposal. A failed check downgrades
-/// the proposal to `unknown` (the reason is kept) and logs the signal
-/// on the call row. Shared by the worker and `send`.
+/// its own cited turns, and write the proposal. Each failed signal
+/// is dropped and the whole failed list is logged on the call row;
+/// the label is kept when at least one surviving signal sits on its
+/// side, else the proposal lands as `unknown` with the reason kept.
+/// Shared by the worker and `send`.
 #[allow(clippy::too_many_arguments)]
 fn land_label_proposal(
     conn: &Connection,
@@ -1451,27 +1479,53 @@ fn land_label_proposal(
     honeytoken_routes: &[String],
 ) -> Result<(), LlmError> {
     let mut p = validate_label(v).map_err(LlmError::Validate)?;
+    let failed = apply_faithfulness(envelope, &mut p, honeytoken_routes);
+    if !failed.is_empty() {
+        tracing::warn!(
+            subject = %format!("{scope}:{subject_id}"),
+            failed = %failed.join(","),
+            label = %p.label,
+            "faithfulness dropped signals"
+        );
+        conn.execute(
+            "UPDATE llm_calls SET faithfulness_failed = ?1 WHERE id = ?2",
+            params![
+                serde_json::to_string(&failed).unwrap_or_else(|_| "[]".to_string()),
+                call_id
+            ],
+        )?;
+    }
+    write_proposal(conn, scope, subject_id, meta, &p, call_id, now)
+}
+
+/// The faithfulness verdict shared by the landing path and `llm
+/// eval`: drop every failed signal from the proposal, keep the label
+/// only when a surviving signal sits on its side, and return the
+/// failed names in claim order.
+pub fn apply_faithfulness(
+    envelope: &serde_json::Value,
+    p: &mut LabelProposal,
+    honeytoken_routes: &[String],
+) -> Vec<String> {
     let honey: HashSet<String> = honeytoken_routes.iter().cloned().collect();
     let words = crate::faithfulness::scanner_paths();
     let aux = crate::faithfulness::Aux {
         honeytoken_routes: &honey,
         scanner_paths: &words,
     };
-    if let Err(failed) =
-        crate::faithfulness::check_proposal(envelope, &p.signals, &p.cited_turns, &aux)
-    {
-        tracing::warn!(
-            subject = %format!("{scope}:{subject_id}"),
-            signal = %failed,
-            "faithfulness check failed; proposal downgraded to unknown"
-        );
-        conn.execute(
-            "UPDATE llm_calls SET faithfulness_failed = ?1 WHERE id = ?2",
-            params![failed, call_id],
-        )?;
+    let failed = crate::faithfulness::check_proposal(envelope, &p.signals, &aux);
+    if failed.is_empty() {
+        return failed;
+    }
+    p.signals.retain(|s| !failed.contains(&s.name));
+    let side_ok = p
+        .signals
+        .iter()
+        .any(|s| crate::faithfulness::side(&s.name) == Some(p.label.as_str()));
+    if !side_ok {
         p.label = "unknown".to_string();
     }
-    write_proposal(conn, scope, subject_id, meta, &p, call_id, now)
+    failed
 }
 
 fn input_summary(subject: &Subject, meta: &LabelMeta) -> String {
@@ -2142,10 +2196,14 @@ fn exchange_for(
 }
 
 fn proposal_json(p: &LabelProposal) -> String {
+    let signals: Vec<serde_json::Value> = p
+        .signals
+        .iter()
+        .map(|s| serde_json::json!({"name": s.name, "turns": s.turns}))
+        .collect();
     serde_json::json!({
         "label": p.label, "confidence": p.confidence,
-        "reason": p.reason, "signals": p.signals,
-        "cited_turns": p.cited_turns,
+        "reason": p.reason, "signals": signals,
     })
     .to_string()
 }
@@ -3011,9 +3069,13 @@ mod tests {
         .to_string()
     }
 
-    const GOOD_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"],"cited_turns":[0,1]}"#;
+    const GOOD_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":[{"name":"scanner_paths","turns":[0,1]},{"name":"machine_cadence","turns":[0,1]}]}"#;
     /// The fixture's third turn is a wordlisted path, so this lands.
-    const FAITHFUL_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.9,"reason":"Wordlist path hit.","signals":["scanner_paths"],"cited_turns":[2]}"#;
+    const FAITHFUL_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.9,"reason":"Wordlist path hit.","signals":[{"name":"scanner_paths","turns":[2]}]}"#;
+    /// `scanner_paths` cites the wordlisted third turn (passes)
+    /// while `high_404_rate` cites the two clean turns (fails): the
+    /// label is kept and one signal is dropped.
+    const MIXED_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.9,"reason":"Wordlist path plus noise.","signals":[{"name":"scanner_paths","turns":[2]},{"name":"high_404_rate","turns":[0,1]}]}"#;
 
     fn exec_for(url: &str, mode: LlmMode) -> Exec {
         Exec {
@@ -3068,13 +3130,18 @@ mod tests {
         assert_eq!(p.label, "malicious");
         assert_eq!(p.confidence, 0.93);
         assert_eq!(p.reason, "Wordlist paths at machine cadence.");
-        assert_eq!(p.signals, vec!["scanner_paths", "machine_cadence"]);
-        assert_eq!(p.cited_turns, vec![0, 1]);
+        assert_eq!(
+            p.signal_names(),
+            vec!["scanner_paths".to_string(), "machine_cadence".to_string()]
+        );
+        assert_eq!(p.signals[0].turns, vec![0, 1]);
+        assert_eq!(p.cited_union(), vec![0, 1]);
     }
 
     #[test]
     fn validate_label_rejects_malformed() {
         let good: serde_json::Value = serde_json::from_str(GOOD_PROPOSAL).unwrap();
+        let one = || good["signals"][0].clone();
         let mut bad_enum = good.clone();
         bad_enum["label"] = "evil".into();
         let mut bad_conf = good.clone();
@@ -3082,30 +3149,41 @@ mod tests {
         let mut bad_reason = good.clone();
         bad_reason["reason"] = "x".repeat(601).into();
         let mut bad_signals = good.clone();
-        bad_signals["signals"] = serde_json::Value::Array(vec!["scanner_paths".into(); 6]);
+        bad_signals["signals"] = serde_json::Value::Array(vec![one(); 6]);
+        let mut bad_shape = good.clone();
+        bad_shape["signals"] = serde_json::json!(["scanner_paths"]);
         let mut bad_signal = good.clone();
-        bad_signal["signals"] = serde_json::json!(["vibes"]);
+        bad_signal["signals"] = serde_json::json!([{"name": "vibes", "turns": [0]}]);
+        let mut bad_turns_len = good.clone();
+        bad_turns_len["signals"] =
+            serde_json::json!([{"name": "scanner_paths", "turns": [0, 1, 2, 3, 4, 5, 6]}]);
+        let mut bad_cite = good.clone();
+        bad_cite["signals"] = serde_json::json!([{"name": "scanner_paths", "turns": [0, -1]}]);
+        let mut bad_turns = good.clone();
+        bad_turns["signals"] = serde_json::json!([{"name": "scanner_paths", "turns": "0"}]);
+        let mut bad_keys = good.clone();
+        bad_keys["signals"] =
+            serde_json::json!([{"name": "scanner_paths", "turns": [0], "why": "x"}]);
         let mut extra = good.clone();
         extra["action"] = "block".into();
+        let mut stale_cited = good.clone();
+        stale_cited["cited_turns"] = serde_json::json!([0]);
         let mut missing = good.clone();
         missing.as_object_mut().unwrap().remove("reason");
-        let mut bad_cited = good.clone();
-        bad_cited["cited_turns"] = serde_json::json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        let mut bad_cite = good.clone();
-        bad_cite["cited_turns"] = serde_json::json!([0, -1]);
-        let mut missing_cited = good.clone();
-        missing_cited.as_object_mut().unwrap().remove("cited_turns");
         for (name, v) in [
             ("enum", bad_enum),
             ("confidence", bad_conf),
             ("reason", bad_reason),
             ("signals-len", bad_signals),
+            ("signal-shape", bad_shape),
             ("signal", bad_signal),
-            ("extra-key", extra),
-            ("missing-key", missing),
-            ("cited-len", bad_cited),
+            ("turns-len", bad_turns_len),
             ("cite", bad_cite),
-            ("missing-cited", missing_cited),
+            ("turns-shape", bad_turns),
+            ("signal-keys", bad_keys),
+            ("extra-key", extra),
+            ("stale-cited_turns", stale_cited),
+            ("missing-key", missing),
             ("non-object", serde_json::json!([1])),
         ] {
             assert!(validate_label(&v).is_err(), "{name} passed");
@@ -3822,8 +3900,55 @@ mod tests {
             assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
         }
         // Two cited turns with no 404s and no wordlist hit: scanner_paths
-        // fails, and machine_cadence would too (gap_cv is 1.0).
+        // fails, and machine_cadence fails too (iri_cv 1.0, only one
+        // turn in the last minute). Nothing survives, so unknown.
         let (url, _) = mock_server(vec![(200, completion(GOOD_PROPOSAL))]);
+        let ctx = drain_ctx(
+            exec_for(&url, LlmMode::Live),
+            Some(JsonMode::Prompt),
+            Some(false),
+        );
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let label: (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT label, note, signals, cited_turns FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(label.0, "unknown", "downgraded, never stored as proposed");
+        assert!(
+            label.1.starts_with("Wordlist paths at machine cadence."),
+            "reason kept: {}",
+            label.1
+        );
+        assert_eq!(label.2, "[]", "no surviving signals: {}", label.2);
+        assert_eq!(label.3.as_deref(), Some("[]"));
+        let failed: Option<String> = conn
+            .query_row("SELECT faithfulness_failed FROM llm_calls", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            failed.as_deref(),
+            Some(r#"["scanner_paths","machine_cadence"]"#)
+        );
+    }
+
+    #[test]
+    fn drain_live_keeps_the_label_on_one_surviving_signal() {
+        let db = tmp_db("mixed");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            assert!(enqueue_label(&conn, "actor", "aa", "scorer", now_s(), 500, 500_000).unwrap());
+        }
+        // scanner_paths cites the wordlisted turn and survives;
+        // high_404_rate cites two clean turns and is dropped. The
+        // label stands on the survivor.
+        let (url, _) = mock_server(vec![(200, completion(MIXED_PROPOSAL))]);
         let ctx = drain_ctx(
             exec_for(&url, LlmMode::Live),
             Some(JsonMode::Prompt),
@@ -3834,24 +3959,20 @@ mod tests {
         let conn = Connection::open(&db).unwrap();
         let label: (String, String, Option<String>) = conn
             .query_row(
-                "SELECT label, note, cited_turns FROM labels WHERE source = 'llm_proposed'",
+                "SELECT label, signals, cited_turns FROM labels WHERE source = 'llm_proposed'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(label.0, "unknown", "downgraded, never stored as proposed");
-        assert!(
-            label.1.starts_with("Wordlist paths at machine cadence."),
-            "reason kept: {}",
-            label.1
-        );
-        assert_eq!(label.2.as_deref(), Some("[0,1]"));
+        assert_eq!(label.0, "malicious");
+        assert_eq!(label.1, r#"["scanner_paths"]"#, "{}", label.1);
+        assert_eq!(label.2.as_deref(), Some("[2]"));
         let failed: Option<String> = conn
             .query_row("SELECT faithfulness_failed FROM llm_calls", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(failed.as_deref(), Some("scanner_paths"));
+        assert_eq!(failed.as_deref(), Some(r#"["high_404_rate"]"#));
     }
 
     #[test]

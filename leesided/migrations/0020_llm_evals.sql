@@ -7,8 +7,8 @@
 -- envelopes and faithfulness checks see scanner paths per turn.
 -- labels.cited_turns: the proposal's cited turn indices as a JSON
 -- array; every other source leaves it null.
--- llm_calls.faithfulness_failed: the first signal whose check failed,
--- when the proposal was downgraded to unknown for it.
+-- llm_calls.faithfulness_failed: the failed signals as a JSON list,
+-- in claim order, whenever any check failed.
 -- llm_evals: one row per `llm eval` run (section 2).
 ALTER TABLE turns ADD COLUMN path_pattern TEXT;
 ALTER TABLE labels ADD COLUMN cited_turns TEXT;

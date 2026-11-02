@@ -5,13 +5,15 @@
 #
 #   cargo build --release && bin/e2e.sh
 #
-# Sockets go under /tmp because sun_path is capped at 108 bytes.
+# Scratch lives on disk under target/ (a full tmpfs once failed runs
+# with SQLite IOERR batches); override with E2E_DIR. Sockets stay
+# short because sun_path is capped at 108 bytes.
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # Normalised: the private nginx's root must not contain a .., php-fpm answers
 # "Primary script unknown" for a SCRIPT_FILENAME with one in it.
 SAMPLE="$(cd "$HERE/../leeside-sample" && pwd)"
-WORK="${E2E_DIR:-/tmp/leeside-e2e}"
+WORK="${E2E_DIR:-$HERE/target/e2e-tmp}"
 API=127.0.0.1:7391
 PORT=8765
 # One hash key per install (docs/brief.md). The e2e pins a fixed test value so

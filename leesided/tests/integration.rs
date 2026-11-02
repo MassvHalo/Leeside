@@ -2964,7 +2964,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 20);
+    assert_eq!(health["migration_version"], 21);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -3399,7 +3399,7 @@ async fn ui_exchange_renders_verbatim() {
         "reasoning_effort": "low",
     })
     .to_string();
-    let proposal = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"],"cited_turns":[0,1]}"#;
+    let proposal = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":[{"name":"scanner_paths","turns":[0,1]},{"name":"machine_cadence","turns":[0]}]}"#;
     let reasoning = "Thinking <aloud> & onward.";
     let response = serde_json::json!({
         "choices": [{"message": {"content": proposal, "reasoning_content": reasoning}, "finish_reason": "stop"}],
@@ -4665,14 +4665,16 @@ fn golden_sets_keep_their_shape() {
     for r in &label {
         let exp = r.get("expected_label").and_then(|v| v.as_str());
         assert!(
-            matches!(exp, Some("benign" | "malicious")),
+            matches!(exp, Some("benign" | "malicious" | "unknown")),
             "label row labelled: {r}"
         );
         let env = &r["envelope"];
         scopes.insert(env["subject"]["scope"].as_str().unwrap().to_string());
         kinds.insert(r["kind"].as_str().unwrap().to_string());
-        if env["window"]["turns_held"].as_f64().unwrap_or(99.0) < 10.0 {
+        let held = env["window"]["turns_held"].as_f64().unwrap_or(99.0);
+        if held < 10.0 {
             cold += 1;
+            assert_eq!(exp, Some("unknown"), "cold rows expect unknown: {r}");
         }
         if r["kind"] == "attack-scraper" {
             scraper += 1;
@@ -4680,7 +4682,42 @@ fn golden_sets_keep_their_shape() {
         if r["kind"] == "benign-api" {
             api += 1;
         }
-        assert!(env.get("turns").and_then(|t| t.as_array()).is_some());
+        // The turns pair with the window exactly: the last 30 at or
+        // before the window's own turn.
+        let turns = env.get("turns").and_then(|t| t.as_array()).expect("turns");
+        assert_eq!(turns.len(), (held as usize).min(30), "paired turns: {r}");
+        let allowed: std::collections::HashSet<&str> = r["allowed_signals"]
+            .as_array()
+            .expect("allowed_signals")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let mal: std::collections::HashSet<&str> = [
+            "scanner_paths",
+            "high_404_rate",
+            "machine_cadence",
+            "no_assets",
+            "ua_inconsistent",
+            "credential_stuffing",
+            "webhook_forgery",
+            "honeytoken_hit",
+            "rejected_actions",
+            "insufficient_data",
+        ]
+        .into_iter()
+        .collect();
+        let ben: std::collections::HashSet<&str> =
+            ["normal_browsing", "verified_partner", "insufficient_data"]
+                .into_iter()
+                .collect();
+        match exp {
+            Some("malicious") => assert_eq!(allowed, mal, "{r}"),
+            Some("benign") => assert_eq!(allowed, ben, "{r}"),
+            Some("unknown") => {
+                assert_eq!(allowed, ["insufficient_data"].into_iter().collect(), "{r}")
+            }
+            _ => unreachable!(),
+        }
     }
     assert!(
         scopes.contains("actor") && scopes.contains("cluster"),

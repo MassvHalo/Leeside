@@ -382,7 +382,10 @@ mod tests {
     #[test]
     fn every_name_has_one_description() {
         assert_eq!(NAMES.len(), DESCRIPTIONS.len());
-        assert_eq!(DESCRIPTIONS[NAMES.iter().position(|n| *n == "turns_held").unwrap()], "turns currently held in the window (at most 64)");
+        assert_eq!(
+            DESCRIPTIONS[NAMES.iter().position(|n| *n == "turns_held").unwrap()],
+            "turns currently held in the window (at most 64)"
+        );
     }
 
     #[test]

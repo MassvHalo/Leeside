@@ -35,11 +35,16 @@ Answer with one JSON object and nothing else:
 {"label": "benign" | "malicious" | "unknown",
  "confidence": 0.0 - 1.0,
  "reason": "one or two plain sentences, at most 600 characters",
- "signals": ["up to 5 of: scanner_paths, high_404_rate, machine_cadence,
+ "signals": [{"name": "one of: scanner_paths, high_404_rate, machine_cadence,
    no_assets, ua_inconsistent, credential_stuffing, webhook_forgery,
-   honeytoken_hit, normal_browsing, verified_partner, insufficient_data"],
- "cited_turns": ["indices into the turns array above, at most 10"]}
+   honeytoken_hit, normal_browsing, verified_partner, insufficient_data",
+   "turns": ["indices into the turns array above, at most 6"]},
+   "at most 5 signals"]}
 
-Cite only turns that support your signals: every signal is checked
-against the turns you cite, and a signal its turns do not support
-downgrades the whole proposal to `unknown`.
+Cite only turns that show that signal: each signal is checked against
+its own turns, and a signal its turns do not support is dropped. Fewer
+signals with real citations beat more with thin ones; a turns list
+that is just the first N turns fails review. `machine_cadence` and
+`insufficient_data` read the window, so they may cite nothing; every
+other signal needs its evidence cited. The label stands only when a
+surviving signal sits on its side, else it becomes `unknown`.

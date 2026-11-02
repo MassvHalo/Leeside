@@ -3,15 +3,16 @@
 //! runs a set in dry-send mode (live calls, nothing written to the
 //! product tables) and logs one `llm_evals` row per run.
 //!
-//! Agreement grades what the model said: label rows compare the
-//! proposed label before any faithfulness downgrade, with failures
-//! counted separately. Transport and HTTP errors are excluded from
-//! agreement and listed first among the worst rows.
+//! Agreement grades what prod would write: label rows compare the
+//! post-faithfulness label, with the raw proposal's agreement kept
+//! beside it so the cost of the checks stays visible. Transport and
+//! HTTP errors are excluded from agreement and listed first among
+//! the worst rows.
 
 use crate::llm::{
-    budget_check, build_draft_envelope, build_label_envelope_at, execute_call_with_system,
-    log_exchanges, validate_classify, validate_draft, validate_explain, validate_label, Exec,
-    ExecutionOutcome, JsonMode, LlmError, WindowSel,
+    apply_faithfulness, budget_check, build_draft_envelope, build_label_envelope_at,
+    execute_call_with_system, log_exchanges, validate_classify, validate_draft, validate_explain,
+    validate_label, Exec, ExecutionOutcome, JsonMode, LlmError, WindowSel,
 };
 use crate::rules::model::{Rule, Scope, StatusClass, StatusSel, Surface, TurnFilter, Verb};
 use crate::store::now_s;
@@ -374,6 +375,7 @@ pub struct EvalSummary {
     pub skipped: usize,
     pub errors: usize,
     pub agreement: Option<f64>,
+    pub agreement_raw: Option<f64>,
     pub groups: serde_json::Value,
     pub calibration: serde_json::Value,
     pub faithfulness_failures: usize,
@@ -394,11 +396,12 @@ impl EvalSummary {
             self.json_mode
         );
         println!(
-            "rows={} skipped={} errors={} agreement={} faithfulness_failures={} parse_failures={}",
+            "rows={} skipped={} errors={} agreement={} agreement_raw={} faithfulness_failures={} parse_failures={}",
             self.rows,
             self.skipped,
             self.errors,
             fmt_opt(self.agreement, 4),
+            fmt_opt(self.agreement_raw, 4),
             self.faithfulness_failures,
             self.parse_failures,
         );
@@ -458,6 +461,7 @@ fn usd_per_mtok() -> Option<(f64, f64)> {
 struct Acc {
     graded: usize,
     agree: usize,
+    agree_raw: usize,
     faithfulness_failures: usize,
     parse_failures: usize,
     errors: usize,
@@ -466,12 +470,13 @@ struct Acc {
     completion_tokens: i64,
     latency_ms: i64,
     worst: Vec<serde_json::Value>,
-    // label
-    kind_n: HashMap<String, (usize, usize)>,
-    scope_n: HashMap<String, (usize, usize)>,
+    // label: (graded, agree, agree_raw) per group
+    kind_n: HashMap<String, (usize, usize, usize)>,
+    scope_n: HashMap<String, (usize, usize, usize)>,
     bins: [(usize, usize); 5],
     unknown: usize,
     signal_violations: usize,
+    dropped: HashMap<String, usize>,
     // classify
     cat: HashMap<String, (usize, usize, usize)>,
     // explain
@@ -486,6 +491,7 @@ impl Acc {
         Acc {
             graded: 0,
             agree: 0,
+            agree_raw: 0,
             faithfulness_failures: 0,
             parse_failures: 0,
             errors: 0,
@@ -499,6 +505,7 @@ impl Acc {
             bins: [(0, 0); 5],
             unknown: 0,
             signal_violations: 0,
+            dropped: HashMap::new(),
             cat: HashMap::new(),
             length_violations: 0,
             dry_matches: 0,
@@ -533,12 +540,6 @@ pub fn evaluate(
         None => rows,
     };
     let mut acc = Acc::new();
-    let honey: HashSet<String> = input.exec.honeytoken_routes.iter().cloned().collect();
-    let words = crate::faithfulness::scanner_paths();
-    let aux = crate::faithfulness::Aux {
-        honeytoken_routes: &honey,
-        scanner_paths: &words,
-    };
     for (n, v) in &rows {
         if skippable(point, set, *n, v)? {
             acc.skipped += 1;
@@ -590,7 +591,7 @@ pub fn evaluate(
             &envelope,
             &execution.outcome,
             call_id,
-            &aux,
+            &input.exec.honeytoken_routes,
             &mut acc,
         )?;
     }
@@ -599,6 +600,11 @@ pub fn evaluate(
     let graded = acc.graded as f64;
     let agreement = if acc.graded > 0 {
         Some(acc.agree as f64 / graded)
+    } else {
+        None
+    };
+    let agreement_raw = if point == "label" && acc.graded > 0 {
+        Some(acc.agree_raw as f64 / graded)
     } else {
         None
     };
@@ -633,9 +639,9 @@ pub fn evaluate(
     let worst = serde_json::Value::Array(worst);
     conn.execute(
         "INSERT INTO llm_evals (created_at, point, prompt_hash, model, json_mode, rows, skipped, \
-         agreement, groups, calibration, faithfulness_failures, parse_failures, tokens_per_row, \
-         latency_ms_per_row, cost_usd, worst) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         agreement, agreement_raw, groups, calibration, faithfulness_failures, parse_failures, \
+         tokens_per_row, latency_ms_per_row, cost_usd, worst) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             now,
             point,
@@ -645,6 +651,7 @@ pub fn evaluate(
             rows.len() as i64,
             acc.skipped as i64,
             agreement,
+            agreement_raw,
             serde_json::to_string(&groups).unwrap_or_else(|_| "null".to_string()),
             serde_json::to_string(&calibration).unwrap_or_else(|_| "null".to_string()),
             acc.faithfulness_failures as i64,
@@ -665,6 +672,7 @@ pub fn evaluate(
         skipped: acc.skipped,
         errors: acc.errors,
         agreement,
+        agreement_raw,
         groups,
         calibration,
         faithfulness_failures: acc.faithfulness_failures,
@@ -746,7 +754,7 @@ fn grade(
     envelope: &serde_json::Value,
     outcome: &ExecutionOutcome,
     call_id: i64,
-    aux: &crate::faithfulness::Aux,
+    honeytoken_routes: &[String],
     acc: &mut Acc,
 ) -> Result<(), LlmError> {
     let parsed = match outcome {
@@ -785,7 +793,11 @@ fn grade(
                 acc.skipped += 1;
                 return Ok(());
             };
-            let p = validate_label(&pv).map_err(LlmError::Validate)?;
+            let mut p = validate_label(&pv).map_err(LlmError::Validate)?;
+            let raw = p.label.clone();
+            let claimed = p.signal_names();
+            let failed = apply_faithfulness(envelope, &mut p, honeytoken_routes);
+            let agree_raw = raw == expected;
             let agree = p.label == expected;
             acc.graded += 1;
             if agree {
@@ -795,8 +807,15 @@ fn grade(
                     n,
                     expected,
                     &p.label,
-                    format!("conf={:.2} signals={:?}", p.confidence, p.signals),
+                    format!(
+                        "raw={raw} conf={:.2} failed={failed:?} signals={:?}",
+                        p.confidence,
+                        p.signal_names(),
+                    ),
                 );
+            }
+            if agree_raw {
+                acc.agree_raw += 1;
             }
             let kind = row.kind.as_deref().unwrap_or("unknown").to_string();
             let scope = envelope
@@ -806,10 +825,13 @@ fn grade(
                 .unwrap_or("unknown")
                 .to_string();
             for (map, key) in [(&mut acc.kind_n, kind), (&mut acc.scope_n, scope)] {
-                let e = map.entry(key).or_insert((0, 0));
+                let e = map.entry(key).or_insert((0, 0, 0));
                 e.0 += 1;
                 if agree {
                     e.1 += 1;
+                }
+                if agree_raw {
+                    e.2 += 1;
                 }
             }
             let bin = ((p.confidence * 5.0) as usize).min(4);
@@ -821,8 +843,7 @@ fn grade(
                 acc.unknown += 1;
             }
             if let Some(allowed) = row.allowed_signals.as_ref() {
-                let bad: Vec<&str> = p
-                    .signals
+                let bad: Vec<&str> = claimed
                     .iter()
                     .filter(|s| !allowed.iter().any(|a| a == *s))
                     .map(String::as_str)
@@ -837,13 +858,17 @@ fn grade(
                     );
                 }
             }
-            if let Err(failed) =
-                crate::faithfulness::check_proposal(envelope, &p.signals, &p.cited_turns, aux)
-            {
+            if !failed.is_empty() {
                 acc.faithfulness_failures += 1;
+                for f in &failed {
+                    *acc.dropped.entry(f.clone()).or_insert(0) += 1;
+                }
                 conn.execute(
                     "UPDATE llm_calls SET faithfulness_failed = ?1 WHERE id = ?2",
-                    params![failed, call_id],
+                    params![
+                        serde_json::to_string(&failed).unwrap_or_else(|_| "[]".to_string()),
+                        call_id
+                    ],
                 )?;
             }
             Ok(())
@@ -969,9 +994,14 @@ fn grade(
 fn report_groups(point: &str, acc: &Acc) -> (serde_json::Value, serde_json::Value) {
     match point {
         "label" => {
-            let tab = |m: &HashMap<String, (usize, usize)>| {
+            let tab = |m: &HashMap<String, (usize, usize, usize)>| {
                 m.iter()
-                    .map(|(k, (n, a))| (k.clone(), serde_json::json!({"n": n, "agree": a})))
+                    .map(|(k, (n, a, r))| {
+                        (
+                            k.clone(),
+                            serde_json::json!({"n": n, "agree": a, "agree_raw": r}),
+                        )
+                    })
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             };
             let kind = tab(&acc.kind_n);
@@ -980,6 +1010,7 @@ fn report_groups(point: &str, acc: &Acc) -> (serde_json::Value, serde_json::Valu
                 "kind": kind, "scope": scope,
                 "unknown_rate": rate(acc.unknown, acc.graded),
                 "signal_violations": acc.signal_violations,
+                "dropped_signals": acc.dropped,
             });
             let bins: Vec<serde_json::Value> = acc
                 .bins
@@ -1051,6 +1082,7 @@ pub struct EvalRowView {
     pub json_mode: String,
     pub rows: i64,
     pub agreement: Option<f64>,
+    pub agreement_raw: Option<f64>,
     pub faithfulness_failures: i64,
     pub parse_failures: i64,
     pub tokens_per_row: Option<f64>,
@@ -1061,7 +1093,7 @@ pub struct EvalRowView {
 pub fn latest_for_hash(db: &Path, hash: &str) -> Result<Option<EvalRowView>, LlmError> {
     let conn = open_db(db)?;
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, point, prompt_hash, model, json_mode, rows, agreement, \
+        "SELECT id, created_at, point, prompt_hash, model, json_mode, rows, agreement, agreement_raw, \
          faithfulness_failures, parse_failures, tokens_per_row, latency_ms_per_row, cost_usd \
          FROM llm_evals WHERE prompt_hash LIKE ?1 || '%' ORDER BY id DESC LIMIT 1",
     )?;
@@ -1075,11 +1107,12 @@ pub fn latest_for_hash(db: &Path, hash: &str) -> Result<Option<EvalRowView>, Llm
             json_mode: r.get(5)?,
             rows: r.get(6)?,
             agreement: r.get(7)?,
-            faithfulness_failures: r.get(8)?,
-            parse_failures: r.get(9)?,
-            tokens_per_row: r.get(10)?,
-            latency_ms_per_row: r.get(11)?,
-            cost_usd: r.get(12)?,
+            agreement_raw: r.get(8)?,
+            faithfulness_failures: r.get(9)?,
+            parse_failures: r.get(10)?,
+            tokens_per_row: r.get(11)?,
+            latency_ms_per_row: r.get(12)?,
+            cost_usd: r.get(13)?,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -1089,15 +1122,16 @@ pub fn latest_for_hash(db: &Path, hash: &str) -> Result<Option<EvalRowView>, Llm
 /// agreement, model and age, or `None` when the prompt never ran.
 pub fn eval_for_prompt(conn: &Connection, point: &str, hash: &str) -> Option<serde_json::Value> {
     conn.query_row(
-        "SELECT id, agreement, model, created_at FROM llm_evals \
+        "SELECT id, agreement, agreement_raw, model, created_at FROM llm_evals \
          WHERE point = ?1 AND prompt_hash = ?2 ORDER BY id DESC LIMIT 1",
         params![point, hash],
         |r| {
             Ok(serde_json::json!({
                 "eval_id": r.get::<_, i64>(0)?,
                 "agreement": r.get::<_, Option<f64>>(1)?,
-                "model": r.get::<_, String>(2)?,
-                "created_at": r.get::<_, i64>(3)?,
+                "agreement_raw": r.get::<_, Option<f64>>(2)?,
+                "model": r.get::<_, String>(3)?,
+                "created_at": r.get::<_, i64>(4)?,
             }))
         },
     )
@@ -1121,6 +1155,11 @@ pub fn compare_text(a: &EvalRowView, b: &EvalRowView) -> String {
             "agreement",
             fmt_opt(a.agreement, 4),
             fmt_opt(b.agreement, 4),
+        ),
+        (
+            "agreement_raw",
+            fmt_opt(a.agreement_raw, 4),
+            fmt_opt(b.agreement_raw, 4),
         ),
         (
             "faithfulness",
@@ -1199,7 +1238,21 @@ pub fn eval_build(
                     };
                     let (envelope, meta) =
                         build_label_envelope_at(&conn, classes, &subject, thresholds, now_us, sel)?;
-                    let (expected, from) = prefill_label(&conn, &scope, &id, meta.window_end_ts)?;
+                    // A window under ten turns has no faithful label:
+                    // the row expects unknown whatever the labels say.
+                    let cold = envelope
+                        .get("window")
+                        .and_then(|w| w.get("turns_held"))
+                        .and_then(serde_json::Value::as_f64)
+                        .is_some_and(|t| t < 10.0);
+                    let (expected, from) = if cold {
+                        (
+                            Some("unknown".to_string()),
+                            Some("insufficient_data".to_string()),
+                        )
+                    } else {
+                        prefill_label(&conn, &scope, &id, meta.window_end_ts)?
+                    };
                     rows.push(
                         serde_json::json!({
                             "point": "label",
@@ -1663,10 +1716,17 @@ mod tests {
         std::fs::write(
             &set,
             format!(
-                "{}\n{}\n",
+                "{}\n{}\n{}\n",
                 label_row(
                     "attack-ffuf",
                     "actor",
+                    Some("malicious"),
+                    scan_turns.clone(),
+                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "asset_ratio": 0.0}),
+                ),
+                label_row(
+                    "attack-ffuf",
+                    "cluster",
                     Some("malicious"),
                     scan_turns,
                     serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "asset_ratio": 0.0}),
@@ -1681,9 +1741,16 @@ mod tests {
             ),
         )
         .unwrap();
-        let hit = r#"{"label":"malicious","confidence":0.9,"reason":"404 sweep.","signals":["high_404_rate"],"cited_turns":[0,1,2]}"#;
-        let miss = r#"{"label":"malicious","confidence":0.9,"reason":"wrong.","signals":["high_404_rate"],"cited_turns":[0]}"#;
-        let (url, seen) = mock_server(vec![(200, completion(hit)), (200, completion(miss))]);
+        let hit = r#"{"label":"malicious","confidence":0.9,"reason":"404 sweep.","signals":[{"name":"high_404_rate","turns":[0,1,2]}]}"#;
+        // Right label, unsupported signal: one cited turn is no
+        // scanner, so the row lands unknown and only the raw agrees.
+        let thin = r#"{"label":"malicious","confidence":0.9,"reason":"one 404.","signals":[{"name":"scanner_paths","turns":[0]}]}"#;
+        let calm = r#"{"label":"benign","confidence":0.9,"reason":"quiet.","signals":[{"name":"normal_browsing","turns":[0]}]}"#;
+        let (url, seen) = mock_server(vec![
+            (200, completion(hit)),
+            (200, completion(thin)),
+            (200, completion(calm)),
+        ]);
         let exec = exec_for(&url);
         let input = EvalInput {
             exec: &exec,
@@ -1695,32 +1762,54 @@ mod tests {
             limit: None,
         };
         let summary = evaluate(&db, &set, "label", &input).unwrap();
-        assert_eq!(summary.rows, 2);
+        assert_eq!(summary.rows, 3);
         assert_eq!(summary.skipped, 0);
         assert_eq!(summary.errors, 0);
-        assert_eq!(summary.agreement, Some(0.5));
+        assert_eq!(summary.agreement, Some(2.0 / 3.0));
+        assert_eq!(summary.agreement_raw, Some(1.0));
         assert_eq!(summary.parse_failures, 0);
-        // Row 2's signal fails its cited turn (a 200 is no 404
-        // majority), but agreement grades what the model said.
         assert_eq!(summary.faithfulness_failures, 1);
-        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(seen.lock().unwrap().len(), 3);
         assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree"], 1);
+        assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree_raw"], 2);
         assert_eq!(summary.groups["scope"]["actor"]["n"], 2);
+        assert_eq!(summary.groups["scope"]["cluster"]["agree"], 0);
+        assert_eq!(summary.groups["scope"]["cluster"]["agree_raw"], 1);
+        assert_eq!(summary.groups["dropped_signals"]["scanner_paths"], 1);
         assert_eq!(summary.calibration.as_array().unwrap().len(), 5);
         assert!(summary.tokens_per_row.unwrap() > 0.0);
+        let worst = summary.worst.as_array().unwrap();
+        assert_eq!(worst.len(), 1);
+        assert_eq!(worst[0]["got"], "unknown");
+        assert!(worst[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("raw=malicious"));
+        assert!(worst[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("scanner_paths"));
         let conn = Connection::open(&db).unwrap();
-        let stored: (String, f64, i64, i64) = conn
+        let stored: (String, f64, f64, i64, i64) = conn
             .query_row(
-                "SELECT point, agreement, faithfulness_failures, parse_failures FROM llm_evals",
+                "SELECT point, agreement, agreement_raw, faithfulness_failures, parse_failures FROM llm_evals",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert_eq!(stored, ("label".to_string(), 0.5, 1, 0));
+        assert_eq!(stored, ("label".to_string(), 2.0 / 3.0, 1.0, 1, 0));
         let calls: i64 = conn
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(calls, 2, "dry-send logs the calls");
+        assert_eq!(calls, 3, "dry-send logs the calls");
+        let failed: Option<String> = conn
+            .query_row(
+                "SELECT faithfulness_failed FROM llm_calls WHERE faithfulness_failed IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed.as_deref(), Some(r#"["scanner_paths"]"#));
         let labels: i64 = conn
             .query_row("SELECT count(*) FROM labels", [], |r| r.get(0))
             .unwrap();
