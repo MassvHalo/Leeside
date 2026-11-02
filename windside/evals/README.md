@@ -6,18 +6,27 @@ ground truth, explain rows from the e2e store's scored subjects,
 draft rows from attack-run clusters, and classify rows are
 hand-written test vectors.
 
-- `label.jsonl` (138): `llm eval-build --point label` (latest and
-  `--early` windows) across all 20 generator runs, deduped and
-  spread-sampled. `expected_label` is prefilled from the window's
-  labels (operator, then tool_run/synthetic_benign/verified_business);
-  the 44 cold-start cluster windows with no label were hand-labelled
-  from run-kind ground truth (`prefilled_from: hand`). The attack
-  rows expect `malicious`, the benign rows `benign`. `allowed_signals`
-  follows the label: malicious rows allow the nine malicious signals
-  plus `insufficient_data`, benign rows the two benign signals plus
-  `insufficient_data`. Covers both scopes, 13 kinds, the cookie-
-  keeping scraper, the benign api client, and 98 cold-start windows.
-  No attack-promo rows: outcomes do not exist yet.
+- `label.jsonl` (142): `llm eval-build --point label` (latest,
+  `--early`, and `--sample 3` windows) across all 22 generator run
+  stores, deduped on the envelope, then stratified to 8 warm and 4
+  cold rows per kind, round-robin over subjects (latest windows
+  first, coldest first). Two rules hold on every row: the envelope
+  pairs its window with exactly the turns up to that window's turn
+  id (`len(turns) == min(turns_held, 30)`), and any row with
+  `turns_held` under 10 expects `unknown`. `expected_label` is
+  prefilled from the window's labels (operator, then
+  tool_run/synthetic_benign/verified_business), or the cold-start
+  rule (`prefilled_from: insufficient_data`); warm windows with no
+  label would be hand-labelled from run-kind ground truth
+  (`prefilled_from: hand`), of which this set needed none. The
+  attack rows expect `malicious`, the benign rows `benign`, the 52
+  cold rows `unknown`. `allowed_signals` follows the label:
+  malicious rows allow the nine malicious signals plus
+  `insufficient_data`, benign rows the two benign signals plus
+  `insufficient_data`, unknown rows `insufficient_data` alone.
+  Covers both scopes, 13 kinds, the cookie-keeping scraper, and the
+  benign api client. No attack-promo rows: outcomes do not exist
+  yet.
 - `classify.jsonl` (203): hand-written, 103 `none`. The `creds`
   rows carry per-row tells only (default pairs, forged sigs, dead
   keys): a single normal-looking login is `none`, since volume is
