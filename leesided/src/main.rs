@@ -433,6 +433,7 @@ fn run_llm_send(args: &[&str]) {
         &llm_thresholds(&cfg),
         &subject,
         effort,
+        None,
     ) {
         Ok(out) => {
             for (i, raw) in out.raws.iter().enumerate() {

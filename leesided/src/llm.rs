@@ -1073,12 +1073,13 @@ fn write_call(
     summary: &str,
     attempt: &Attempt,
     now: i64,
+    resend_of: Option<i64>,
 ) -> Result<i64, LlmError> {
     conn.execute(
         "INSERT INTO llm_calls (job_id, point, model, prompt_hash, json_mode, input_summary, \
          request, response, parsed, latency_ms, prompt_tokens, completion_tokens, \
-         finish_reason, reasoning_tokens, reasoning_excerpt, created_at) \
-         VALUES (?1, 'label', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         finish_reason, reasoning_tokens, reasoning_excerpt, created_at, resend_of) \
+         VALUES (?1, 'label', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             job,
             model,
@@ -1094,7 +1095,8 @@ fn write_call(
             attempt.finish_reason,
             attempt.reasoning_tokens,
             attempt.reasoning_excerpt,
-            now
+            now,
+            resend_of
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -1112,6 +1114,7 @@ fn write_exchanges(
     summary: &str,
     exchanges: &[Exchange],
     now: i64,
+    resend_of: Option<i64>,
 ) -> Result<Vec<i64>, LlmError> {
     let mut ids = Vec::with_capacity(exchanges.len());
     for e in exchanges {
@@ -1124,6 +1127,7 @@ fn write_exchanges(
             summary,
             &e.attempt,
             now,
+            resend_of,
         )?);
     }
     Ok(ids)
@@ -1454,6 +1458,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
                 reasoning_excerpt: None,
             },
             now,
+            None,
         )?;
         conn.execute(
             "UPDATE llm_jobs SET status = 'done', updated_at = ?1 WHERE id = ?2",
@@ -1500,6 +1505,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
         &summary,
         &execution.exchanges,
         now,
+        None,
     )?;
     let done = |conn: &Connection| {
         conn.execute(
@@ -1594,7 +1600,8 @@ pub struct SendOutput {
 ///
 /// `effort` carries the point's `reasoning_effort` when the caller
 /// knows the endpoint honours it; the CLI probes first, so `send`
-/// matches what the worker would put on the wire.
+/// matches what the worker would put on the wire. `resend_of` links
+/// the new rows to the repeated call for the inspector's re-send.
 pub fn send_label(
     db: &Path,
     exec: &Exec,
@@ -1602,6 +1609,7 @@ pub fn send_label(
     thresholds: &HashMap<String, f64>,
     subject: &Subject,
     effort: Option<&str>,
+    resend_of: Option<i64>,
 ) -> Result<SendOutput, LlmError> {
     if exec.url.is_empty() || exec.key.is_empty() {
         return Err(LlmError::Unconfigured);
@@ -1631,6 +1639,7 @@ pub fn send_label(
         &summary,
         &execution.exchanges,
         now,
+        resend_of,
     )?;
     let raws: Vec<String> = execution
         .exchanges
@@ -2529,6 +2538,7 @@ mod tests {
             &HashMap::from([("web".to_string(), 0.5)]),
             &parse_subject("actor:aa").unwrap(),
             Some("medium"),
+            None,
         )
         .unwrap();
         assert_eq!(out.raws.len(), 1);
