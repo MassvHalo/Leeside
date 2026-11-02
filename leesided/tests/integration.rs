@@ -99,6 +99,39 @@ impl Harness {
         }
     }
 
+    async fn open_llm(dir: PathBuf, api_token: Option<&str>) -> Harness {
+        let cfg = Config {
+            socket_dir: dir.clone(),
+            db: dir.join("leesided.sqlite"),
+            api: "127.0.0.1:0".parse().unwrap(),
+            enforce: true,
+            rules_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/install")),
+            socket_mode: 0o600,
+            socket_gid: None,
+            api_token: api_token.map(String::from),
+            hash_key: Some("test-key".into()),
+            geoip_asn: None,
+            geoip_country: None,
+            ja4_classes: Some(PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/data/ja4-classes.json"
+            ))),
+            windside_model: None,
+            windside_mode: leesided::config::WindsideMode::Off,
+            llm_url: Some("http://127.0.0.1:9".to_string()),
+            llm_key: Some("test".to_string()),
+            llm_mode: leesided::config::LlmMode::Dry,
+            ..Config::default()
+        };
+        let engine = Engine::open(cfg).await.expect("engine open");
+        let running = serve(engine.clone()).await.expect("serve");
+        Harness {
+            dir,
+            engine,
+            running,
+        }
+    }
+
     async fn restart(self) -> Harness {
         let dir = self.dir.clone();
         self.running.abort();
@@ -306,6 +339,16 @@ async fn ui_harness(token: Option<&str>) -> Harness {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     Harness::open_with(dir, token).await
+}
+
+/// A harness with the LLM configured in dry mode (dummy endpoint, never
+/// sent): the writer-thread triggers enqueue against real budgets.
+async fn ui_llm_harness(token: Option<&str>) -> Harness {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    Harness::open_llm(dir, token).await
 }
 
 const SESSION: &str = "a1b2c3d4e5f60718";
@@ -3961,6 +4004,438 @@ async fn ui_payloads_list_and_detail() {
     assert!(body.contains("0.80"), "{body}");
     let (st, _, _) = h.ui("GET", "/ui/payloads/nope", Some(&cookie), None).await;
     assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn classify_first_sight_upserts_pattern_and_job() {
+    let h = ui_llm_harness(Some("op-token")).await;
+    let now = now_us();
+    h.event(&v2_event(now, SESSION, "venues.show", "web", None))
+        .await;
+    let mut v: Value = serde_json::from_str(&v2_event(
+        now + 1_000_000,
+        "b1b2c3d4e5f60719",
+        "_unrouted",
+        "web",
+        None,
+    ))
+    .unwrap();
+    v["status"] = json!(404);
+    v["path"] = json!("/venues/42");
+    v["sample_query"] = json!("page=2");
+    v["body_slice"] = json!("{}");
+    h.event(&v.to_string()).await;
+    h.wait_for("two events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 2
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let mut patterns: Vec<(String, String, i64)> = db
+        .prepare("SELECT pattern, method, turns FROM payload_patterns")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    patterns.sort();
+    assert_eq!(
+        patterns,
+        vec![
+            ("/venues/{id}".to_string(), "POST".to_string(), 1),
+            ("venues.show".to_string(), "POST".to_string(), 1),
+        ]
+    );
+    let sample: Option<String> = db
+        .query_row(
+            "SELECT sample_query FROM payload_patterns WHERE pattern = '/venues/{id}'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sample.as_deref(), Some("page=2"));
+    let jobs: i64 = db
+        .query_row(
+            "SELECT count(*) FROM llm_jobs WHERE point = 'classify'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(jobs, 2);
+    // Nothing per turn: the samples leave no column on `turns`.
+    let sql: String = db
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'turns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!sql.contains("sample_query"), "{sql}");
+    drop(db);
+    // Second sight: the counters bump, no new job.
+    h.event(&v2_event(
+        now + 2_000_000,
+        SESSION,
+        "venues.show",
+        "web",
+        None,
+    ))
+    .await;
+    h.wait_for("three events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 3
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let turns: i64 = db
+        .query_row(
+            "SELECT turns FROM payload_patterns WHERE pattern = 'venues.show'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(turns, 2);
+    let jobs: i64 = db
+        .query_row(
+            "SELECT count(*) FROM llm_jobs WHERE point = 'classify'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(jobs, 2);
+    drop(db);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explain_crossing_and_swing_enqueue() {
+    use leesided::store::{ScoreRow, StoreOp};
+    let h = ui_llm_harness(Some("op-token")).await;
+    let score = |id: &str, turn: &str, p: f64| {
+        StoreOp::Score(ScoreRow {
+            scope: "actor".to_string(),
+            scope_id: id.to_string(),
+            turn_id: turn.to_string(),
+            surface: Some("web".to_string()),
+            ts_us: 1_700_000_000_000_000,
+            score: p,
+            model_version: "0.1.0".to_string(),
+            top3: "[]".to_string(),
+            threshold: Some(0.5),
+            daily_calls: 500,
+            daily_tokens: 500_000,
+        })
+    };
+    // First sight above the threshold crosses.
+    h.engine.store.send(score("aa", "t1", 0.9));
+    // Below first: nothing; then above: crossed.
+    h.engine.store.send(score("bb", "t1", 0.4));
+    h.engine.store.flush().await;
+    h.engine.store.send(score("bb", "t2", 0.9));
+    // A repeat near the last score: the cooldown holds.
+    h.engine.store.send(score("aa", "t2", 0.92));
+    h.engine.store.flush().await;
+    let jobs: Vec<String> = h
+        .engine
+        .store
+        .with_reader(|c| {
+            let mut stmt = c
+                .prepare("SELECT subject_id FROM llm_jobs WHERE point = 'explain' ORDER BY id")
+                .unwrap();
+            Ok(stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect::<Vec<String>>())
+        })
+        .unwrap();
+    assert_eq!(jobs, vec!["aa".to_string(), "bb".to_string()]);
+    // A swing above 0.2 past the cooldown asks again.
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute(
+        "UPDATE llm_jobs SET status = 'done', updated_at = updated_at - 7200 \
+         WHERE point = 'explain' AND subject_id = 'aa'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    h.engine.store.send(score("aa", "t3", 0.5));
+    h.engine.store.flush().await;
+    let n: i64 = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT count(*) FROM llm_jobs WHERE point = 'explain' AND subject_id = 'aa'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(n, 2);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_fifth_operator_label_enqueues() {
+    use leesided::store::{LabelRow, StoreOp};
+    let h = ui_llm_harness(Some("op-token")).await;
+    let now = leesided::store::now_s();
+    for i in 0..5i64 {
+        h.engine.store.send(StoreOp::Label(LabelRow {
+            scope: "cluster",
+            scope_id: "cc".to_string(),
+            surface: Some("web".to_string()),
+            window_end_ts: 3_000_000 + i,
+            label: "malicious",
+            source: "operator",
+            confidence: 1.0,
+            kind: None,
+            note: None,
+            created_at: now,
+            signals: None,
+            daily_calls: 500,
+            daily_tokens: 500_000,
+        }));
+    }
+    h.engine.store.flush().await;
+    let job: (String, String, String) = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row("SELECT point, scope, subject_id FROM llm_jobs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+        })
+        .unwrap();
+    assert_eq!(job.0, "draft");
+    assert_eq!(job.1, "cluster");
+    assert_eq!(job.2, "cc");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_actor_labels_resolve_the_cluster() {
+    use leesided::store::{LabelRow, StoreOp};
+    let (h, actor, _) = ui_actor_harness().await;
+    ui_seed(
+        &h,
+        &format!("UPDATE turns SET cluster_key = 'cc9' WHERE actor_id = '{actor}'"),
+    );
+    let now = leesided::store::now_s();
+    for i in 0..5i64 {
+        h.engine.store.send(StoreOp::Label(LabelRow {
+            scope: "actor",
+            scope_id: actor.clone(),
+            surface: Some("web".to_string()),
+            window_end_ts: 3_000_000 + i,
+            label: "malicious",
+            source: "operator",
+            confidence: 1.0,
+            kind: None,
+            note: None,
+            created_at: now,
+            signals: None,
+            daily_calls: 500,
+            daily_tokens: 500_000,
+        }));
+    }
+    h.engine.store.flush().await;
+    let subject: String = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT subject_id FROM llm_jobs WHERE point = 'draft'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(subject, "cc9");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_buttons_queue_one_job() {
+    let h = ui_llm_harness(Some("op-token")).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&v2_event(now + i * 1_000_000, SESSION, "home", "web", None))
+            .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (key, actor): (String, String) = db
+        .query_row("SELECT cluster_key, actor_id FROM turns LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    drop(db);
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("Draft a rule"), "button present");
+    let csrf = ui_csrf(&body);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/clusters/{key}/draft"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    // The actor button resolves the same cluster; the guard dedups.
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("Draft a rule"), "actor button present");
+    let csrf = ui_csrf(&body);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/draft"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let jobs: Vec<(String, String)> = db
+        .prepare("SELECT point, subject_id FROM llm_jobs WHERE point = 'draft'")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(jobs, vec![("draft".to_string(), key.clone())]);
+    drop(db);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn draft_button_is_unavailable_unconfigured() {
+    let h = ui_harness(Some("op-token")).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&v2_event(now + i * 1_000_000, SESSION, "home", "web", None))
+            .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let key: String = db
+        .query_row("SELECT cluster_key FROM turns LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    drop(db);
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let csrf = ui_csrf(&body);
+    let (st, _, body) = h
+        .ui(
+            "POST",
+            &format!("/ui/clusters/{key}/draft"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 503, "{body}");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_malicious_verdict_enqueues_draft() {
+    use leesided::config::WindsideMode;
+    use std::io::Cursor;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let model = dir.join("windside-model");
+    Harness::shadow_model(&model);
+    let h = Harness::open_windside(dir, Some(model), WindsideMode::Shadow).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("{i:032x}"),
+            SESSION,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    // Four operator malicious already; the review writes the fifth.
+    // The env carries the LLM config only for this call: no other test
+    // reads it, and a leak would only enqueue label jobs elsewhere.
+    ui_seed(
+        &h,
+        "UPDATE turns SET cluster_key = 'cc7'; \
+         INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, \
+         confidence, kind, note, created_at) \
+         SELECT 'actor', actor_id, 'web', 3000000, 'malicious', 'operator', 1.0, NULL, \
+         't', strftime('%s', 'now') FROM (SELECT DISTINCT actor_id FROM turns \
+         WHERE actor_id IS NOT NULL) \
+         CROSS JOIN (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4);",
+    );
+    std::env::set_var("LEESIDED_LLM_URL", "http://127.0.0.1:9");
+    std::env::set_var("LEESIDED_LLM_KEY", "test");
+    std::env::set_var("LEESIDED_LLM_MODE", "dry");
+    let mut out = Vec::new();
+    let labeled = leesided::review::run_review(
+        &h.dir.join("leesided.sqlite"),
+        20,
+        &mut Cursor::new("m\n"),
+        &mut out,
+    )
+    .unwrap();
+    std::env::remove_var("LEESIDED_LLM_URL");
+    std::env::remove_var("LEESIDED_LLM_KEY");
+    std::env::remove_var("LEESIDED_LLM_MODE");
+    assert_eq!(labeled, 1);
+    let subject: String = h
+        .engine
+        .store
+        .with_reader(|c| {
+            c.query_row(
+                "SELECT subject_id FROM llm_jobs WHERE point = 'draft'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(subject, "cc7");
     h.running.abort();
     h.engine.shutdown().await;
 }
