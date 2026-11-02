@@ -223,6 +223,89 @@ impl Harness {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+
+    /// A raw request at the inspector: (status, header block, body).
+    async fn ui(
+        &self,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        form: Option<&str>,
+    ) -> (u16, String, String) {
+        let mut s = TcpStream::connect(self.running.api_addr).await.unwrap();
+        let body = form.unwrap_or("");
+        let ck = cookie
+            .map(|c| format!("Cookie: {c}\r\n"))
+            .unwrap_or_default();
+        let ct = if form.is_some() {
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+        } else {
+            ""
+        };
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\n{ck}{ct}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status: u16 = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let (headers, body) = text
+            .split_once("\r\n\r\n")
+            .map(|(h, b)| (h.to_string(), b.to_string()))
+            .unwrap_or((text.clone(), String::new()));
+        (status, headers, body)
+    }
+
+    /// Log in and return the cookie value for later requests.
+    async fn ui_login(&self, token: &str) -> (u16, String, String) {
+        self.ui(
+            "POST",
+            "/ui/login",
+            None,
+            Some(&format!("token={token}&next=%2Fui%2Fllm")),
+        )
+        .await
+    }
+}
+
+fn ui_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    headers.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        (k.trim().eq_ignore_ascii_case(name)).then(|| v.trim())
+    })
+}
+
+fn ui_cookie(headers: &str) -> String {
+    let set = ui_header(headers, "set-cookie").expect("a login sets a cookie");
+    assert!(set.contains("HttpOnly"), "{set}");
+    assert!(set.contains("SameSite=Strict"), "{set}");
+    assert!(set.contains("Path=/ui"), "{set}");
+    set.split(';').next().unwrap().trim().to_string()
+}
+
+fn ui_csrf(body: &str) -> String {
+    let key = "name=\"csrf\" value=\"";
+    let i = body.find(key).expect("a csrf token in the page");
+    let rest = &body[i + key.len()..];
+    rest[..rest.find('"').unwrap()].to_string()
+}
+
+fn ui_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+async fn ui_harness(token: Option<&str>) -> Harness {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    Harness::open_with(dir, token).await
 }
 
 const SESSION: &str = "a1b2c3d4e5f60718";
@@ -2725,7 +2808,7 @@ async fn shadow_scores_cluster_rows_for_cookie_less_traffic() {
     assert_eq!(health["windside"]["scored"]["cluster"], 2);
     assert_eq!(health["windside"]["skipped"]["cluster"], 4);
     assert_eq!(health["windside"]["scored"]["actor"], 0);
-    assert_eq!(health["migration_version"], 15);
+    assert_eq!(health["migration_version"], 16);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -2883,6 +2966,7 @@ async fn review_confirm_writes_an_operator_label_the_export_carries() {
             kind: None,
             note: Some("machine cadence".to_string()),
             created_at: 0,
+            signals: None,
         }));
     h.engine.store.flush().await;
     let mut out = Vec::new();
@@ -2947,4 +3031,270 @@ fn every_subcommand_answers_help() {
         let text = String::from_utf8(out.stdout).unwrap();
         assert!(text.starts_with("usage:"), "{args:?}: {text}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_pages_redirect_without_a_session() {
+    let h = Harness::start().await;
+    for path in ["/ui/", "/ui/llm", "/ui/llm/1", "/ui/jobs"] {
+        let (st, headers, _) = h.ui("GET", path, None, None).await;
+        assert_eq!(st, 303, "{path}");
+        let loc = ui_header(&headers, "location").unwrap();
+        assert!(loc.starts_with("/ui/login?next="), "{path} -> {loc}");
+    }
+    for (method, path) in [
+        ("POST", "/ui/jobs/1/retry"),
+        ("POST", "/ui/jobs/1/cancel"),
+        ("POST", "/ui/llm/1/resend"),
+    ] {
+        let (st, headers, _) = h.ui(method, path, None, Some("csrf=x")).await;
+        assert_eq!(st, 303, "{method} {path}");
+        assert!(ui_header(&headers, "location")
+            .unwrap()
+            .starts_with("/ui/login?next="));
+    }
+    // A bogus cookie is no session either.
+    let (st, _, _) = h
+        .ui("GET", "/ui/llm", Some("leeside_ui=deadbeef"), None)
+        .await;
+    assert_eq!(st, 303);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_login_round_trip() {
+    let h = ui_harness(Some("op-token")).await;
+    let (st, _, body) = h.ui("GET", "/ui/login", None, None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("Operator token"), "{body}");
+    let (st, headers, body) = h.ui_login("wrong").await;
+    assert_eq!(st, 401);
+    assert!(body.contains("wrong token"), "{body}");
+    assert!(ui_header(&headers, "set-cookie").is_none());
+    let (st, headers, _) = h.ui_login("op-token").await;
+    assert_eq!(st, 303);
+    assert_eq!(ui_header(&headers, "location"), Some("/ui/llm"));
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/llm", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    // An open redirect through `next` is refused.
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            "/ui/login",
+            None,
+            Some("token=op-token&next=https%3A%2F%2Fevil"),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert_eq!(ui_header(&headers, "location"), Some("/ui/llm"));
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_empty_store_renders() {
+    let h = ui_harness(Some("op-token")).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/llm", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("No calls logged yet."), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/jobs", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("No jobs in this state."), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    assert_eq!(st, 404);
+    assert!(body.contains("No such call"), "{body}");
+    let (st, _, _) = h
+        .ui("GET", "/ui/jobs?status=bogus", Some(&cookie), None)
+        .await;
+    assert_eq!(st, 400);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_exchange_renders_verbatim() {
+    use leesided::store::{LlmCallRow, StoreOp};
+    let h = ui_harness(Some("op-token")).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let system = "You label actors. <rules> & \"regs\"";
+    let envelope = serde_json::json!({"subject": "actor:aa", "turns": [1, 2]});
+    let request = serde_json::json!({
+        "model": "m",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": envelope.to_string()},
+        ],
+        "max_tokens": 4000,
+        "reasoning_effort": "low",
+    })
+    .to_string();
+    let proposal = r#"{"label":"malicious","confidence":0.93,"reason":"Wordlist paths at machine cadence.","signals":["scanner_paths","machine_cadence"]}"#;
+    let reasoning = "Thinking <aloud> & onward.";
+    let response = serde_json::json!({
+        "choices": [{"message": {"content": proposal, "reasoning_content": reasoning}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+    })
+    .to_string();
+    h.engine.store.send(StoreOp::LlmCallInsert(LlmCallRow {
+        job_id: None,
+        point: "label".into(),
+        model: "m".into(),
+        prompt_hash: "h".into(),
+        json_mode: "prompt".into(),
+        input_summary: r#"{"subject":"actor:aa"}"#.into(),
+        request: request.clone(),
+        response: Some(response),
+        parsed: Some(proposal.into()),
+        latency_ms: Some(900),
+        prompt_tokens: Some(10),
+        completion_tokens: Some(20),
+        finish_reason: Some("stop".into()),
+        reasoning_tokens: Some(5),
+        reasoning_excerpt: Some(reasoning.into()),
+        resend_of: None,
+        created_at: 1_700_000_000,
+    }));
+    h.engine.store.flush().await;
+    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    // The stored bytes, pretty-printed and escaped: nothing lost.
+    let pretty =
+        serde_json::to_string_pretty(&serde_json::from_str::<Value>(&request).unwrap()).unwrap();
+    assert!(
+        body.contains(&ui_escape(&pretty)),
+        "pretty request verbatim"
+    );
+    // The envelope decoded one level, the system prompt, the full
+    // reasoning, and the recomputed validation.
+    let envelope_pretty = serde_json::to_string_pretty(&envelope).unwrap();
+    assert!(
+        body.contains(&ui_escape(&envelope_pretty)),
+        "envelope decoded"
+    );
+    assert!(body.contains(&ui_escape(system)), "system prompt");
+    assert!(body.contains(&ui_escape(reasoning)), "reasoning whole");
+    assert!(body.contains("label (docs/llm.md §8.1)"), "schema named");
+    assert!(
+        body.contains("<span class=\"chip good\">valid</span>"),
+        "valid chip"
+    );
+    assert!(body.contains("parsed</span>"), "outcome");
+    // The produced label and the operator's later word.
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at, signals) \
+         VALUES ('actor', 'aa', 'web', 99, 'malicious', 'llm_proposed', 0.93, NULL, 'proposal [llm_call:1]', 1_700_000_001, '[\"scanner_paths\"]')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at, signals) \
+         VALUES ('actor', 'aa', 'web', 99, 'benign', 'operator', 1.0, NULL, 'review', 1_700_000_002, NULL)",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("What happened next"), "{body}");
+    assert!(body.contains("rejected</span>"), "operator rejected");
+    assert!(body.contains("benign</span>"), "operator chose benign");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_jobs_retry_and_cancel() {
+    let h = ui_harness(Some("op-token")).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO llm_jobs (point, scope, subject_id, status, attempts, enqueued_by, created_at, updated_at, last_error) \
+         VALUES ('label', 'actor', 'aa', 'failed', 3, 'review', 1_700_000_000, 1_700_000_001, 'boom')",
+        [],
+    )
+    .unwrap();
+    let failed = db.last_insert_rowid();
+    db.execute(
+        "INSERT INTO llm_jobs (point, scope, subject_id, status, attempts, enqueued_by, created_at, updated_at) \
+         VALUES ('label', 'cluster', 'bb', 'queued', 0, 'review', 1_700_000_000, 1_700_000_000)",
+        [],
+    )
+    .unwrap();
+    let queued = db.last_insert_rowid();
+    drop(db);
+    let (st, _, body) = h.ui("GET", "/ui/jobs", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(
+        body.contains("actor:aa") && body.contains("cluster:bb"),
+        "{body}"
+    );
+    let csrf = ui_csrf(&body);
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/jobs/{failed}/retry"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert_eq!(ui_header(&headers, "location"), Some("/ui/jobs"));
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (status, attempts): (String, i64) = db
+        .query_row(
+            "SELECT status, attempts FROM llm_jobs WHERE id = ?1",
+            [failed],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((status.as_str(), attempts), ("queued", 0));
+    drop(db);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/jobs/{queued}/cancel"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (status, err): (String, Option<String>) = db
+        .query_row(
+            "SELECT status, last_error FROM llm_jobs WHERE id = ?1",
+            [queued],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(err.as_deref(), Some("cancelled by the operator"));
+    drop(db);
+    // A wrong csrf token is refused, and a missing job is 404.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/jobs/{failed}/retry"),
+            Some(&cookie),
+            Some("csrf=wrong"),
+        )
+        .await;
+    assert_eq!(st, 403);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/jobs/9999/retry",
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
 }
