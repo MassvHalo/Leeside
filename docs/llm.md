@@ -121,10 +121,15 @@ Schema:
    "label": {"type": "string", "enum": ["benign", "malicious", "unknown"]},
    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
    "reason": {"type": "string", "maxLength": 600},
-   "signals": {"type": "array", "maxItems": 5, "items": {"type": "string", "enum": [
-     "scanner_paths", "high_404_rate", "machine_cadence", "no_assets", "ua_inconsistent",
-     "credential_stuffing", "webhook_forgery", "honeytoken_hit", "normal_browsing",
-     "verified_partner", "insufficient_data"]}}}}
+   "signals": {"type": "array", "maxItems": 5, "items": {"type": "object",
+     "additionalProperties": false, "required": ["name", "turns"],
+     "properties": {
+       "name": {"type": "string", "enum": [
+         "scanner_paths", "high_404_rate", "machine_cadence", "no_assets", "ua_inconsistent",
+         "credential_stuffing", "webhook_forgery", "honeytoken_hit", "normal_browsing",
+         "verified_partner", "insufficient_data"]},
+       "turns": {"type": "array", "maxItems": 6,
+         "items": {"type": "integer", "minimum": 0}}}}}}}
 ```
 
 Expected `content`:
@@ -132,10 +137,15 @@ Expected `content`:
 ```json
 {"label": "malicious", "confidence": 0.93,
  "reason": "Sixty-one distinct paths in under five minutes, 81% of them 404s against wordlist-style names, with a fixed interval and no asset loads.",
- "signals": ["scanner_paths", "high_404_rate", "machine_cadence", "no_assets"]}
+ "signals": [{"name": "scanner_paths", "turns": [0, 1, 2, 3, 4, 5]},
+             {"name": "high_404_rate", "turns": [0, 1, 2, 3, 4, 5]},
+             {"name": "machine_cadence", "turns": []},
+             {"name": "no_assets", "turns": [0]}]}
 ```
 
-Written as `labels` (`llm_proposed`, 0.6, note = reason, signals in a JSON column) plus `llm_calls`. `signals` is an enum on purpose: the CLI filters on it and it becomes trainable; `reason` is display text.
+Each signal carries its own cited turns (at most 6); there is no shared list. Every signal is checked against its own turns before anything lands, and each failure is dropped, with the whole failed list on the call row; the label stands only when a surviving signal sits on its side (the nine scanner/stuffing/forgery signals for `malicious`, `normal_browsing` and `verified_partner` for `benign`), else it lands as `unknown` with the reason kept.
+
+Written as `labels` (`llm_proposed`, 0.6, note = reason, surviving signal names plus the derived cited-turn union in JSON columns) plus `llm_calls`. `signals` is an enum on purpose: the CLI filters on it and it becomes trainable; `reason` is display text.
 
 ### 8.2 Verdict explanation
 

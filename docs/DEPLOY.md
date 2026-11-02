@@ -233,7 +233,7 @@ live only after the three responses read clean.
 
 ## First v2 deploy
 
-This deploy crosses migrations 0005 to 0020 and the v2 `ts` change
+This deploy crosses migrations 0005 to 0021 and the v2 `ts` change
 (integer microseconds; v1 keeps float seconds and its `(peer_key, ts_us)`
 join). **Daemon first, package second, never the reverse:** the old and
 new versions are mutually incompatible on v2 traffic, and the reverse
@@ -277,11 +277,11 @@ sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
 
 # 3. Deploy (app first, then the new binary) and watch the migrations.
 sudo bash leeside-sample/deploy/deploy.sh
-journalctl -u leesided -f   # expect: migrated version=5 .. version=20
+journalctl -u leesided -f   # expect: migrated version=5 .. version=21
 
 # 4. Verify /health.
 curl -s 127.0.0.1:7390/health | python3 -m json.tool
-# schema_versions [1, 2]; features_version 2; migration_version 20;
+# schema_versions [1, 2]; features_version 2; migration_version 21;
 # ip_hashing true; geoip true; tap counters zero (its unit is not
 # started yet); windside mode shadow, model_version 0.1.0, no error.
 

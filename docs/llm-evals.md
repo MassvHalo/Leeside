@@ -6,7 +6,7 @@ Companion to `docs/llm.md`. Nothing about a prompt or a model choice changes wit
 
 Under `windside/evals/`, one JSONL file per point, built from the generator stores and operator labels, never from the model's own proposals:
 
-- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist.
+- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist. Each envelope pairs its window with exactly the turns up to that window's turn id; any row with `turns_held` under 10 expects `unknown`.
 - `classify.jsonl`: `{method, path_pattern, sample_query, body_slice, expected_category}`, at least 200, half of them `none`.
 - `explain.jsonl`: `{score, threshold, top3, window, must_mention}` where `must_mention` lists the feature names an explanation has to reference; at least 50.
 - `draft.jsonl`: `{cluster summary, expected_scope, expected_surface, must_parse: true}`; at least 20.
@@ -15,13 +15,13 @@ Under `windside/evals/`, one JSONL file per point, built from the generator stor
 
 ## 2. The eval command
 
-`leesided llm eval --point label [--prompt <file>] [--model <slug>] [--limit N]` runs the set in dry-send mode (live calls, nothing written to `labels`, `payload_classes` or `rule_drafts`) and writes one `llm_evals` row per run: prompt hash, model, json mode, rows, agreement, calibration bins, faithfulness failures, parse failures, tokens per row, latency per row, cost estimate. It prints the summary and the ten worst rows. `leesided llm eval --compare <hashA> <hashB>` prints the two side by side.
+`leesided llm eval --point label [--prompt <file>] [--model <slug>] [--limit N]` runs the set in dry-send mode (live calls, nothing written to `labels`, `payload_classes` or `rule_drafts`) and writes one `llm_evals` row per run: prompt hash, model, json mode, rows, agreement, agreement_raw, calibration bins, faithfulness failures, parse failures, tokens per row, latency per row, cost estimate. It prints the summary and the ten worst rows. `leesided llm eval --compare <hashA> <hashB>` prints the two side by side.
 
 Per point:
 
 | Point | Agreement | Also |
 | --- | --- | --- |
-| label | expected label, per kind and per scope; confidence calibration in five bins | faithfulness failures, `unknown` rate |
+| label | post-faithfulness label, per kind and per scope; `agreement_raw` beside it; confidence calibration in five bins | faithfulness failures, dropped signals per name, `unknown` rate |
 | classify | expected category; per category precision and recall | cache hit rate on real traffic |
 | explain | every `must_mention` feature named; length within limit | operator rating when the console has one |
 | draft | parses; scope and surface as expected | dry-run match count against the cluster it came from |
@@ -30,13 +30,13 @@ Every prompt change runs the eval before it goes live, and the `llm_evals` row f
 
 ## 3. Cited evidence and faithfulness
 
-The label schema gains `cited_turns` (indices into the envelope's turns, at most 10). Each signal has a programmatic check against the cited turns; a failed check downgrades the proposal to `unknown`, keeps the reason, and logs `faithfulness_failed` with the signal.
+Each claimed signal carries its own cited turns (at most 6 per signal, at most 5 signals); the union is derived, never sent. Each signal has a programmatic check against its own turns; every failed signal is dropped, the whole failed list is logged as `faithfulness_failed`, and the label stands only when a surviving signal sits on its side, else the proposal lands as `unknown` with the reason kept.
 
-| Signal | Check on the cited turns |
+| Signal | Check on its own cited turns |
 | --- | --- |
 | scanner_paths | at least 3 distinct paths and a 404 share above 0.5, or paths in the scanner wordlist |
 | high_404_rate | 404 share above 0.5 across the cited turns |
-| machine_cadence | window `iri_cv` below 0.15 |
+| machine_cadence | window `iri_cv` below 0.2, or `turns_last_60s` at least 30 |
 | no_assets | window `asset_ratio` below 0.05 and at least one HTML turn |
 | ua_inconsistent | a browser `ua_class` with `ua_chromium_no_ch` or a library JA4 class on the cited turns |
 | credential_stuffing | at least 5 distinct rejected credentials in the window |
@@ -73,4 +73,4 @@ Few-shot retrieval (the three nearest confirmed windows by feature distance atta
 - `llm eval` on a fixture set writes an `llm_evals` row with the expected agreement for a stubbed endpoint.
 - Each faithfulness check has a positive and a negative fixture.
 - Queue order on a fixture store matches section 4 exactly, with `why_in_queue` set.
-- A proposal with a failed check is stored as `unknown` with the failure logged, never as the proposed label.
+- A proposal with a failed check lands with that signal dropped and the failed list logged; it lands as `unknown` only when no surviving signal sits on the label's side.
