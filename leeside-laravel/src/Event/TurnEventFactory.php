@@ -179,7 +179,9 @@ class TurnEventFactory
         $redact = $this->redactParams();
         $out = $none;
         if ($unrouted) {
-            $out['path'] = '/'.ltrim($request->decodedPath(), '/');
+            // The path is opaque text like a body slice: scrub the
+            // personal-data shapes, then cap like the query sample.
+            $out['path'] = substr($this->scrubText('/'.ltrim($request->decodedPath(), '/')), 0, 512);
         }
         $out['sample'] = $this->sampleQuery((string) $request->server->get('QUERY_STRING', ''), $redact);
         $out['body'] = $this->bodySlice($request, $redact);

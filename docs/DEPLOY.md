@@ -277,11 +277,11 @@ sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
 
 # 3. Deploy (app first, then the new binary) and watch the migrations.
 sudo bash leeside-sample/deploy/deploy.sh
-journalctl -u leesided -f   # expect: migrated version=5 .. version=15
+journalctl -u leesided -f   # expect: migrated version=5 .. version=19
 
 # 4. Verify /health.
 curl -s 127.0.0.1:7390/health | python3 -m json.tool
-# schema_versions [1, 2]; features_version 2; migration_version 15;
+# schema_versions [1, 2]; features_version 2; migration_version 19;
 # ip_hashing true; geoip true; tap counters zero (its unit is not
 # started yet); windside mode shadow, model_version 0.1.0, no error.
 

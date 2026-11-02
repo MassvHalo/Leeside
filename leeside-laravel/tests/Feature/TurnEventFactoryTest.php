@@ -340,6 +340,24 @@ class TurnEventFactoryTest extends TestCase
         $this->assertSame('user=admin&otp=%5Bredacted%5D', $event['body_slice']);
     }
 
+    public function test_unrouted_path_scrubs_both_personal_shapes(): void
+    {
+        $request = Request::create('/u/john@example.com/4111111111111111', 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame('/u/[redacted]/[redacted]', $event['path']);
+    }
+
+    public function test_unrouted_path_truncates_to_512(): void
+    {
+        $request = Request::create('/'.str_repeat('d', 2047), 'GET');
+
+        $event = $this->factory->build($request, new Response('x', 404), $this->begun());
+
+        $this->assertSame(512, strlen($event['path']));
+    }
+
     public function test_redacted_values_never_appear_in_any_form(): void
     {
         $request = Request::create(
