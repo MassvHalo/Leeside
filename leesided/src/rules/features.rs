@@ -71,6 +71,58 @@ pub const NAMES: [&str; 38] = [
 
 pub const N: usize = NAMES.len();
 
+/// One line per name, in the same order; the inspector's feature page
+/// reads this table.
+pub const DESCRIPTIONS: [&str; 38] = [
+    // v1: volume and pace
+    "turns ever recorded in this window, including evicted ones",
+    "turns currently held in the window (at most 64)",
+    "seconds from the window's first turn to now",
+    "seconds from the window's last turn to now",
+    "turns in the last 60 seconds",
+    "turns in the last 10 minutes",
+    "mean gap between consecutive turns, in milliseconds",
+    "coefficient of variation of the gaps (0 is machine cadence)",
+    // v1: errors and outcomes
+    "share of turns with a 4xx status",
+    "share of turns with a 5xx status",
+    "share of turns with a 404",
+    "share of turns with a 422",
+    "turns raising ModelNotFoundException (binding 404s)",
+    // v1: auth
+    "failed login attempts",
+    "successful logins",
+    // v1: breadth
+    "distinct routes hit",
+    "distinct routes per held turn",
+    "distinct bound model ids collected",
+    "share of turns on no route",
+    "distinct request shapes",
+    // v1: payload
+    "mean response bytes",
+    "largest response in bytes",
+    "mean app latency in milliseconds",
+    "slowest app latency in milliseconds",
+    // v1: navigation
+    "share of POST turns",
+    "share of turns repeating the previous route",
+    "distinct user agents minus one",
+    // v1: cross-key
+    "the peer window's turns in the last 10 minutes",
+    "the peer window's share of 4xx in the last 10 minutes",
+    "1 when the principal is anonymous",
+    // v2: cluster and identity signals (docs/actors.md)
+    "other actors seen on this window's network",
+    "other actors sharing this window's shape on this network",
+    "1 when a tag issued here later came back absent",
+    "1 when one credential appeared from two networks",
+    // v2: surface indicators, the newest turn's surface
+    "1 when the newest turn is web",
+    "1 when the newest turn is api",
+    "1 when the newest turn is webhook",
+    "1 when the newest turn is honeypot",
+];
+
 /// Surface codes on a turn summary.
 pub const SURFACE_WEB: u8 = 1;
 pub const SURFACE_API: u8 = 2;
@@ -325,6 +377,12 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), N);
         assert_eq!(VERSION, 2);
+    }
+
+    #[test]
+    fn every_name_has_one_description() {
+        assert_eq!(NAMES.len(), DESCRIPTIONS.len());
+        assert_eq!(DESCRIPTIONS[NAMES.iter().position(|n| *n == "turns_held").unwrap()], "turns currently held in the window (at most 64)");
     }
 
     #[test]
