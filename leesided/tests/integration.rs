@@ -3036,7 +3036,23 @@ fn every_subcommand_answers_help() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_pages_redirect_without_a_session() {
     let h = Harness::start().await;
-    for path in ["/ui/", "/ui/llm", "/ui/llm/1", "/ui/jobs"] {
+    for path in [
+        "/ui/",
+        "/ui/llm",
+        "/ui/llm/1",
+        "/ui/jobs",
+        "/ui/turns/abc",
+        "/ui/trace/abc",
+        "/ui/actors",
+        "/ui/actors/abc",
+        "/ui/clusters",
+        "/ui/clusters/abc",
+        "/ui/review",
+        "/ui/labels",
+        "/ui/rules",
+        "/ui/model",
+        "/ui/features",
+    ] {
         let (st, headers, _) = h.ui("GET", path, None, None).await;
         assert_eq!(st, 303, "{path}");
         let loc = ui_header(&headers, "location").unwrap();
@@ -3107,6 +3123,16 @@ async fn ui_empty_store_renders() {
     let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
     assert_eq!(st, 404);
     assert!(body.contains("No such call"), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/actors", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("No actors yet."), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/clusters", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("No clusters yet."), "{body}");
+    let (st, _, _) = h.ui("GET", "/ui/turns/abc", Some(&cookie), None).await;
+    assert_eq!(st, 404);
+    let (st, _, _) = h.ui("GET", "/ui/trace/abc", Some(&cookie), None).await;
+    assert_eq!(st, 404);
     let (st, _, _) = h
         .ui("GET", "/ui/jobs?status=bogus", Some(&cookie), None)
         .await;
@@ -3295,6 +3321,430 @@ async fn ui_jobs_retry_and_cancel() {
         )
         .await;
     assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+fn ui_field(body: &str, name: &str) -> String {
+    let key = format!("name=\"{name}\" value=\"");
+    let i = body
+        .find(&key)
+        .unwrap_or_else(|| panic!("{name} in the page"));
+    let rest = &body[i + key.len()..];
+    rest[..rest.find('"').unwrap()].to_string()
+}
+
+async fn ui_actor_harness() -> (Harness, String, String) {
+    let h = ui_harness(Some("op-token")).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&tagged_event(
+            now + i * 1_000_000,
+            &format!("{i:032x}"),
+            SESSION,
+            "anon",
+            TAG,
+            "home",
+        ))
+        .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let actor: String = db
+        .query_row(
+            "SELECT actor_id FROM turns WHERE turn_id = ?1",
+            ["00000000000000000000000000000005"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let ts: i64 = db
+        .query_row(
+            "SELECT ts_us FROM turns WHERE turn_id = ?1",
+            ["00000000000000000000000000000005"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(db);
+    (h, actor, ts.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_trace_lists_all_seven_steps() {
+    let (h, actor, _) = ui_actor_harness().await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) \
+         VALUES ('actor', ?1, '00000000000000000000000000000005', 'web', 1, 0.97, '0.1.0', \
+         '[{\"name\":\"turns_held\",\"path_gain\":2.4}]')",
+        [&actor],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at, signals) \
+         VALUES ('actor', ?1, 'web', 99, 'malicious', 'llm_proposed', 0.93, NULL, 'wordlist paths [llm_call:7]', 1, '[\"scanner_paths\"]')",
+        [&actor],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) \
+         VALUES ('actor', ?1, 'block', 'monitor', 'operator', 0, 1, 4_000_000_000)",
+        [&actor],
+    )
+    .unwrap();
+    drop(db);
+    let (st, _, body) = h
+        .ui(
+            "GET",
+            "/ui/trace/00000000000000000000000000000005",
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    for step in [
+        "1 · Turn",
+        "2 · Resolution",
+        "3 · Feature rows",
+        "4 · Scores",
+        "5 · Proposal",
+        "6 · Labels",
+        "7 · Decision",
+    ] {
+        assert!(body.contains(step), "step {step} present");
+    }
+    assert!(body.contains("on this turn"), "deciding identifier marked");
+    assert!(body.contains("turns_held"), "feature values named");
+    assert!(body.contains("0.9700"), "score value");
+    assert!(body.contains("wordlist paths"), "proposal reason");
+    assert!(body.contains("/ui/llm/7"), "proposal links the exchange");
+    assert!(body.contains("llm_proposed"), "labels listed");
+    assert!(body.contains("operator v0"), "sticky decision shown");
+    // The turn page shows the same turn's columns, tap join and rows.
+    let (st, _, body) = h
+        .ui(
+            "GET",
+            "/ui/turns/00000000000000000000000000000005",
+            Some(&cookie),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("Every stored column"), "{body}");
+    assert!(body.contains("Tap join"), "{body}");
+    assert!(body.contains("turns_held"), "its feature row");
+    let (st, _, _) = h
+        .ui("GET", "/ui/turns/does-not-exist", Some(&cookie), None)
+        .await;
+    assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_actor_pages_label_block_unblock() {
+    let (h, actor, _) = ui_actor_harness().await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/actors", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains(&actor), "actor listed");
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    for section in [
+        "Bindings",
+        "Client",
+        "Cluster",
+        "Activity",
+        "Scores",
+        "Labels",
+        "Decisions",
+        "Similar actors",
+        "Turns",
+    ] {
+        assert!(body.contains(section), "{section} present");
+    }
+    assert!(body.contains("browser only"), "derived kind");
+    let csrf = ui_csrf(&body);
+    let window = ui_field(&body, "window_end_ts");
+    // A bad verdict is refused; a stale window conflicts.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/label"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}&label=evil&window_end_ts={window}")),
+        )
+        .await;
+    assert_eq!(st, 400);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/label"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}&label=benign&window_end_ts=1")),
+        )
+        .await;
+    assert_eq!(st, 409);
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/label"),
+            Some(&cookie),
+            Some(&format!(
+                "csrf={csrf}&label=malicious&note=reviewed&window_end_ts={window}"
+            )),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert_eq!(
+        ui_header(&headers, "location").unwrap(),
+        format!("/ui/actors/{actor}")
+    );
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (label, note): (String, Option<String>) = db
+        .query_row(
+            "SELECT label, note FROM labels WHERE scope = 'actor' AND scope_id = ?1 AND source = 'operator'",
+            [&actor],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (label.as_str(), note.as_deref()),
+        ("malicious", Some("reviewed"))
+    );
+    drop(db);
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200);
+    assert!(body.contains("reviewed"), "label reflected on reload");
+    // Block, then unblock.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/block"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let rule: String = db
+        .query_row(
+            "SELECT rule FROM decisions WHERE scope = 'actor' AND key = ?1",
+            [&actor],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rule, "operator");
+    drop(db);
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .await;
+    assert!(body.contains("blocked</span>"), "{body}");
+    assert_eq!(st, 200);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/unblock"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/actors/{actor}/unblock"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 404, "nothing left to lift");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_cluster_pages_and_labels() {
+    let h = ui_harness(Some("op-token")).await;
+    let now = now_us();
+    for i in 0..6i64 {
+        h.event(&v2_event(now + i * 1_000_000, SESSION, "home", "web", None))
+            .await;
+    }
+    h.wait_for("six events", || {
+        h.engine.counters.events.load(Ordering::Relaxed) == 6
+    })
+    .await;
+    h.engine.store.flush().await;
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let key: String = db
+        .query_row("SELECT cluster_key FROM turns LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    drop(db);
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/clusters", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains(&key), "cluster listed");
+    let (st, _, body) = h
+        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .await;
+    assert_eq!(st, 200, "{body}");
+    for section in ["Actors", "Activity", "Scores", "Labels", "Turns"] {
+        assert!(body.contains(section), "{section} present");
+    }
+    let csrf = ui_csrf(&body);
+    let window = ui_field(&body, "window_end_ts");
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            &format!("/ui/clusters/{key}/label"),
+            Some(&cookie),
+            Some(&format!("csrf={csrf}&label=unknown&window_end_ts={window}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let label: String = db
+        .query_row(
+            "SELECT label FROM labels WHERE scope = 'cluster' AND scope_id = ?1",
+            [&key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(label, "unknown");
+    drop(db);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_review_decide_writes_the_operator_label() {
+    let (h, actor, _) = ui_actor_harness().await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) \
+         VALUES ('actor', ?1, 't', 'web', 1, 0.97, '0.1.0', '[]')",
+        [&actor],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, kind, note, created_at, signals) \
+         VALUES ('actor', ?1, 'web', 99, 'malicious', 'llm_proposed', 0.93, NULL, 'wordlist paths [llm_call:7]', 1, '[\"scanner_paths\"]')",
+        [&actor],
+    )
+    .unwrap();
+    drop(db);
+    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains(&actor), "row queued");
+    assert!(body.contains("0.9700"), "why carries the score");
+    assert!(body.contains("wordlist paths"), "proposal reason shown");
+    let csrf = ui_csrf(&body);
+    let window = ui_field(&body, "window_end_ts");
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            "/ui/review/decide",
+            Some(&cookie),
+            Some(&format!(
+                "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=confirm"
+            )),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert_eq!(ui_header(&headers, "location"), Some("/ui/review"));
+    let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
+    let (label, note): (String, Option<String>) = db
+        .query_row(
+            "SELECT label, note FROM labels WHERE scope = 'actor' AND scope_id = ?1 AND source = 'operator'",
+            [&actor],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (label.as_str(), note.as_deref()),
+        ("malicious", Some("confirmed llm_proposed"))
+    );
+    drop(db);
+    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(
+        body.contains("confirmed llm_proposed"),
+        "decision reflected on reload"
+    );
+    // A second verdict appends beside the first; a bad one is refused.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/review/decide",
+            Some(&cookie),
+            Some(&format!(
+                "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=benign"
+            )),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/ui/review/decide",
+            Some(&cookie),
+            Some(&format!(
+                "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=evil"
+            )),
+        )
+        .await;
+    assert_eq!(st, 400);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_step4_pages_render() {
+    let h = ui_harness(Some("op-token")).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let cookie = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/ui/", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    for section in [
+        "Health",
+        "Counts",
+        "Today's LLM calls",
+        "Latest turns",
+        "Latest decisions",
+    ] {
+        assert!(body.contains(section), "{section} present");
+    }
+    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("Nothing scored yet"), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/labels", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("No labels under these filters."), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("portal-otp-burst"), "install set listed");
+    assert!(body.contains("No drafts"), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/model", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("No model loaded"), "{body}");
+    let (st, _, body) = h.ui("GET", "/ui/features", Some(&cookie), None).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("turns_held"), "{body}");
+    assert!(body.contains("distinct user agents minus one"), "{body}");
     h.running.abort();
     h.engine.shutdown().await;
 }
