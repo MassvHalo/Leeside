@@ -6,7 +6,7 @@ Companion to `docs/llm.md`. Nothing about a prompt or a model choice changes wit
 
 Under `windside/evals/`, one JSONL file per point, built from the generator stores and operator labels, never from the model's own proposals:
 
-- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist. Each envelope pairs its window with exactly the turns up to that window's turn id; any row with `turns_held` under 10 expects `unknown`, except on a subject holding a verified credential with no rejections, where `benign` is also accepted (`also_accept`).
+- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist. Each envelope pairs its window with exactly the turns up to that window's turn id; any row with `turns_held` under 10 expects `unknown`, except on a subject holding a verified credential with no rejections, where `benign` is also accepted (`also_accept`). A cold row showing a decisive single-turn signal (`webhook_forgery`, `honeytoken_hit`, `attack_payload`, each checked exactly as the faithfulness check checks it) also accepts the kind's label at grade time: the model reading one rejected webhook as malicious is right, not guessing.
 - `classify.jsonl`: `{method, path_pattern, sample_query, body_slice, expected_category}`, at least 200, half of them `none`.
 - `explain.jsonl`: `{score, threshold, top3, window, must_mention}` where `must_mention` lists the feature names an explanation has to reference; at least 50.
 - `draft.jsonl`: `{cluster summary, expected_scope, expected_surface, must_parse: true}`; at least 20.
@@ -15,7 +15,9 @@ Under `windside/evals/`, one JSONL file per point, built from the generator stor
 
 ## 2. The eval command
 
-`leesided llm eval --point label [--prompt <file>] [--model <slug>] [--limit N]` runs the set in dry-send mode (live calls, nothing written to `labels`, `payload_classes` or `rule_drafts`) and writes one `llm_evals` row per run: prompt hash, model, json mode, rows, agreement, agreement_raw, calibration bins, faithfulness failures, parse failures, tokens per row, latency per row, cost estimate. It prints the summary and the ten worst rows. `leesided llm eval --compare <hashA> <hashB>` prints the two side by side.
+`leesided llm eval --point label [--prompt <file>] [--model <slug>] [--limit N] [--repeat N]` runs the set in dry-send mode (live calls, nothing written to `labels`, `payload_classes` or `rule_drafts`) and writes one `llm_evals` row per run: prompt hash, model, json mode, rows, repeats, agreement, agreement_raw, calibration bins, faithfulness failures, parse failures, tokens per row, latency per row, cost estimate. It prints the summary and the ten worst rows. `leesided llm eval --compare <hashA> <hashB>` prints the two side by side, with spreads where the rows have them.
+
+`--repeat N` runs the whole set N times under one prompt hash. Agreement is the mean per-pass rate with its population spread, per kind and per scope as well as overall; the per-kind tables carry mean rates (`agree`, `agree_raw`) with `spread` and `spread_raw` (null on a single pass: unmeasured, not zero). Counts (failures, violations, calibration bins, cost) accumulate across passes, and each worst row is tagged with its pass. Baselines are quoted as mean and spread from `--repeat 3`.
 
 Per point:
 
