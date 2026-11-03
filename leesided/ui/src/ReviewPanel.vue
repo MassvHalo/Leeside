@@ -204,7 +204,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { fmtConf, fmtInt, fmtMillis, fmtTime } from './fmt.js'
+import { fmtConf, fmtInt, fmtMillis, fmtTime, verdictWord } from './fmt.js'
 
 const props = defineProps({
   queue: { type: Array, default: null },
@@ -241,7 +241,7 @@ const decidedRows = computed(() => {
 
 const subjectHref = computed(() => {
   if (!props.item) return '#'
-  if (props.item.scope === 'actor') return `${props.consolePrefix}/ui/actors/${encodeURIComponent(props.item.id)}`
+  if (props.item.scope === 'actor') return `#/actors/${encodeURIComponent(props.item.id)}`
   return `${props.consolePrefix}/ui/clusters/${encodeURIComponent(props.item.id)}`
 })
 
@@ -261,12 +261,6 @@ function rowIndex(rowid) {
 
 function inTable(turns) {
   return turns.filter((t) => rowIndex(t.row) >= 0)
-}
-
-function verdictWord(verdict) {
-  if (verdict === 'blocked') return 'block'
-  if (verdict === 'observed') return 'watch'
-  return 'allow'
 }
 
 function actionOf(operator) {

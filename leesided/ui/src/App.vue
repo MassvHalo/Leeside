@@ -10,7 +10,7 @@
         <a class="nav-link" :class="{ 'is-current': route.group === 'dashboard' }" href="#/" :aria-current="route.group === 'dashboard' ? 'page' : null"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 6.6 L7 2.4 L12 6.6 V12 H8.6 V8.8 H5.4 V12 H2 Z" fill="none"></path></svg><span class="nav-label">Dashboard</span></a>
         <div class="nav-section">Daily</div>
         <details class="nav-group" :open="route.group === 'review' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'review' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.8" y="1.8" width="10.4" height="10.4" rx="2.4" fill="none"></rect><path d="M4.4 7.2 L6.3 9.1 L9.8 5.2" fill="none"></path></svg><span class="nav-label">Review</span><span v-if="pending > 0" class="count-pill" data-field="review.pending">{{ pending }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-queue' }" href="#/review" :aria-current="route.name === 'review-queue' ? 'page' : null">Queue</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-decided' }" href="#/review/decided" :aria-current="route.name === 'review-decided' ? 'page' : null">Decided</a></details>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7 H3.6 L5.2 3 L8 11 L9.8 7 H13" fill="none"></path></svg><span class="nav-label">Traffic</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Actors</a><a class="nav-link nav-child" href="#">Clusters</a><a class="nav-link nav-child" href="#">Live</a></details>
+        <details class="nav-group" :open="route.group === 'actor' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'actor' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7 H3.6 L5.2 3 L8 11 L9.8 7 H13" fill="none"></path></svg><span class="nav-label">Traffic</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.group === 'actor' }" href="#" :aria-current="route.group === 'actor' ? 'page' : null">Actors</a><a class="nav-link nav-child" href="#">Clusters</a><a class="nav-link nav-child" href="#">Live</a></details>
         <div class="nav-section">Control</div>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 L12 3 V7 C12 10 9.8 11.9 7 12.8 C4.2 11.9 2 10 2 7 V3 Z" fill="none"></path></svg><span class="nav-label">Protection</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Rules</a><a class="nav-link nav-child" href="#">Drafts</a><a class="nav-link nav-child" href="#">Decisions</a><a class="nav-link nav-child" href="#">Mode</a></details>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none"></circle><circle cx="7" cy="7" r="2.2" fill="none"></circle></svg><span class="nav-label">Intelligence</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Model</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">Evals</a><a class="nav-link nav-child" href="#">Fingerprints</a></details>
@@ -72,7 +72,7 @@
       </section>
       </template>
       <ReviewPanel
-        v-else
+        v-else-if="route.group === 'review'"
         :queue="review ? review.items : null"
         :queue-total="review ? review.total : 0"
         :queue-disagree="review ? review.disagree : 0"
@@ -88,6 +88,20 @@
         @next="reviewNext"
         @decide="reviewDecide"
       />
+      <ActorPanel
+        v-else
+        :actor="actor"
+        :actor-id="route.actorId || ''"
+        :tab="route.name === 'actor-raw' ? 'raw' : 'overview'"
+        :not-found="actorNotFound"
+        :can-decide="canDecide"
+        :disconnected="disconnected"
+        :console-prefix="consolePrefix"
+        :mode="mode"
+        @decide="actorDecide"
+        @block="actorBlockOp('block')"
+        @unblock="actorBlockOp('unblock')"
+      />
       </div>
     </main>
   </div>
@@ -95,31 +109,39 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import ActorPanel from './ActorPanel.vue'
 import EpisodePanel from './EpisodePanel.vue'
 import ReviewPanel from './ReviewPanel.vue'
 import { fmtClock, fmtInt } from './fmt.js'
 import {
+  getActor,
   getEpisodes,
   getReview,
   getReviewItem,
   getSummary,
   getTraffic,
+  postActorBlock,
   postDecision,
   postReviewDecision,
   prefix,
 } from './api.js'
 
 // Hash routes: '' or '#/' dashboard, '#/review' queue, '#/review/decided',
-// '#/review/{actor|cluster}/{id}' queue with a selected item. Unknown hashes
-// fall back to the dashboard; turn anchors use replaceState, never routing.
+// '#/review/{actor|cluster}/{id}' queue with a selected item,
+// '#/actors/{id}' and '#/actors/{id}/raw'. Unknown hashes fall back to the
+// dashboard; turn anchors use replaceState, never routing.
 function parseHash() {
   const h = window.location.hash.replace(/^#/, '')
-  if (h === '' || h === '/') return { group: 'dashboard', name: 'dashboard', scope: null, id: null }
-  if (h === '/review') return { group: 'review', name: 'review-queue', scope: null, id: null }
-  if (h === '/review/decided') return { group: 'review', name: 'review-decided', scope: null, id: null }
+  if (h === '' || h === '/') return { group: 'dashboard', name: 'dashboard', scope: null, id: null, actorId: null }
+  if (h === '/review') return { group: 'review', name: 'review-queue', scope: null, id: null, actorId: null }
+  if (h === '/review/decided') return { group: 'review', name: 'review-decided', scope: null, id: null, actorId: null }
   const m = h.match(/^\/review\/(actor|cluster)\/(.+)$/)
-  if (m) return { group: 'review', name: 'review-queue', scope: m[1], id: decodeURIComponent(m[2]) }
-  return { group: 'dashboard', name: 'dashboard', scope: null, id: null }
+  if (m) return { group: 'review', name: 'review-queue', scope: m[1], id: decodeURIComponent(m[2]), actorId: null }
+  const raw = h.match(/^\/actors\/(.+)\/raw$/)
+  if (raw) return { group: 'actor', name: 'actor-raw', scope: null, id: null, actorId: decodeURIComponent(raw[1]) }
+  const a = h.match(/^\/actors\/(.+)$/)
+  if (a) return { group: 'actor', name: 'actor-overview', scope: null, id: null, actorId: decodeURIComponent(a[1]) }
+  return { group: 'dashboard', name: 'dashboard', scope: null, id: null, actorId: null }
 }
 
 const windows = ['24h', '7d', '30d']
@@ -148,6 +170,8 @@ const review = ref(null)
 const reviewItem = ref(null)
 const reviewItemLoading = ref(false)
 const emptyDecided = { total: 0, agreed: 0, items: [] }
+const actor = ref(null)
+const actorNotFound = ref(false)
 
 // Selection is the route's item, else the first queue row. Plain #/review
 // shows the first item without rewriting the URL.
@@ -275,12 +299,34 @@ function stopRetry() {
   }
 }
 
+async function loadActor() {
+  actorNotFound.value = false
+  if (!route.value.actorId) {
+    actor.value = null
+    return
+  }
+  const [s, a] = await Promise.all([getSummary('24h'), getActor(route.value.actorId)])
+  summary.value = s
+  actor.value = a
+  nowS.value = Math.floor(Date.now() / 1000)
+  disconnected.value = false
+  everLoaded.value = true
+  lastSeen.value = nowS.value
+  stopRetry()
+}
+
 async function reload() {
   try {
     if (route.value.group === 'review') await loadReview()
+    else if (route.value.group === 'actor') await loadActor()
     else await loadDashboard()
   } catch (err) {
     if (err && err.message === 'logged out') return
+    if (route.value.group === 'actor' && err && err.status === 404) {
+      actorNotFound.value = true
+      actor.value = null
+      return
+    }
     onDown()
   }
 }
@@ -293,6 +339,8 @@ function onHashChange() {
     void reload()
   } else if (next.group === 'review' && (next.scope !== prev.scope || next.id !== prev.id)) {
     reloadReviewItem()
+  } else if (next.group === 'actor' && next.actorId !== prev.actorId) {
+    void reload()
   }
 }
 
@@ -392,9 +440,38 @@ async function reviewDecide(action) {
   }
 }
 
+async function actorDecide(action) {
+  const a = actor.value
+  const windowTs = a && a.window ? a.window.window_end_ts : null
+  if (!a || !canDecide.value || a.state !== 'waiting' || windowTs === null) return
+  try {
+    await postReviewDecision('actor', a.id, action, windowTs)
+    await reload()
+  } catch (err) {
+    if (err && err.message === 'logged out') return
+    if (err && err.status === 409) {
+      await reload()
+      return
+    }
+    onDown()
+  }
+}
+
+async function actorBlockOp(kind) {
+  const a = actor.value
+  if (!a || !canDecide.value) return
+  try {
+    await postActorBlock(a.id, kind)
+    await reload()
+  } catch (err) {
+    if (err && err.message === 'logged out') return
+    onDown()
+  }
+}
+
 function doJump() {
   const id = jump.value.trim()
-  if (id) window.location.assign(`${consolePrefix}/ui/actors/${encodeURIComponent(id)}`)
+  if (id) window.location.hash = `#/actors/${encodeURIComponent(id)}`
 }
 
 function onKey(ev) {
@@ -413,6 +490,13 @@ function onKey(ev) {
     else if (ev.key === '1') void reviewDecide('confirm')
     else if (ev.key === '2') void reviewDecide('benign')
     else if (ev.key === '3') void reviewDecide('unknown')
+    return
+  }
+  if (route.value.group === 'actor') {
+    if (route.value.name !== 'actor-overview') return
+    if (ev.key === '1') void actorDecide('confirm')
+    else if (ev.key === '2') void actorDecide('benign')
+    else if (ev.key === '3') void actorDecide('unknown')
     return
   }
   if (ev.key === 'j') next(1)

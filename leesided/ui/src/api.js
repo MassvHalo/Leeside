@@ -36,3 +36,13 @@ export const postReviewDecision = (scope, id, decision, window_end_ts) =>
     method: 'POST',
     body: { decision, window_end_ts },
   })
+export const getActor = (id) => call(`/actors/${encodeURIComponent(id)}`)
+export const getActorTurns = (id, filter = {}) => {
+  const p = new URLSearchParams({ limit: '20' })
+  if (filter.flag) p.set('flag', filter.flag)
+  if (filter.status) p.set('status', filter.status)
+  if (filter.route) p.set('route', filter.route)
+  return call(`/actors/${encodeURIComponent(id)}/turns?${p}`)
+}
+export const postActorBlock = (id, action) =>
+  call(`/actors/${encodeURIComponent(id)}/block`, { method: 'POST', body: { action } })

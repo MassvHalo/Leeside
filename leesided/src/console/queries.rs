@@ -4263,6 +4263,145 @@ pub fn feature_display(name: &str, value: f64) -> String {
     }
 }
 
+/// A whole number without decimals, else the shortest float.
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{:.0}", v)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// A span in the two largest units: "4 h 52 min", "12 min 3 s", "40 s".
+pub fn fmt_dur(s: i64) -> String {
+    let s = s.max(0);
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    if h > 0 {
+        if m > 0 {
+            format!("{h} h {m} min")
+        } else {
+            format!("{h} h")
+        }
+    } else if m > 0 {
+        if sec > 0 {
+            format!("{m} min {sec} s")
+        } else {
+            format!("{m} min")
+        }
+    } else {
+        format!("{sec} s")
+    }
+}
+
+/// Milliseconds as "1.6 s" or "40 ms".
+fn fmt_ms(ms: f64) -> String {
+    if ms >= 1000.0 {
+        let s = ms / 1000.0;
+        if (s * 10.0).fract() == 0.0 {
+            format!("{s:.0} s")
+        } else {
+            format!("{s:.1} s")
+        }
+    } else {
+        format!("{:.0} ms", ms)
+    }
+}
+
+/// One top-3 feature as the actor page phrases it: a sentence with
+/// the window's value filled in ("81% of its turns hit a 404"), or
+/// the plain phrase for anything unmapped.
+pub fn feature_sentence(name: &str, value: f64) -> String {
+    let n = fmt_num(value);
+    let pct = (value * 100.0).round() as i64;
+    match name {
+        "turns_total" => format!("{n} requests in the window"),
+        "turns_held" => format!("{n} requests held"),
+        "age_s" => format!("window spans {}", fmt_dur(value as i64)),
+        "idle_s" => format!("idle for {}", fmt_dur(value as i64)),
+        "turns_last_60s" => format!("{n} requests in the last minute"),
+        "turns_last_600s" => format!("{n} requests in ten minutes"),
+        "gap_mean_ms" => format!("mean gap {} between requests", fmt_ms(value)),
+        "gap_cv" => format!("gap variation {value:.2}"),
+        "ratio_4xx" => format!("{pct}% of its turns are 4xx"),
+        "ratio_5xx" => format!("{pct}% are server errors"),
+        "ratio_404" => format!("{pct}% of its turns hit a 404"),
+        "ratio_422" => format!("{pct}% are rejected requests"),
+        "count_not_found_exc" => format!("{n} missing pages"),
+        "login_failed_total" => format!("{n} failed logins"),
+        "login_ok_total" => format!("{n} successful logins"),
+        "distinct_routes" => format!("{n} distinct routes"),
+        "distinct_routes_ratio" => format!("route variety {value:.2}"),
+        "distinct_bound_ids" => format!("{n} distinct ids touched"),
+        "unrouted_ratio" => format!("{pct}% of its turns match no route"),
+        "distinct_req_shapes" => format!("{n} distinct request shapes"),
+        "bytes_out_mean" => format!("responses average {n} bytes"),
+        "bytes_out_max" => format!("largest response {n} bytes"),
+        "latency_mean_ms" => format!("mean latency {}", fmt_ms(value)),
+        "latency_max_ms" => format!("slowest request {}", fmt_ms(value)),
+        "verb_post_ratio" => format!("{pct}% of its turns are POSTs"),
+        "repeat_route_ratio" => format!("{pct}% repeat the same route"),
+        "ua_changes" => format!("{n} user-agent changes"),
+        "peer_turns_600s" => format!("{n} network requests in ten minutes"),
+        "peer_ratio_4xx" => format!("{pct}% of network turns are 4xx"),
+        "is_anon" => {
+            if value >= 0.5 {
+                "no login or key".to_string()
+            } else {
+                "signed in or keyed".to_string()
+            }
+        }
+        "cluster_actors_net" => format!("{n} actors share its network"),
+        "shape_cluster_size" => {
+            format!("{n} other actors share its request shape on this network")
+        }
+        "tag_dropped" => {
+            if value >= 0.5 {
+                "tag issued then dropped".to_string()
+            } else {
+                "tag kept".to_string()
+            }
+        }
+        "credential_moved" => {
+            if value >= 0.5 {
+                "credential seen on two networks".to_string()
+            } else {
+                "credential stayed on one network".to_string()
+            }
+        }
+        "surface_web" => {
+            if value >= 0.5 {
+                "on the web surface".to_string()
+            } else {
+                "not on the web surface".to_string()
+            }
+        }
+        "surface_api" => {
+            if value >= 0.5 {
+                "on the API surface".to_string()
+            } else {
+                "not on the API surface".to_string()
+            }
+        }
+        "surface_webhook" => {
+            if value >= 0.5 {
+                "on the webhook surface".to_string()
+            } else {
+                "not on the webhook surface".to_string()
+            }
+        }
+        "surface_honeypot" => {
+            if value >= 0.5 {
+                "on the honeypot surface".to_string()
+            } else {
+                "not on the honeypot surface".to_string()
+            }
+        }
+        _ => feature_display(name, value),
+    }
+}
+
 /// The actor page headline from a template (Round A-2): the kind
 /// phrase, the first-seen day, and the decision state. No LLM call.
 pub fn headline(kind: &str, first_seen_us: i64, state: &str) -> String {
@@ -5043,6 +5182,171 @@ impl<'a> Ctx<'a> {
         }))
     }
 
+    /// The latest window's values for top-3 names, in order: the
+    /// scores keep gains, and the actor page phrases values. Names
+    /// the vector does not know come back null.
+    fn top3_values(
+        &self,
+        scope: &str,
+        id: &str,
+        names: &[String],
+    ) -> Result<Vec<Option<f64>>, QueryError> {
+        let vector: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT vector FROM feature_vectors \
+                 WHERE scope = ?1 AND key = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let values: Vec<f64> = vector
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        Ok(names
+            .iter()
+            .map(|name| {
+                crate::rules::features::NAMES
+                    .iter()
+                    .position(|n| n == name)
+                    .and_then(|i| values.get(i).copied())
+            })
+            .collect())
+    }
+
+    /// The actor's trailing 24 hourly buckets: totals and 4xx/5xx
+    /// hostile counts, in the dashboard's bucket shape.
+    fn actor_histogram(&self, id: &str, now_s: i64) -> Result<Vec<(i64, i64, i64)>, QueryError> {
+        let end = now_s - now_s.rem_euclid(3600);
+        let start = end - 23 * 3600;
+        let mut stmt = self.conn().prepare(
+            "SELECT (ts_us / 3600000000) * 3600, count(*), \
+             coalesce(sum(status BETWEEN 400 AND 599), 0) \
+             FROM turns WHERE actor_id = ?1 AND ts_us >= ?2 GROUP BY 1",
+        )?;
+        let rows = stmt.query_map(params![id, start * 1_000_000], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut by_hour: std::collections::HashMap<i64, (i64, i64)> =
+            std::collections::HashMap::new();
+        for r in rows {
+            let (h, total, hostile) = r?;
+            by_hour.insert(h, (total, hostile));
+        }
+        Ok((0..24)
+            .map(|i| {
+                let h = start + i * 3600;
+                let (total, hostile) = by_hour.get(&h).copied().unwrap_or((0, 0));
+                (h, total, hostile)
+            })
+            .collect())
+    }
+
+    /// The actor's three busiest raw routes, for the activity panel.
+    fn actor_top_routes(&self, id: &str) -> Result<Vec<(String, i64)>, QueryError> {
+        let mut stmt = self.conn().prepare(
+            "SELECT route, count(*) FROM turns WHERE actor_id = ?1 \
+             GROUP BY route ORDER BY count(*) DESC, route ASC LIMIT 3",
+        )?;
+        let rows = stmt.query_map(params![id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(QueryError::from)
+    }
+
+    /// The actor's latest turn as a raw column map, in the raw tab's
+    /// column order. The ruleset blob reads as hex; missing turns
+    /// read as null.
+    fn actor_raw_turn(&self, id: &str) -> Result<Option<serde_json::Value>, QueryError> {
+        let cols = [
+            "turn_id",
+            "session_key",
+            "ts_us",
+            "ts",
+            "peer_key",
+            "principal",
+            "verb",
+            "route",
+            "status",
+            "latency_ms",
+            "bytes_in",
+            "bytes_out",
+            "req_shape",
+            "resp_shape",
+            "bound",
+            "validation_failed",
+            "exception",
+            "auth_event",
+            "gate",
+            "ua_hash",
+            "dropped_since_last",
+            "rules_matched",
+            "verdict",
+            "hex(ruleset_hash)",
+            "surface",
+            "is_asset",
+            "credential_kind",
+            "credential_hash",
+            "credential_status",
+            "tag_id",
+            "tag_status",
+            "ip_hash",
+            "net_hash",
+            "asn",
+            "country",
+            "ip_trust",
+            "ua_class",
+            "shape_hash",
+            "flags",
+            "ja4",
+            "ja4t",
+            "h2_fp",
+            "remote_port",
+            "ts_ms",
+            "actor_id",
+            "cluster_key",
+            "ingest_seq",
+        ];
+        let names: Vec<&str> = cols
+            .iter()
+            .map(|c| c.strip_prefix("hex(").unwrap_or(c).trim_end_matches(')'))
+            .collect();
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {} FROM turns WHERE actor_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            cols.join(", ")
+        ))?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let mut map = serde_json::Map::with_capacity(cols.len());
+        for (i, name) in names.iter().enumerate() {
+            let v: rusqlite::types::Value = row.get(i)?;
+            map.insert(
+                name.to_string(),
+                match v {
+                    rusqlite::types::Value::Null => serde_json::Value::Null,
+                    rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                    rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                    rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+                    rusqlite::types::Value::Blob(b) => {
+                        serde_json::Value::String(crate::hash::hex(&b))
+                    }
+                },
+            );
+        }
+        Ok(Some(serde_json::Value::Object(map)))
+    }
+
     /// One actor page: the headline, client and activity rows, the
     /// score block with its explanation, labels, the proposal with
     /// its cited signals, decisions, same-cluster actors with their
@@ -5064,18 +5368,33 @@ impl<'a> Ctx<'a> {
             .as_deref()
             .and_then(|s| thresholds.get(s).copied())
             .unwrap_or(0.5);
+        let top_names: Vec<String> = d
+            .scores
+            .latest
+            .as_ref()
+            .map(|s| s.top3.iter().map(|(name, _)| name.clone()).collect())
+            .unwrap_or_default();
+        let top_values = self.top3_values("actor", &canonical, &top_names)?;
         let score = d.scores.latest.as_ref().map(|s| {
             serde_json::json!({
                 "value": s.score,
                 "threshold": threshold,
                 "verdict": if s.score >= threshold { "hostile" } else { "benign" },
                 "by": format!("Windside {}", s.model_version),
+                "model_version": s.model_version,
                 "at": s.ts_us,
-                "top": s.top3.iter().map(|(name, gain)| serde_json::json!({
-                    "name": name,
-                    "display": feature_display(name, *gain),
-                    "value": gain,
-                })).collect::<Vec<_>>(),
+                "top": s.top3.iter().zip(top_values.iter()).map(|((name, gain), value)| {
+                    let phrase = match value {
+                        Some(v) => feature_sentence(name, *v),
+                        None => feature_phrase(name).unwrap_or(name).to_string(),
+                    };
+                    serde_json::json!({
+                        "name": name,
+                        "value": value,
+                        "gain": gain,
+                        "phrase": phrase,
+                    })
+                }).collect::<Vec<_>>(),
             })
         });
         let history: Vec<serde_json::Value> = d
@@ -5090,20 +5409,23 @@ impl<'a> Ctx<'a> {
             .map(|b| {
                 serde_json::json!({
                     "kind": b.kind,
+                    "value": b.value,
                     "first_seen": b.first_seen,
                     "last_seen": b.last_seen,
+                    "expires_at": b.expires_at,
                     "returned": b.returned,
                     "provisional": b.provisional,
                 })
             })
             .collect();
-        let ja4_class = d.client.ja4.as_deref().map(|j| match classes.classify(j) {
-            crate::tap::classes::Class::Browser => "browser",
-            crate::tap::classes::Class::Library => "library",
-            crate::tap::classes::Class::Unknown => "unknown",
-        });
-        let ja4_hostile = ja4_class == Some("library")
-            && crate::tap::classes::is_browser_ua(d.client.ua_class.as_deref());
+        let tap = tap_info(
+            classes,
+            d.client.ja4.as_deref(),
+            d.client.ua_class.as_deref(),
+        );
+        let ja4_class =
+            (!d.client.ja4.as_deref().is_none_or(|j| j.is_empty())).then(|| tap.class.clone());
+        let ja4_hostile = tap.mismatch;
         let flags: Vec<serde_json::Value> = d
             .client
             .flag_rates
@@ -5116,11 +5438,19 @@ impl<'a> Ctx<'a> {
             .labels
             .iter()
             .map(|l| {
+                let note = l.note.as_deref().map(|n| {
+                    if l.source == "llm_proposed" {
+                        crate::review::Proposal::display(n)
+                    } else {
+                        n.to_string()
+                    }
+                });
                 serde_json::json!({
                     "source": l.source,
                     "label": l.label,
                     "confidence": l.confidence,
                     "at": l.created_at,
+                    "note": note,
                 })
             })
             .collect();
@@ -5198,6 +5528,20 @@ impl<'a> Ctx<'a> {
         }
         let (turns, turn_total) =
             self.subject_turns("actor", &canonical, 20, None, None, None, &cited_by)?;
+        let histogram = self.actor_histogram(&canonical, now_s)?;
+        let marker_at: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT created_at FROM decisions \
+                 WHERE scope = 'actor' AND key = ?1 AND action = 'block' \
+                 AND mode = 'enforce' AND expires_at > ?2 \
+                 ORDER BY created_at DESC LIMIT 1",
+                params![canonical, now_s],
+                |r| r.get(0),
+            )
+            .ok();
+        let top_routes = self.actor_top_routes(&canonical)?;
+        let raw_turn = self.actor_raw_turn(&canonical)?;
         Ok(serde_json::json!({
             "id": canonical,
             "kind": d.row.kind,
@@ -5207,7 +5551,18 @@ impl<'a> Ctx<'a> {
             "last": d.head.last_us,
             "turns_held": d.head.turns,
             "merged_from": d.merged_from,
+            "merged_into": d.head.merged_into,
+            "confirmed": d.head.confirmed,
+            "surfaces": d.row.surfaces,
             "bindings": bindings,
+            "histogram": histogram.iter().map(|(at, total, hostile)| {
+                serde_json::json!({"at": at, "total": total, "hostile": hostile})
+            }).collect::<Vec<_>>(),
+            "marker_at": marker_at,
+            "top_routes": top_routes.iter().map(|(route, turns)| {
+                serde_json::json!({"route": route, "turns": turns})
+            }).collect::<Vec<_>>(),
+            "raw_turn": raw_turn,
             "client": {
                 "ua_class": d.client.ua_class,
                 "ja4": d.client.ja4,
@@ -5237,12 +5592,26 @@ impl<'a> Ctx<'a> {
             "score_history": history,
             "score_note": d.scores.explanation,
             "scored_rows": d.scores.scored_rows,
-            "explanation": d.explanation.as_ref().map(|e| serde_json::json!({
-                "text": e.text,
-                "turn_id": e.turn_id,
-                "at": e.ts_us,
-                "score": e.score,
-            })),
+            "explanation": d.explanation.as_ref().map(|e| {
+                let explained_by: Option<String> = self
+                    .conn()
+                    .query_row(
+                        "SELECT c.model FROM llm_calls c \
+                         JOIN llm_jobs j ON c.job_id = j.id \
+                         WHERE j.point = 'explain' AND j.scope = 'actor' AND j.subject_id = ?1 \
+                         AND j.status = 'done' ORDER BY c.id DESC LIMIT 1",
+                        params![canonical],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                serde_json::json!({
+                    "text": e.text,
+                    "turn_id": e.turn_id,
+                    "at": e.ts_us,
+                    "score": e.score,
+                    "explained_by": explained_by,
+                })
+            }),
             "labels": labels,
             "proposal": proposal,
             "signals": signal_list,
@@ -5681,7 +6050,10 @@ mod tests {
              ('actor', 'a10', 't12', 'web', {u5}, 0.9, '0.1.0', '[]'), \
              ('actor', 'a11', 't13', 'web', {u5}, 0.6, '0.1.0', '[]'); \
              INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
-             ('actor', 'a1', 't5', {u5}, 2, '[0.0]', 'web', 0); \
+             ('actor', 'a1', 't5', {u5}, 2, '[5.0,5.0,400.0,60.0,1.0,5.0,60000.0,0.5,0.4,0.0,0.81,0.0,2.0,0.0,0.0,3.0,0.6,0.0,0.4,2.0,20.0,20.0,1.0,1.0,0.4,0.2,1.0,5.0,0.0,1.0,2.0,2.0,0.0,0.0,1.0,0.0,0.0,0.0]', 'web', 0); \
+             INSERT INTO actor_bindings (kind, value, actor_id, first_seen, last_seen, expires_at, returned) VALUES \
+             ('tag', '9b31f2c07ae4d186', 'a1', {t1}, {t5}, {e1}, 1), \
+             ('session', '4e7d0a1b92c6f835', 'a1', {t1}, {t4}, {e1}, 0); \
              INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, signals, cited_turns, created_at) VALUES \
              ('actor', 'a1', 'web', {u5}, 'malicious', 'llm_proposed', 0.91, \
              'Wordlist paths at machine cadence. [llm_call:1]', '[\"scanner_paths\"]', '[0, 3]', {c1}), \
@@ -6016,6 +6388,11 @@ mod tests {
         assert_eq!(v["activity"]["turns"], 5);
         assert_eq!(v["score"]["value"], 0.95);
         assert_eq!(v["score"]["verdict"], "hostile");
+        assert_eq!(v["score"]["model_version"], "0.1.0");
+        assert_eq!(v["score"]["top"][0]["name"], "ratio_404");
+        assert_eq!(v["score"]["top"][0]["value"], 0.81);
+        assert_eq!(v["score"]["top"][0]["gain"], 0.63);
+        assert_eq!(v["score"]["top"][0]["phrase"], "81% of its turns hit a 404");
         assert_eq!(v["proposal"]["label"], "malicious");
         assert_eq!(v["signals"].as_array().unwrap().len(), 2);
         assert_eq!(v["blocked"], false);
@@ -6025,11 +6402,75 @@ mod tests {
         assert_eq!(v["similar"][0]["id"], "a3");
         assert_eq!(v["similar"][0]["state"], "waiting");
         assert_eq!(v["turn_total"], 5);
+        assert_eq!(v["confirmed"], true);
+        assert_eq!(v["merged_into"], serde_json::Value::Null);
+        assert_eq!(v["surfaces"][0], "web");
+        assert_eq!(v["bindings"].as_array().unwrap().len(), 2);
+        let tag = v["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["kind"] == "tag")
+            .unwrap();
+        assert_eq!(tag["value"], "9b31f2c07ae4d186");
+        assert_eq!(tag["returned"], true);
+        assert_eq!(v["labels"][0]["note"], "Wordlist paths at machine cadence.");
+        assert_eq!(v["explanation"], serde_json::Value::Null);
+        assert_eq!(v["histogram"].as_array().unwrap().len(), 24);
+        let (total, hostile): (i64, i64) = v["histogram"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| (b["total"].as_i64().unwrap(), b["hostile"].as_i64().unwrap()))
+            .fold((0, 0), |(t, h), (t2, h2)| (t + t2, h + h2));
+        assert_eq!((total, hostile), (5, 2));
+        assert_eq!(v["marker_at"], serde_json::Value::Null);
+        let routes: Vec<(&str, i64)> = v["top_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["route"].as_str().unwrap(), r["turns"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(
+            routes,
+            vec![("_unrouted", 2), ("portal.login", 2), ("home", 1)]
+        );
+        assert_eq!(v["raw_turn"]["turn_id"], "t5");
+        assert_eq!(v["raw_turn"]["status"], 200);
+        assert_eq!(v["raw_turn"]["asn"], serde_json::Value::Null);
+        assert_eq!(v["raw_turn"]["actor_id"], "a1");
         let v = ctx
             .actor_json("aaaabbbbccccdddd", &web_thresholds(), &classes, now)
             .unwrap();
         assert_eq!(v["state"], "stopped");
         assert_eq!(v["blocked"], true);
         assert_eq!(v["score"], serde_json::Value::Null);
+        assert_eq!(v["marker_at"], now - 200);
+    }
+
+    #[test]
+    fn a3_feature_sentences_and_durations() {
+        assert_eq!(
+            feature_sentence("ratio_404", 0.81),
+            "81% of its turns hit a 404"
+        );
+        assert_eq!(
+            feature_sentence("shape_cluster_size", 2.0),
+            "2 other actors share its request shape on this network"
+        );
+        assert_eq!(
+            feature_sentence("unrouted_ratio", 0.81),
+            "81% of its turns match no route"
+        );
+        assert_eq!(feature_sentence("is_anon", 1.0), "no login or key");
+        assert_eq!(feature_sentence("whatever_new", 0.5), "whatever_new 0.50");
+        for name in crate::rules::features::NAMES {
+            assert!(!feature_sentence(name, 1.0).is_empty(), "{name}");
+        }
+        assert_eq!(fmt_dur(0), "0 s");
+        assert_eq!(fmt_dur(40), "40 s");
+        assert_eq!(fmt_dur(90), "1 min 30 s");
+        assert_eq!(fmt_dur(3600), "1 h");
+        assert_eq!(fmt_dur(17520), "4 h 52 min");
     }
 }
