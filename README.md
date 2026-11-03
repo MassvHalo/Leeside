@@ -7,6 +7,28 @@ synchronous check; the engine answers from deterministic rules and a fast
 classifier, while larger models score and reason asynchronously, off the
 request path.
 
+## Status
+
+Deployed on `webapp.leeside.halowifi.com`: the capture package, the Rust
+engine with deterministic rules, the Windside classifier (model 0.1.0) scoring
+in shadow, the passive TLS tap, and the Windside console at `/windside/` with
+admin and read-only viewer sessions. The LLM tiers (Glimmer scoring, Spark
+reasoning) run asynchronously off a queue; the console's review queue and rule
+drafting are live.
+
+Label-point evals (post-faithfulness agreement, as prod would score them):
+
+| Eval | Rows | Agreement |
+| --- | --- | --- |
+| 1 | 10 | 0.20 |
+| 3 | 142 | 0.80 |
+| 5 | 156 | 0.92 |
+| 7 | 148 | 0.971 ± 0.009 |
+
+What's next: flip Windside from shadow to active after the shadow week,
+per-surface windows and fingerprint features for v3, and the designed console
+on the same data layer.
+
 ## How it works
 
 - `leeside/laravel` (the capture layer) emits a turn event per request —

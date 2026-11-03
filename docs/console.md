@@ -10,6 +10,7 @@ Save as `docs/console.md`. Brief for leesided (HTTP API, SSE, auth) and a new `c
 - **Tenancy rule from the handoff.** Every new table carries `app_id` with a `default` value; endpoints take an optional `app` query parameter that defaults to `default`.
 - **Conventions.** `{"data": …, "next_cursor": …}` for lists, cursor pagination, errors as `{"error": {"code", "message"}}`, 401 for no session, 403 for the wrong role. Ids are hex strings; times carry both an ISO string and `ts_us`.
 - **Derived "kind"** of an actor, computed server side, the same everywhere: a principal binding → `signed-in user`; a verified credential → `API client` (`webhook sender` when the credential kind is `webhook_sig`); only session or tag → `browser only`. Clusters have no kind.
+- **Naming.** The console is Windside: the header, page titles and login page say so. The classifier keeps its name — it stays Windside too — and its outputs are always "Windside score" and "Windside model", never bare "score" or "model". The LLM tiers keep theirs (Glimmer, Spark).
 
 ## 2. Endpoints, v1
 

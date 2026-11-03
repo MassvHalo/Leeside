@@ -264,6 +264,10 @@ sudo chown -R www-data:www-data /var/lib/leeside/windside-model
 #   LEESIDED_WINDSIDE_MODE=shadow
 #   LEESIDED_LLM_MODE=off   # dry logs requests without sending, live sends
 #                           # (docs/llm.md); URL/KEY/MODEL only when wanted
+#   LEESIDED_VIEWER_TOKEN=<openssl rand -hex 32; read-only console sessions>
+#   LEESIDED_CONSOLE_PATH=/windside
+#   LEESIDED_TRUSTED_PROXY=127.0.0.1
+#   LEESIDED_CONSOLE_ALLOW=   # empty: the demo allows all; office CIDRs after
 
 # 1. Pre-flight: record the old daemon's /health for the rollback
 # comparison, then stop the daemon.
@@ -277,7 +281,7 @@ sudo cp /usr/local/bin/leesided /usr/local/bin/leesided.pre-v2
 
 # 3. Deploy (app first, then the new binary) and watch the migrations.
 sudo bash leeside-sample/deploy/deploy.sh
-journalctl -u leesided -f   # expect: migrated version=5 .. version=21
+journalctl -u leesided -f   # expect: migrated version=5 .. version=22
 
 # 4. Verify /health.
 curl -s 127.0.0.1:7390/health | python3 -m json.tool
@@ -287,6 +291,16 @@ curl -s 127.0.0.1:7390/health | python3 -m json.tool
 
 # 5. The package is live with the deploy. Confirm the new wire: no
 # bad_probe or bad_event climb on the next requests.
+
+# 5b. nginx: the site conf grew the /windside/ block. Do NOT copy the
+# repo file over the live one: certbot owns the 443 block. Instead merge
+# by hand into /etc/nginx/sites-available/webapp.leeside.halowifi.com.conf:
+# the limit_req_zone line at the top of the file (http level), and the
+# three locations (= /windside, = /windside/login, /windside/) inside the
+# 443 server block, so the console is HTTPS-only. Then:
+sudo nginx -t && sudo systemctl reload nginx
+curl -sI https://webapp.leeside.halowifi.com/windside/login | head -1
+# HTTP/2 200.
 
 # 6. Start the fingerprint tap unit, leesided-tap.service (not the
 # artisan stand-in, leeside-artisan-tap.service), then watch matched
