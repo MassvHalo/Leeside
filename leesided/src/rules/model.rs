@@ -878,6 +878,67 @@ mod tests {
         }
     }
 
+    fn generic_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("rules/generic")
+    }
+
+    #[test]
+    fn generic_rules_parse_and_carry_no_route_names() {
+        let mut names: Vec<String> = std::fs::read_dir(generic_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "the shippable set must not be empty");
+        // The sample app's names; a copied sample rule must fail here, not in a customer's box.
+        const SAMPLE: [&str; 4] = [
+            "portal.login",
+            "venues.show",
+            "api.venues.visit",
+            "\"Venue\"",
+        ];
+        for name in &names {
+            let text = std::fs::read_to_string(generic_dir().join(name)).unwrap();
+            for sample in SAMPLE {
+                assert!(
+                    !text.contains(sample),
+                    "{name}: carries the sample-app name {sample}"
+                );
+            }
+            let rule = Rule::parse(&text, NOW).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(&format!("{}.json", rule.id), name);
+            assert_eq!(
+                rule.matcher.route,
+                vec!["*".to_string()],
+                "{name}: match.route is the bare wildcard"
+            );
+            for c in rule.when.iter().flat_map(|w| w.conditions()) {
+                assert!(
+                    c.sequence.is_none(),
+                    "{name}: no sequence (it names routes)"
+                );
+                for d in c.distinct.iter() {
+                    assert!(
+                        d.model.is_none(),
+                        "{name}: no model narrowing (it names models)"
+                    );
+                }
+                let filters = c
+                    .count
+                    .iter()
+                    .chain(c.distinct.iter().filter_map(|d| d.filter.as_ref()));
+                for f in filters {
+                    assert!(f.route.is_none(), "{name}: no route filter");
+                    assert!(f.bound_model.is_none(), "{name}: no bound-model filter");
+                    assert!(f.req_shape.is_none(), "{name}: no shape filter");
+                }
+            }
+            let again: Rule = serde_json::from_str(&serde_json::to_string(&rule).unwrap()).unwrap();
+            assert_eq!(rule, again);
+        }
+    }
+
     #[test]
     fn orderings_are_the_ladder() {
         assert!(Mode::Monitor < Mode::Shadow && Mode::Shadow < Mode::Enforce);

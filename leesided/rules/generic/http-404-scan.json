@@ -1,0 +1,19 @@
+{
+  "id": "http-404-scan",
+  "note": "Twenty not-found responses within ten minutes from one peer",
+  "mode": "shadow",
+  "action": "block",
+  "block_min": 10,
+  "match": {
+    "route": ["*"],
+    "verb": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    "principal": "any"
+  },
+  "when": {
+    "scope": "peer",
+    "window_s": 600,
+    "count": { "status": [404] },
+    "gte": 20
+  },
+  "origin": { "kind": "install" }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "auth-burst-peer",
+  "note": "Ten failed logins within ten minutes from one peer",
+  "mode": "enforce",
+  "action": "rate_limit",
+  "retry_after_s": 60,
+  "match": { "route": ["*"], "verb": ["POST"], "principal": "any" },
+  "when": {
+    "scope": "peer",
+    "window_s": 600,
+    "count": { "auth_event": ["login_failed"] },
+    "gte": 10
+  },
+  "origin": { "kind": "install" }
+}

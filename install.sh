@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Leeside product installer: leesided, the tap and Windside on an Ubuntu
 # 22.04 or 24.04 box that already hosts a Laravel app behind nginx.
-# Run as: curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | bash
+# Run as: curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash
 # The Laravel package is printed instructions at the end.
 #
 # Env overrides (all optional): LEESIDE_BINARY (a local leesided binary
-# to install instead of downloading; the release download is the one
-# path this skips), LEESIDE_DOMAIN, LEESIDE_LLM_KEY,
-# LEESIDE_GEOIP_ACCOUNT, LEESIDE_GEOIP_KEY. Flags: --yes (skip prompts),
-# --uninstall [--purge], --help.
+# to install instead of downloading; with it set the box never contacts
+# the release, so the model and rules downloads are skipped too),
+# LEESIDE_DOMAIN, LEESIDE_LLM_KEY, LEESIDE_GEOIP_ACCOUNT,
+# LEESIDE_GEOIP_KEY. Flags: --yes (skip prompts), --uninstall [--purge],
+# --help.
 set -euo pipefail
 
 GH_REPO="MassvHalo/Leeside"
@@ -19,6 +20,9 @@ ENV_DIR="/etc/leeside"
 ENV_FILE="/etc/leeside/leesided.env"
 INSTALL_CONF="/etc/leeside/install.conf"
 MODEL_DIR="/var/lib/leeside/windside-model"
+RULES_NAME="leesided-rules.tar.gz"
+RULES_DIR="/usr/local/bin/rules/install"
+RULES_SHA="/etc/leeside/rules.sha256"
 LIB_DIR="/var/lib/leeside"
 RUN_DIR="/run/leeside"
 TMPFILES_ENTRY="/etc/tmpfiles.d/leeside.conf"
@@ -138,6 +142,11 @@ make_dirs() {
 
 install_model() {
     # Fetches the model files when missing; leaves present ones alone.
+    # A local binary means an offline box: the release is never contacted.
+    if [ -n "${LEESIDE_BINARY:-}" ]; then
+        echo "skipped (LEESIDE_BINARY set: offline mode, the release is never contacted)"
+        return 0
+    fi
     local changed=0 f
     for f in manifest.json model.txt; do
         if [ ! -s "$MODEL_DIR/$f" ]; then
@@ -148,6 +157,50 @@ install_model() {
     chown www-data:www-data "$MODEL_DIR/manifest.json" "$MODEL_DIR/model.txt" \
         || die "cannot chown the model files." "check the www-data user exists, then rerun"
     [ "$changed" = "1" ] && echo "changed" || echo "kept"
+}
+
+rules_current() {
+    # rules_current <want-sha>; true when the installed rules match and
+    # the directory actually holds rules.
+    [ -f "$RULES_SHA" ] || return 1
+    [ "$(cat "$RULES_SHA")" = "$1" ] || return 1
+    [ -n "$(ls "$RULES_DIR"/*.json 2>/dev/null)" ] || return 1
+    return 0
+}
+
+apply_rules() {
+    # apply_rules <tarball> <sha-file> <want-sha>; verifies and extracts
+    # the generic install set where the default lookup finds it.
+    verify_sha256 "$1" "$2"
+    mkdir -p "$RULES_DIR" || die "cannot create $RULES_DIR." "check disk space and permissions, then rerun"
+    rm -f "$RULES_DIR"/*.json
+    tar -xzf "$1" -C "$RULES_DIR" || die "cannot extract the rules tarball." "check disk space, then rerun"
+    [ -n "$(ls "$RULES_DIR"/*.json 2>/dev/null)" ] || die "the rules tarball held no rules." "check the release asset, then rerun"
+    printf '%s\n' "$3" > "$RULES_SHA" || die "cannot write $RULES_SHA." "check disk space and permissions, then rerun"
+    chmod 600 "$RULES_SHA" || die "cannot chmod $RULES_SHA." "check disk space and permissions, then rerun"
+}
+
+install_rules() {
+    # Downloads, verifies and extracts the generic install rules.
+    # Prints "changed", "kept", or the offline skip. A local binary
+    # means an offline box: the release is never contacted.
+    if [ -n "${LEESIDE_BINARY:-}" ]; then
+        echo "skipped (LEESIDE_BINARY set: offline mode, the release is never contacted)"
+        return 0
+    fi
+    local tmp want
+    tmp="$(mktemp -d)" || die "cannot make a temp dir." "check TMPDIR and disk space, then rerun"
+    download "${RELEASE_BASE}/${RULES_NAME}.sha256" "$tmp/sha256"
+    want="$(awk '{print $1}' "$tmp/sha256")"
+    if rules_current "$want"; then
+        rm -rf "$tmp"
+        echo "kept"
+        return 0
+    fi
+    download "${RELEASE_BASE}/${RULES_NAME}" "$tmp/rules.tar.gz"
+    apply_rules "$tmp/rules.tar.gz" "$tmp/sha256" "$want"
+    rm -rf "$tmp"
+    echo "changed"
 }
 
 read_answer() {
@@ -240,8 +293,9 @@ Environment=LEESIDED_API=127.0.0.1:7390
 Environment=LEESIDED_GEOIP_ASN=/var/lib/GeoIP/GeoLite2-ASN.mmdb
 Environment=LEESIDED_GEOIP_COUNTRY=/var/lib/GeoIP/GeoLite2-Country.mmdb
 Environment=RUST_LOG=info
-# No LEESIDED_RULES_DIR: the install starts with an empty ruleset (the
-# daemon logs one warning). Add rules through the overrides file.
+# No LEESIDED_RULES_DIR: the default lookup finds the install set at
+# /usr/local/bin/rules/install. App-specific rules go through the
+# overrides file.
 EnvironmentFile=/etc/leeside/leesided.env
 StateDirectory=leeside
 ExecStart=/usr/local/bin/leesided serve
@@ -463,13 +517,22 @@ Viewer token (read-only, safe to share): $viewer_token
 Admin token and hash key unchanged; read them as root from $ENV_FILE.
 EOF
     fi
+    local rules_n=0 f rules_line
+    for f in "$RULES_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        rules_n=$((rules_n + 1))
+    done
+    rules_line="none installed (offline mode, or the download was skipped)"
+    if [ "$rules_n" -gt 0 ]; then
+        rules_line="$rules_n generic rules in $RULES_DIR"
+    fi
     cat <<EOF
-Rules: none shipped; the daemon starts with an empty ruleset and logs
-one warning. Add rules through the overrides file when ready.
+Rules: $rules_line.
+App-specific rules go through the overrides file when ready.
 --------------------------------------------------------
 Laravel app steps (as the app user, in the app directory):
 
-    git clone https://github.com/${GH_REPO} /opt/leeside
+    git clone https://github.com/${GH_REPO} /opt/leeside   # or anywhere the app user can read
     composer config repositories.leeside '{"type":"path","url":"/opt/leeside/leeside-laravel","options":{"symlink":true}}'
     composer require leeside/laravel
 
@@ -496,6 +559,7 @@ uninstall() {
     rm -f "$DAEMON_UNIT" "$TAP_UNIT"
     systemctl daemon-reload || true
     rm -f "$BIN_PATH"
+    rm -rf /usr/local/bin/rules
     if [ -n "$ENV_DIR" ] && [ "$ENV_DIR" = "/etc/leeside" ]; then rm -rf /etc/leeside; fi
     rm -f "$NGINX_SNIPPET" "$NGINX_ZONE" "$TMPFILES_ENTRY"
     # Take the include back out of every conf that has it.
@@ -536,7 +600,7 @@ Usage: install.sh [--yes] [--uninstall [--purge]] [--help]
 Installs leesided, the tap and Windside. Reads answers from the
 terminal unless --yes; every answer also has an env var:
 
-    LEESIDE_BINARY        local leesided binary instead of the release download
+    LEESIDE_BINARY        local binary; the box then never contacts the release (offline)
     LEESIDE_DOMAIN        the app's domain (finds its nginx conf)
     LEESIDE_LLM_KEY       Baseten key (blank: the LLM stays off)
     LEESIDE_GEOIP_ACCOUNT MaxMind account id (blank: GeoIP skipped)
@@ -584,13 +648,10 @@ main() {
     bin_state="$(install_binary)"
     log "binary: $bin_state."
 
-    log "== directories and model"
+    log "== directories, model and rules"
     make_dirs
-    if [ -z "${LEESIDE_BINARY:-}" ]; then
-        log "model: $(install_model)."
-    else
-        log "model: skipped (LEESIDE_BINARY set; the override covers the binary only)."
-    fi
+    log "model: $(install_model)."
+    log "rules: $(install_rules)."
 
     local domain llm_key geoip_account geoip_key
     if [ -f "$INSTALL_CONF" ]; then
@@ -655,6 +716,4 @@ main() {
     print_summary "$domain" "$hash_key" "$api_token" "$viewer_token" "$fresh"
 }
 
-if [ "${BASH_SOURCE[0]:-}" = "$0" ]; then
-    main "$@"
-fi
+if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

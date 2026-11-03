@@ -1,0 +1,18 @@
+{
+  "id": "server-error-watch",
+  "note": "Ten server errors within five minutes from one peer",
+  "mode": "monitor",
+  "action": "watch",
+  "match": {
+    "route": ["*"],
+    "verb": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    "principal": "any"
+  },
+  "when": {
+    "scope": "peer",
+    "window_s": 300,
+    "count": { "status": ["5xx"] },
+    "gte": 10
+  },
+  "origin": { "kind": "install" }
+}

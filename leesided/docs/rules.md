@@ -459,6 +459,22 @@ hours since Spark wrote it, which is the evidence acceptance should rest on.
 `leesided rules export` dumps the active set as JSON for moving between
 hosts.
 
+**The shippable subset.** `rules/generic/` holds rules with no route names
+(`match.route` is the bare `"*"`, no `sequence`, no route, model or shape
+selectors), enforced by `generic_rules_parse_and_carry_no_route_names`.
+They are tarballed as `rules/leesided-rules.tar.gz` for the product
+installer, which verifies and extracts it where the default lookup finds
+it (`/usr/local/bin/rules/install`). `rules/install/` keeps the
+sample-app rules for the demo and the test suite. Rebuild after any
+edit, from `leesided/rules/`:
+
+```bash
+tar --owner=0 --group=0 --mtime='2026-01-01' -cf - -C generic \
+  auth-burst-peer.json credential-spray.json http-404-scan.json server-error-watch.json \
+  | gzip -n > leesided-rules.tar.gz
+sha256sum leesided-rules.tar.gz > leesided-rules.tar.gz.sha256
+```
+
 ### Schema v2 on this side
 
 As of 2026-10-31 (`../docs/brief.md`, "The event, schema v2"). leesided

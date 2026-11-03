@@ -33,7 +33,7 @@ Install on an Ubuntu 22.04 or 24.04 box that already hosts a Laravel app
 behind nginx:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash
 ```
 
 ## How it works
@@ -109,7 +109,7 @@ sudo bash leeside-sample/deploy/deploy.sh    # every release: pull, composer, mi
 The full spec, including the certificate and done-tests, is the Deploy
 section of `docs/brief.md`.
 
-## Status
+## Component status
 
 - Capture package: done to the brief; `composer test` green, tap shows all
   three traffic acts, PII grep empty, added latency under 1 ms.
@@ -119,5 +119,5 @@ section of `docs/brief.md`.
 
 ## License
 
-`leeside/laravel` is MIT-licensed (see its `composer.json`). The repo has no
-root `LICENSE` file yet.
+`leeside/laravel` is MIT-licensed (see its `composer.json`), as is the repo
+root (see `LICENSE`).
