@@ -73,6 +73,10 @@ pub struct Config {
     /// CIDRs allowed onto the console paths
     /// (`LEESIDED_CONSOLE_ALLOW`, comma-separated); empty allows all.
     pub console_allow: Vec<Cidr>,
+    /// The published dashboard (`LEESIDED_CONSOLE_DIR`, default
+    /// `/var/www/leeside-ui`): `index.html` plus `assets/`, served at
+    /// the console root. Dev points it at `leesided/ui/dist`.
+    pub console_dir: PathBuf,
 }
 
 /// An IP network: a bare `1.2.3.4` (a /32, or /128 for v6) or
@@ -224,6 +228,7 @@ impl Default for Config {
             viewer_token: None,
             trusted_proxy: None,
             console_allow: Vec::new(),
+            console_dir: PathBuf::from("/var/www/leeside-ui"),
         }
     }
 }
@@ -383,6 +388,11 @@ impl Config {
             if !v.trim().is_empty() {
                 cfg.trusted_proxy =
                     Some(Cidr::parse(&v).unwrap_or_else(|e| panic!("LEESIDED_TRUSTED_PROXY: {e}")));
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_CONSOLE_DIR") {
+            if !v.trim().is_empty() {
+                cfg.console_dir = PathBuf::from(v);
             }
         }
         if let Ok(v) = std::env::var("LEESIDED_CONSOLE_ALLOW") {

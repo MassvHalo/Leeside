@@ -308,14 +308,89 @@ fn forbidden(e: &Engine) -> Response {
 }
 
 pub async fn ui_root(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    let session = or_return!(require(&e, &headers, &uri));
-    let now = store::now_s();
-    let health = e.health();
-    let dash = or_return!(read(&e, |ctx| ctx.dashboard(now)));
-    page(
-        StatusCode::OK,
-        pages::dashboard(&health, &dash, now, session.role, &e.cfg.console_path),
-    )
+    let _session = or_return!(require(&e, &headers, &uri));
+    serve_dist(&e, "index.html", "text/html; charset=utf-8")
+}
+
+pub async fn ui_asset(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Path(rest): Path<String>,
+) -> Response {
+    let _session = or_return!(require(&e, &headers, &uri));
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(
+                404,
+                "No such file",
+                "asset paths stay inside assets/",
+                &e.cfg.console_path,
+            ),
+        );
+    }
+    let content_type = match rest.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("js") => "text/javascript",
+        Some("css") => "text/css",
+        Some("html") => "text/html; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        Some("map") => "application/json",
+        _ => "application/octet-stream",
+    };
+    serve_dist(&e, &format!("assets/{rest}"), content_type)
+}
+
+/// Serve one file from the published dashboard (`LEESIDED_CONSOLE_DIR`).
+/// Symlinks that would escape the publish dir are refused.
+fn serve_dist(e: &Engine, rel: &str, content_type: &'static str) -> Response {
+    let prefix = &e.cfg.console_path;
+    let base = match e.cfg.console_dir.canonicalize() {
+        Ok(b) => b,
+        Err(_) => {
+            return page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                pages::error_page(
+                    503,
+                    "Dashboard not published",
+                    "the console directory holds no build; publish ui/dist first",
+                    prefix,
+                ),
+            );
+        }
+    };
+    let file = match base.join(rel).canonicalize() {
+        Ok(f) if f.starts_with(&base) && f.is_file() => f,
+        _ => {
+            return page(
+                StatusCode::NOT_FOUND,
+                pages::error_page(
+                    404,
+                    "No such file",
+                    &format!("{rel} is not in the dashboard build"),
+                    prefix,
+                ),
+            );
+        }
+    };
+    match std::fs::read(&file) {
+        Ok(bytes) => ([(header::CONTENT_TYPE, content_type)], bytes).into_response(),
+        Err(_) => page(
+            StatusCode::NOT_FOUND,
+            pages::error_page(
+                404,
+                "No such file",
+                &format!("{rel} is not in the dashboard build"),
+                prefix,
+            ),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

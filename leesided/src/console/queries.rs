@@ -2928,112 +2928,6 @@ pub fn feature_table() -> Vec<(String, String)> {
         .collect()
 }
 
-// ---------- dashboard ----------
-
-/// Tables the dashboard counts, in display order.
-pub const COUNT_TABLES: &[&str] = &[
-    "turns",
-    "actors",
-    "actor_bindings",
-    "feature_vectors",
-    "scores",
-    "labels",
-    "decisions",
-    "rules",
-    "llm_jobs",
-    "llm_calls",
-];
-
-/// Everything `/ui/` shows below the health line.
-#[derive(Debug, Clone)]
-pub struct Dashboard {
-    pub counts: Vec<(String, i64)>,
-    pub today: crate::llm::PointTotals,
-    pub turns: Vec<TurnLite>,
-    pub decisions: Vec<DecisionView>,
-    pub proposals: Vec<LabelRef>,
-    pub labels: Vec<LabelRef>,
-}
-
-impl Ctx<'_> {
-    /// Today's per-point LLM calls and tokens, for the dashboard.
-    pub fn llm_today(&self, now: i64) -> Result<crate::llm::PointTotals, QueryError> {
-        crate::llm::llm_today(self.conn(), now).map_err(QueryError::from)
-    }
-
-    pub fn dashboard(&self, now: i64) -> Result<Dashboard, QueryError> {
-        Ok(Dashboard {
-            counts: self.table_counts()?,
-            today: self.llm_today(now)?,
-            turns: self.recent_turns(20)?,
-            decisions: self.recent_decisions(20)?,
-            proposals: self.recent_labels(true, 20)?,
-            labels: self.recent_labels(false, 20)?,
-        })
-    }
-
-    pub fn table_counts(&self) -> Result<Vec<(String, i64)>, QueryError> {
-        let mut out = Vec::with_capacity(COUNT_TABLES.len());
-        for t in COUNT_TABLES {
-            let sql = format!("SELECT count(*) FROM {t}");
-            out.push((
-                t.to_string(),
-                self.conn().query_row(&sql, [], |r| r.get(0))?,
-            ));
-        }
-        Ok(out)
-    }
-
-    /// The newest turns, for the dashboard's event list.
-    pub fn recent_turns(&self, limit: i64) -> Result<Vec<TurnLite>, QueryError> {
-        let mut stmt = self.conn().prepare(&format!(
-            "SELECT {TURN_LITE_COLS} FROM turns ORDER BY ts_us DESC LIMIT ?1"
-        ))?;
-        let rows = stmt.query_map(params![limit], turn_lite_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(QueryError::from)
-    }
-
-    /// The newest sticky decisions, for the dashboard.
-    pub fn recent_decisions(&self, limit: i64) -> Result<Vec<DecisionView>, QueryError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT scope, key, action, mode, rule, rule_version, created_at, expires_at \
-             FROM decisions ORDER BY created_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit], |r| {
-            Ok(DecisionView {
-                scope: r.get(0)?,
-                key: r.get(1)?,
-                action: r.get(2)?,
-                mode: r.get(3)?,
-                rule: r.get(4)?,
-                rule_version: r.get(5)?,
-                created_at: r.get(6)?,
-                expires_at: r.get(7)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(QueryError::from)
-    }
-
-    /// The newest proposals and the newest labels, for the dashboard.
-    pub fn recent_labels(
-        &self,
-        proposed_only: bool,
-        limit: i64,
-    ) -> Result<Vec<LabelRef>, QueryError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, scope, scope_id, surface, window_end_ts, label, source, confidence, \
-             kind, note, created_at, signals FROM labels \
-             WHERE (?1 = 0 OR source = 'llm_proposed') \
-             ORDER BY created_at DESC, id DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![i64::from(proposed_only), limit], label_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(QueryError::from)
-    }
-}
-
 /// The LLM dashboard numbers (docs/llm-evals.md section 5): proposal
 /// precision and coverage, queue speed, live calibration, failure
 /// rates, token cost, the classify golden agreement, and the draft
@@ -3768,7 +3662,13 @@ impl Ctx<'_> {
             Some(p) if !p.reason.trim().is_empty() && p.model.is_some() => {
                 (p.reason.clone(), p.model.clone())
             }
-            _ => (format!("{what}. {did}."), None),
+            _ => {
+                let mut t = format!("{what}. {did}");
+                if !did.ends_with('.') {
+                    t.push('.');
+                }
+                (t, None)
+            }
         };
         let episode_id = format!("ep_{scope}_{id}");
         let mut chips = Vec::new();
@@ -4360,6 +4260,11 @@ mod tests {
         );
         assert_eq!(stopped.story.what, "3 requests, mostly portal.login");
         assert!(stopped.summary.ends_with('.'));
+        assert!(
+            !stopped.summary.contains(".."),
+            "template takes one period: {}",
+            stopped.summary
+        );
         assert!(stopped.summary.contains("3 requests"));
         assert_eq!(stopped.explained_by, None);
         assert_eq!(stopped.chips.len(), 3);

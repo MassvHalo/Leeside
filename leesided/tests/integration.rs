@@ -109,6 +109,27 @@ impl Harness {
         trusted_proxy: Option<&str>,
         console_allow: &[&str],
     ) -> Harness {
+        Harness::open_console_full(
+            dir,
+            api_token,
+            viewer_token,
+            console_path,
+            trusted_proxy,
+            console_allow,
+            PathBuf::from("/var/www/leeside-ui"),
+        )
+        .await
+    }
+
+    async fn open_console_full(
+        dir: PathBuf,
+        api_token: Option<&str>,
+        viewer_token: Option<&str>,
+        console_path: &str,
+        trusted_proxy: Option<&str>,
+        console_allow: &[&str],
+        console_dir: PathBuf,
+    ) -> Harness {
         use leesided::config::Cidr;
         let cfg = Config {
             socket_dir: dir.clone(),
@@ -126,6 +147,7 @@ impl Harness {
                 .iter()
                 .map(|s| Cidr::parse(s).unwrap())
                 .collect(),
+            console_dir,
             hash_key: Some("test-key".into()),
             geoip_asn: None,
             geoip_country: None,
@@ -695,6 +717,90 @@ async fn api_v1_decision_writes_operator_label() {
         )
         .unwrap();
     assert_eq!(count, 1);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_dist_served_from_console_dir() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dist = dir.join("dist");
+    std::fs::create_dir_all(dist.join("assets")).unwrap();
+    std::fs::write(
+        dist.join("index.html"),
+        "<!doctype html><title>Windside</title>",
+    )
+    .unwrap();
+    std::fs::write(dist.join("assets/app.js"), "console.log(1)").unwrap();
+    let h = Harness::open_console_full(
+        dir,
+        Some("op-token"),
+        Some("view-token"),
+        "/windside",
+        None,
+        &[],
+        dist,
+    )
+    .await;
+    // No session redirects to login, like every console path.
+    let (st, headers, _) = h.ui("GET", "/windside/", None, None).await;
+    assert_eq!(st, 303);
+    assert!(ui_header(&headers, "location")
+        .unwrap()
+        .starts_with("/windside/login?next="));
+    let (st, _, _) = h.ui("GET", "/windside/assets/app.js", None, None).await;
+    assert_eq!(st, 303);
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    let (st, headers, body) = h.ui("GET", "/windside/", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    assert_eq!(
+        ui_header(&headers, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(body.contains("<title>Windside</title>"), "{body}");
+    // Viewers read the dashboard too.
+    let (st, _, _) = h.ui("GET", "/windside/", Some(&viewer), None).await;
+    assert_eq!(st, 200);
+    let (st, headers, body) = h
+        .ui("GET", "/windside/assets/app.js", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(ui_header(&headers, "content-type"), Some("text/javascript"));
+    assert_eq!(body, "console.log(1)");
+    let (st, _, _) = h
+        .ui("GET", "/windside/assets/missing.js", Some(&admin), None)
+        .await;
+    assert_eq!(st, 404);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_dist_missing_is_503_not_a_boot_failure() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let h = Harness::open_console_full(
+        dir.clone(),
+        Some("op-token"),
+        None,
+        "/windside",
+        None,
+        &[],
+        dir.join("no-such-build"),
+    )
+    .await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/", Some(&admin), None).await;
+    assert_eq!(st, 503, "{body}");
+    assert!(body.contains("Dashboard not published"), "{body}");
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -3744,8 +3850,9 @@ async fn ui_viewer_reads_but_cannot_mutate() {
     assert_eq!(st, 303);
     let cookie = ui_cookie(&headers);
     // Every page renders, with the viewer role and no mutation form.
+    // The console root is the published dashboard, covered by
+    // ui_dist_served_from_console_dir.
     for path in [
-        "/windside/",
         "/windside/llm",
         "/windside/jobs",
         "/windside/actors",
@@ -4543,17 +4650,6 @@ async fn ui_step4_pages_render() {
     let h = ui_harness(Some("op-token")).await;
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/windside/", Some(&cookie), None).await;
-    assert_eq!(st, 200, "{body}");
-    for section in [
-        "Health",
-        "Counts",
-        "Today's LLM calls",
-        "Latest turns",
-        "Latest decisions",
-    ] {
-        assert!(body.contains(section), "{section} present");
-    }
     let (st, _, body) = h.ui("GET", "/windside/review", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("Nothing scored yet"), "{body}");

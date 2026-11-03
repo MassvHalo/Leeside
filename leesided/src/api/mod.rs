@@ -48,6 +48,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
         }))
         .route("/health", get(health))
         .route(&u("/"), get(crate::console::ui_root))
+        .route(&u("/assets/{*rest}"), get(crate::console::ui_asset))
         .route(
             &u("/login"),
             get(crate::console::login_get).post(crate::console::login_post),

@@ -2245,60 +2245,6 @@ pub fn features_page(table: &[(String, String)], role: Role, prefix: &str) -> St
     layout("Features", "/features", &body, prefix, Some(role))
 }
 
-/// `{prefix}/`: health, counts, today's LLM usage, the newest events.
-pub fn dashboard(
-    health: &serde_json::Value,
-    d: &super::queries::Dashboard,
-    now_s: i64,
-    role: Role,
-    prefix: &str,
-) -> String {
-    let mut body = String::from("<h1>Overview</h1><h2>Health</h2><dl class=\"kv\">");
-    if let Some(map) = health.as_object() {
-        let mut keys: Vec<&String> = map.keys().collect();
-        keys.sort();
-        for k in keys {
-            let v = &map[k];
-            let rendered = if v.is_string() {
-                v.as_str().unwrap_or("").to_string()
-            } else {
-                serde_json::to_string(v).unwrap_or_default()
-            };
-            let _ = write!(body, "<dt>{}</dt><dd>{}</dd>", esc(k), mono(&rendered));
-        }
-    }
-    body.push_str("</dl><h2>Counts</h2><table><tr><th>Table</th><th>Rows</th></tr>");
-    for (t, n) in &d.counts {
-        let _ = write!(
-            body,
-            "<tr><td>{}</td><td class=\"num\">{n}</td></tr>",
-            mono(t)
-        );
-    }
-    body.push_str("</table><h2>Today's LLM calls</h2><table><tr><th>Point</th><th>Calls</th><th>Tokens</th></tr>");
-    for (point, (calls, tokens)) in [
-        ("label", d.today.label),
-        ("explain", d.today.explain),
-        ("classify", d.today.classify),
-        ("draft", d.today.draft),
-    ] {
-        let _ = write!(
-            body,
-            "<tr><td>{}</td><td class=\"num\">{calls}</td><td class=\"num\">{tokens}</td></tr>",
-            mono(point),
-        );
-    }
-    body.push_str("</table><h2>Latest turns</h2>");
-    body.push_str(&turn_table(prefix, &d.turns));
-    body.push_str("<h2>Latest decisions</h2>");
-    body.push_str(&decision_table(&d.decisions, now_s));
-    body.push_str("<h2>Latest proposals</h2>");
-    body.push_str(&label_table(&d.proposals));
-    body.push_str("<h2>Latest labels</h2>");
-    body.push_str(&label_table(&d.labels));
-    layout("Overview", "/", &body, prefix, Some(role))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
