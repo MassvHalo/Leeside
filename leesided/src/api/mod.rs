@@ -1,26 +1,33 @@
 //! The local HTTP API on 127.0.0.1: rules, mode, decisions, turns, health.
 //! With `LEESIDED_API_TOKEN` unset, every route but `/health` answers 503;
-//! with it set, those routes need `Authorization: Bearer <token>`. The UI
-//! reaches it through nginx.
+//! with it set, those routes need `Authorization: Bearer <token>`. The
+//! Windside console reaches it through nginx at `LEESIDED_CONSOLE_PATH`.
 
+use crate::config::Cidr;
 use crate::engine::Engine;
 use crate::rules::compile::State;
 use crate::rules::model::{Mode, Rule, Scope};
 use crate::rules::windows::key16;
 use crate::store::{self, StoreError, StoreOp, TurnQuery};
-use axum::extract::{Path, Query, Request, State as AxState};
+use axum::extract::{ConnectInfo, Path, Query, Request, State as AxState};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
 pub fn router(engine: Arc<Engine>) -> Router {
     let token: Option<Arc<str>> = engine.cfg.api_token.as_deref().map(Arc::from);
+    let prefix = engine.cfg.console_path.clone();
+    let u = |s: &str| format!("{prefix}{s}");
+    let allow_prefix = prefix.clone();
+    let allow_trusted = engine.cfg.trusted_proxy;
+    let allow_cidrs = engine.cfg.console_allow.clone();
     Router::new()
         .route("/rules", get(list).post(create))
         .route("/rules/schema", get(schema))
@@ -40,49 +47,109 @@ pub fn router(engine: Arc<Engine>) -> Router {
             async move { authorize(token.as_deref(), req, next).await }
         }))
         .route("/health", get(health))
-        .route("/ui/", get(crate::console::ui_root))
+        .route(&u("/"), get(crate::console::ui_root))
         .route(
-            "/ui/login",
+            &u("/login"),
             get(crate::console::login_get).post(crate::console::login_post),
         )
-        .route("/ui/llm", get(crate::console::llm_list))
-        .route("/ui/llm/{id}", get(crate::console::llm_detail))
-        .route("/ui/llm/{id}/resend", post(crate::console::resend))
-        .route("/ui/jobs", get(crate::console::jobs_list))
-        .route("/ui/jobs/{id}/retry", post(crate::console::job_retry))
-        .route("/ui/jobs/{id}/cancel", post(crate::console::job_cancel))
-        .route("/ui/turns/{turn_id}", get(crate::console::turn_detail))
-        .route("/ui/trace/{turn_id}", get(crate::console::trace_view))
-        .route("/ui/actors", get(crate::console::actors_list))
-        .route("/ui/actors/{id}", get(crate::console::actor_detail))
-        .route("/ui/actors/{id}/label", post(crate::console::actor_label))
-        .route("/ui/actors/{id}/draft", post(crate::console::actor_draft))
-        .route("/ui/actors/{id}/block", post(crate::console::actor_block))
+        .route(&u("/llm"), get(crate::console::llm_list))
+        .route(&u("/llm/{id}"), get(crate::console::llm_detail))
+        .route(&u("/llm/{id}/resend"), post(crate::console::resend))
+        .route(&u("/jobs"), get(crate::console::jobs_list))
+        .route(&u("/jobs/{id}/retry"), post(crate::console::job_retry))
+        .route(&u("/jobs/{id}/cancel"), post(crate::console::job_cancel))
+        .route(&u("/turns/{turn_id}"), get(crate::console::turn_detail))
+        .route(&u("/trace/{turn_id}"), get(crate::console::trace_view))
+        .route(&u("/actors"), get(crate::console::actors_list))
+        .route(&u("/actors/{id}"), get(crate::console::actor_detail))
+        .route(&u("/actors/{id}/label"), post(crate::console::actor_label))
+        .route(&u("/actors/{id}/draft"), post(crate::console::actor_draft))
+        .route(&u("/actors/{id}/block"), post(crate::console::actor_block))
         .route(
-            "/ui/actors/{id}/unblock",
+            &u("/actors/{id}/unblock"),
             post(crate::console::actor_unblock),
         )
-        .route("/ui/clusters", get(crate::console::clusters_list))
-        .route("/ui/clusters/{key}", get(crate::console::cluster_detail))
+        .route(&u("/clusters"), get(crate::console::clusters_list))
+        .route(&u("/clusters/{key}"), get(crate::console::cluster_detail))
         .route(
-            "/ui/clusters/{key}/label",
+            &u("/clusters/{key}/label"),
             post(crate::console::cluster_label),
         )
         .route(
-            "/ui/clusters/{key}/draft",
+            &u("/clusters/{key}/draft"),
             post(crate::console::cluster_draft),
         )
-        .route("/ui/review", get(crate::console::review_list))
-        .route("/ui/review/decide", post(crate::console::review_decide))
-        .route("/ui/labels", get(crate::console::labels_list))
-        .route("/ui/rules", get(crate::console::rules_list))
-        .route("/ui/rules/{id}/enable", post(crate::console::rule_enable))
-        .route("/ui/rules/{id}/disable", post(crate::console::rule_disable))
-        .route("/ui/payloads", get(crate::console::payloads_list))
-        .route("/ui/payloads/{hash}", get(crate::console::payload_detail))
-        .route("/ui/model", get(crate::console::model_page))
-        .route("/ui/features", get(crate::console::features_page))
+        .route(&u("/review"), get(crate::console::review_list))
+        .route(&u("/review/decide"), post(crate::console::review_decide))
+        .route(&u("/labels"), get(crate::console::labels_list))
+        .route(&u("/rules"), get(crate::console::rules_list))
+        .route(&u("/rules/{id}/enable"), post(crate::console::rule_enable))
+        .route(
+            &u("/rules/{id}/disable"),
+            post(crate::console::rule_disable),
+        )
+        .route(&u("/payloads"), get(crate::console::payloads_list))
+        .route(&u("/payloads/{hash}"), get(crate::console::payload_detail))
+        .route(&u("/model"), get(crate::console::model_page))
+        .route(&u("/features"), get(crate::console::features_page))
+        .route_layer(middleware::from_fn(move |req: Request, next: Next| {
+            let prefix = allow_prefix.clone();
+            let trusted = allow_trusted;
+            let allow = allow_cidrs.clone();
+            async move { console_allow(prefix, trusted, allow, req, next).await }
+        }))
         .with_state(engine)
+}
+
+/// The console allowlist (`LEESIDED_CONSOLE_ALLOW`): empty allows all,
+/// otherwise the client IP must sit in one of the CIDRs. Off the
+/// console paths this is a no-op. Behind the trusted proxy the client
+/// is the leftmost `X-Forwarded-For` entry; otherwise it is the peer.
+async fn console_allow(
+    prefix: String,
+    trusted: Option<Cidr>,
+    allow: Vec<Cidr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let on_console = {
+        let p = req.uri().path();
+        p == prefix || p.starts_with(&format!("{prefix}/"))
+    };
+    if !on_console || allow.is_empty() {
+        return next.run(req).await;
+    }
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let mut client = peer;
+    if peer.is_some_and(|ip| trusted.is_some_and(|t| t.matches(ip))) {
+        let first = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .and_then(|s| s.parse().ok());
+        if first.is_some() {
+            client = first;
+        }
+    }
+    if client.is_some_and(|ip| allow.iter().any(|c| c.matches(ip))) {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            Html(crate::console::pages::error_page(
+                403,
+                "Not allowed here",
+                "this address is outside the console allowlist",
+                &prefix,
+            )),
+        )
+            .into_response()
+    }
 }
 
 async fn authorize(token: Option<&str>, req: Request, next: Next) -> Response {
@@ -120,7 +187,8 @@ pub(crate) fn same(got: &[u8], want: &[u8]) -> bool {
 }
 
 pub async fn serve(engine: Arc<Engine>, listener: TcpListener) {
-    if let Err(e) = axum::serve(listener, router(engine)).await {
+    let svc = router(engine).into_make_service_with_connect_info::<SocketAddr>();
+    if let Err(e) = axum::serve(listener, svc).await {
         tracing::error!(error = %e, "api server stopped");
     }
 }

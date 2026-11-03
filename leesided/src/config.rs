@@ -59,6 +59,73 @@ pub struct Config {
     pub llm_daily_tokens: u32,
     /// The app this daemon serves; rule enable flags are per app.
     pub app_id: String,
+    /// Console mount path (`LEESIDED_CONSOLE_PATH`, default
+    /// `/windside`): the routes, cookie path, redirects and page
+    /// links for the console.
+    pub console_path: String,
+    /// Read-only console sessions (`LEESIDED_VIEWER_TOKEN`); unset
+    /// disables viewer login. The operator token stays admin.
+    pub viewer_token: Option<String>,
+    /// The proxy whose `X-Forwarded-For` the console allowlist
+    /// trusts (`LEESIDED_TRUSTED_PROXY`, one IP or CIDR); unset
+    /// trusts none.
+    pub trusted_proxy: Option<Cidr>,
+    /// CIDRs allowed onto the console paths
+    /// (`LEESIDED_CONSOLE_ALLOW`, comma-separated); empty allows all.
+    pub console_allow: Vec<Cidr>,
+}
+
+/// An IP network: a bare `1.2.3.4` (a /32, or /128 for v6) or
+/// `1.2.3.0/24`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cidr {
+    addr: std::net::IpAddr,
+    bits: u8,
+}
+
+impl Cidr {
+    pub fn parse(s: &str) -> Result<Cidr, String> {
+        let s = s.trim();
+        let (ip, bits) = match s.split_once('/') {
+            Some((ip, b)) => {
+                let bits: u8 = b.trim().parse().map_err(|_| format!("bad CIDR {s:?}"))?;
+                (ip.trim(), Some(bits))
+            }
+            None => (s, None),
+        };
+        let addr: std::net::IpAddr = ip.parse().map_err(|_| format!("bad CIDR {s:?}"))?;
+        let max = match addr {
+            std::net::IpAddr::V4(_) => 32,
+            std::net::IpAddr::V6(_) => 128,
+        };
+        let bits = bits.unwrap_or(max);
+        if bits > max {
+            return Err(format!("bad CIDR {s:?}"));
+        }
+        Ok(Cidr { addr, bits })
+    }
+
+    pub fn matches(self, ip: std::net::IpAddr) -> bool {
+        match (self.addr, ip) {
+            (std::net::IpAddr::V4(a), std::net::IpAddr::V4(b)) => {
+                let mask = if self.bits == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - self.bits)
+                };
+                u32::from(a) & mask == u32::from(b) & mask
+            }
+            (std::net::IpAddr::V6(a), std::net::IpAddr::V6(b)) => {
+                let mask = if self.bits == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - self.bits)
+                };
+                u128::from(a) & mask == u128::from(b) & mask
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The app id until multi-app lands: every rule flag, decision and
@@ -153,6 +220,10 @@ impl Default for Config {
             llm_daily_calls: 500,
             llm_daily_tokens: 500_000,
             app_id: DEFAULT_APP.to_string(),
+            console_path: "/windside".to_string(),
+            viewer_token: None,
+            trusted_proxy: None,
+            console_allow: Vec::new(),
         }
     }
 }
@@ -300,6 +371,28 @@ impl Config {
                 .parse()
                 .unwrap_or_else(|_| panic!("LEESIDED_LLM_DAILY_TOKENS: not a number: {v}"));
         }
+        if let Ok(v) = std::env::var("LEESIDED_CONSOLE_PATH") {
+            cfg.console_path = parse_console_path(&v);
+        }
+        if let Ok(v) = std::env::var("LEESIDED_VIEWER_TOKEN") {
+            if !v.is_empty() {
+                cfg.viewer_token = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_TRUSTED_PROXY") {
+            if !v.trim().is_empty() {
+                cfg.trusted_proxy =
+                    Some(Cidr::parse(&v).unwrap_or_else(|e| panic!("LEESIDED_TRUSTED_PROXY: {e}")));
+            }
+        }
+        if let Ok(v) = std::env::var("LEESIDED_CONSOLE_ALLOW") {
+            cfg.console_allow = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| Cidr::parse(s).unwrap_or_else(|e| panic!("LEESIDED_CONSOLE_ALLOW: {e}")))
+                .collect();
+        }
         cfg
     }
 
@@ -324,4 +417,49 @@ fn split_routes(v: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// A console mount path: leading slash, no trailing slash.
+fn parse_console_path(v: &str) -> String {
+    let t = v.trim_end_matches('/');
+    if t.is_empty() || !t.starts_with('/') {
+        panic!("LEESIDED_CONSOLE_PATH: not a path prefix: {v}");
+    }
+    t.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(s: &str) -> std::net::IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn cidr_matches_inside_and_rejects_outside() {
+        let c = Cidr::parse("10.1.2.0/24").unwrap();
+        assert!(c.matches(ip("10.1.2.3")));
+        assert!(c.matches(ip("10.1.2.0")));
+        assert!(!c.matches(ip("10.1.3.3")));
+        assert!(!c.matches(ip("127.0.0.1")));
+        // A bare IP is a single host.
+        let host = Cidr::parse("127.0.0.1").unwrap();
+        assert!(host.matches(ip("127.0.0.1")));
+        assert!(!host.matches(ip("127.0.0.2")));
+        // Families never mix.
+        assert!(!c.matches(ip("::1")));
+        let v6 = Cidr::parse("2001:db8::/32").unwrap();
+        assert!(v6.matches(ip("2001:db8::1")));
+        assert!(!v6.matches(ip("2001:db9::1")));
+        assert!(!v6.matches(ip("10.1.2.3")));
+    }
+
+    #[test]
+    fn cidr_rejects_garbage() {
+        assert!(Cidr::parse("nope").is_err());
+        assert!(Cidr::parse("10.0.0.0/33").is_err());
+        assert!(Cidr::parse("10.0.0.0/abc").is_err());
+        assert!(Cidr::parse("").is_err());
+    }
 }

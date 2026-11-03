@@ -1,8 +1,8 @@
-//! The inspector (docs/inspector.md): server-rendered `/ui/` pages on
-//! the shared [`queries`] data layer. Session login with the existing
-//! operator token; the token is admin (docs/console.md section 1), so
-//! every session may re-send. Reviewer and viewer tokens arrive with
-//! the designed console.
+//! The Windside console (docs/inspector.md): server-rendered pages on
+//! the shared [`queries`] data layer, mounted at `LEESIDED_CONSOLE_PATH`
+//! (default `/windside`). Session login with the operator token (admin)
+//! or the viewer token (read-only); viewer sessions render no mutation
+//! forms and get 403 on every POST.
 
 pub mod pages;
 pub mod queries;
@@ -20,9 +20,27 @@ use std::sync::Arc;
 const SESSION_COOKIE: &str = "leeside_ui";
 const SESSION_SECS: u64 = 12 * 3600;
 
+/// What a console session may do. Admin is the operator token;
+/// viewer is `LEESIDED_VIEWER_TOKEN` and never mutates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Admin,
+    Viewer,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Viewer => "viewer",
+        }
+    }
+}
+
 struct Session {
     csrf: String,
     expires: u64,
+    role: Role,
 }
 
 /// The live sessions, held on the engine.
@@ -70,6 +88,7 @@ fn session_of(e: &Engine, headers: &HeaderMap) -> Option<Session> {
     Some(Session {
         csrf: s.csrf.clone(),
         expires: s.expires,
+        role: s.role,
     })
 }
 
@@ -85,13 +104,14 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-fn login_redirect(uri: &Uri) -> Response {
+fn login_redirect(e: &Engine, uri: &Uri) -> Response {
+    let prefix = &e.cfg.console_path;
     Redirect::to(&format!(
-        "/ui/login?next={}",
+        "{prefix}/login?next={}",
         percent_encode(
             uri.path_and_query()
                 .map(|q| q.as_str())
-                .unwrap_or("/ui/llm")
+                .unwrap_or(&format!("{prefix}/llm"))
         )
     ))
     .into_response()
@@ -101,35 +121,35 @@ fn page(status: StatusCode, body: String) -> Response {
     (status, Html(body)).into_response()
 }
 
-fn login_page(next: &str, error: Option<&str>, status: StatusCode) -> Response {
-    page(status, pages::login_page(next, error))
+fn login_page(prefix: &str, next: &str, error: Option<&str>, status: StatusCode) -> Response {
+    page(status, pages::login_page(next, error, prefix))
 }
 
-fn ui_error(e: QueryError) -> Response {
+fn ui_error(prefix: &str, e: QueryError) -> Response {
     match e {
         QueryError::NoCall(id) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such call", &format!("no llm call {id}")),
+            pages::error_page(404, "No such call", &format!("no llm call {id}"), prefix),
         ),
         QueryError::NoJob(id) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such job", &format!("no llm job {id}")),
+            pages::error_page(404, "No such job", &format!("no llm job {id}"), prefix),
         ),
         QueryError::NoTurn(id) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such turn", &format!("no turn {id}")),
+            pages::error_page(404, "No such turn", &format!("no turn {id}"), prefix),
         ),
         QueryError::NoActor(id) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such actor", &format!("no actor {id}")),
+            pages::error_page(404, "No such actor", &format!("no actor {id}"), prefix),
         ),
         QueryError::NoCluster(key) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such cluster", &format!("no cluster {key}")),
+            pages::error_page(404, "No such cluster", &format!("no cluster {key}"), prefix),
         ),
         QueryError::NoRule(id) => page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such rule", &format!("no rule {id}")),
+            pages::error_page(404, "No such rule", &format!("no rule {id}"), prefix),
         ),
         QueryError::NoPayload(hash) => page(
             StatusCode::NOT_FOUND,
@@ -137,11 +157,12 @@ fn ui_error(e: QueryError) -> Response {
                 404,
                 "No such pattern",
                 &format!("no payload pattern {hash}"),
+                prefix,
             ),
         ),
         e => page(
             StatusCode::INTERNAL_SERVER_ERROR,
-            pages::error_page(500, "Inspector error", &e.to_string()),
+            pages::error_page(500, "Windside error", &e.to_string(), prefix),
         ),
     }
 }
@@ -149,7 +170,7 @@ fn ui_error(e: QueryError) -> Response {
 fn read<T>(e: &Engine, f: impl FnOnce(&Ctx) -> Result<T, QueryError>) -> Result<T, Box<Response>> {
     e.store
         .read(|conn| Ctx::new(conn, &e.cfg.app_id).and_then(|ctx| f(&ctx)))
-        .map_err(|e| Box::new(ui_error(e)))
+        .map_err(|qe| Box::new(ui_error(&e.cfg.console_path, qe)))
 }
 
 #[derive(Deserialize)]
@@ -157,8 +178,14 @@ pub struct LoginQuery {
     next: Option<String>,
 }
 
-pub async fn login_get(Query(q): Query<LoginQuery>) -> Response {
-    login_page(q.next.as_deref().unwrap_or("/ui/llm"), None, StatusCode::OK)
+pub async fn login_get(State(e): State<Arc<Engine>>, Query(q): Query<LoginQuery>) -> Response {
+    let prefix = &e.cfg.console_path;
+    login_page(
+        prefix,
+        q.next.as_deref().unwrap_or(&format!("{prefix}/llm")),
+        None,
+        StatusCode::OK,
+    )
 }
 
 #[derive(Deserialize)]
@@ -167,25 +194,43 @@ pub struct LoginForm {
     next: Option<String>,
 }
 
-fn safe_next(next: Option<&str>) -> String {
+fn safe_next(prefix: &str, next: Option<&str>) -> String {
     match next {
-        Some(n) if n.starts_with("/ui/") => n.to_string(),
-        _ => "/ui/llm".to_string(),
+        Some(n) if n.starts_with(&format!("{prefix}/")) => n.to_string(),
+        _ => format!("{prefix}/llm"),
     }
 }
 
 pub async fn login_post(State(e): State<Arc<Engine>>, Form(f): Form<LoginForm>) -> Response {
-    let next = safe_next(f.next.as_deref());
-    let Some(want) = e.cfg.api_token.as_deref() else {
+    let prefix = e.cfg.console_path.clone();
+    let next = safe_next(&prefix, f.next.as_deref());
+    let Some(admin) = e.cfg.api_token.as_deref() else {
         return login_page(
+            &prefix,
             &next,
             Some("no operator token is configured"),
             StatusCode::SERVICE_UNAVAILABLE,
         );
     };
-    if !crate::api::same(f.token.as_bytes(), want.as_bytes()) {
-        return login_page(&next, Some("wrong token"), StatusCode::UNAUTHORIZED);
-    }
+    // Admin first: the tokens may be equal in a careless env, and
+    // then the session must be admin.
+    let role = if crate::api::same(f.token.as_bytes(), admin.as_bytes()) {
+        Role::Admin
+    } else if e
+        .cfg
+        .viewer_token
+        .as_deref()
+        .is_some_and(|want| crate::api::same(f.token.as_bytes(), want.as_bytes()))
+    {
+        Role::Viewer
+    } else {
+        return login_page(
+            &prefix,
+            &next,
+            Some("wrong token"),
+            StatusCode::UNAUTHORIZED,
+        );
+    };
     let now = store::now_s() as u64;
     let mut sessions = e.console.sessions.lock();
     sessions.retain(|_, s| s.expires > now);
@@ -195,6 +240,7 @@ pub async fn login_post(State(e): State<Arc<Engine>>, Form(f): Form<LoginForm>) 
         Session {
             csrf: random_hex(32),
             expires: now + SESSION_SECS,
+            role,
         },
     );
     (
@@ -202,7 +248,7 @@ pub async fn login_post(State(e): State<Arc<Engine>>, Form(f): Form<LoginForm>) 
         [(
             header::SET_COOKIE,
             format!(
-                "{SESSION_COOKIE}={id}; Path=/ui; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}"
+                "{SESSION_COOKIE}={id}; Path={prefix}; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECS}"
             ),
         )],
         [(header::LOCATION, next)],
@@ -211,7 +257,26 @@ pub async fn login_post(State(e): State<Arc<Engine>>, Form(f): Form<LoginForm>) 
 }
 
 fn require(e: &Engine, headers: &HeaderMap, uri: &Uri) -> Result<Session, Box<Response>> {
-    session_of(e, headers).ok_or_else(|| Box::new(login_redirect(uri)))
+    session_of(e, headers).ok_or_else(|| Box::new(login_redirect(e, uri)))
+}
+
+/// Every mutation checks the role before the CSRF token: a viewer
+/// session has no legitimate POST, so the answer is 403 whatever the
+/// form carries.
+fn require_admin(e: &Engine, session: &Session) -> Result<(), Box<Response>> {
+    if session.role == Role::Admin {
+        Ok(())
+    } else {
+        Err(Box::new(page(
+            StatusCode::FORBIDDEN,
+            pages::error_page(
+                403,
+                "Viewers cannot change anything",
+                "this session logged in with the viewer token",
+                &e.cfg.console_path,
+            ),
+        )))
+    }
 }
 
 /// Unwrap a helper result inside a handler: the error is already a
@@ -229,23 +294,27 @@ fn csrf_ok(session: &Session, got: &str) -> bool {
     crate::api::same(got.as_bytes(), session.csrf.as_bytes())
 }
 
-fn forbidden() -> Response {
+fn forbidden(e: &Engine) -> Response {
     page(
         StatusCode::FORBIDDEN,
         pages::error_page(
             403,
             "Bad CSRF token",
             "the form's token does not match the session",
+            &e.cfg.console_path,
         ),
     )
 }
 
 pub async fn ui_root(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let now = store::now_s();
     let health = e.health();
     let dash = or_return!(read(&e, |ctx| ctx.dashboard(now)));
-    page(StatusCode::OK, pages::dashboard(&health, &dash, now))
+    page(
+        StatusCode::OK,
+        pages::dashboard(&health, &dash, now, session.role, &e.cfg.console_path),
+    )
 }
 
 #[derive(Deserialize)]
@@ -259,12 +328,15 @@ pub async fn llm_list(
     uri: Uri,
     Query(q): Query<PageQuery>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let page_no = q.page.unwrap_or(0).max(0);
     let (calls, total) = or_return!(read(&e, |ctx| {
         Ok((ctx.llm_calls(page_no)?, ctx.llm_call_count()?))
     }));
-    page(StatusCode::OK, pages::llm_list(&calls, page_no, total))
+    page(
+        StatusCode::OK,
+        pages::llm_list(&calls, page_no, total, session.role, &e.cfg.console_path),
+    )
 }
 
 pub async fn llm_detail(
@@ -275,7 +347,10 @@ pub async fn llm_detail(
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
     let call = or_return!(read(&e, |ctx| ctx.llm_call(id)));
-    page(StatusCode::OK, pages::llm_detail(&call, &session.csrf))
+    page(
+        StatusCode::OK,
+        pages::llm_detail(&call, &session.csrf, session.role, &e.cfg.console_path),
+    )
 }
 
 #[derive(Deserialize)]
@@ -300,6 +375,7 @@ pub async fn jobs_list(
                     400,
                     "Bad status",
                     "status must be queued, running, done or failed",
+                    &e.cfg.console_path,
                 ),
             );
         }
@@ -310,7 +386,15 @@ pub async fn jobs_list(
     }));
     page(
         StatusCode::OK,
-        pages::jobs_list(&jobs, status, page_no, total, &session.csrf),
+        pages::jobs_list(
+            &jobs,
+            status,
+            page_no,
+            total,
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -327,8 +411,11 @@ pub async fn job_retry(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     or_return!(read(&e, |ctx| ctx.llm_job(id)));
     e.store.send(StoreOp::LlmJobRetry {
@@ -336,7 +423,7 @@ pub async fn job_retry(
         now_s: store::now_s(),
     });
     e.store.flush().await;
-    Redirect::to("/ui/jobs").into_response()
+    Redirect::to(&format!("{}/jobs", e.cfg.console_path)).into_response()
 }
 
 pub async fn job_cancel(
@@ -347,8 +434,11 @@ pub async fn job_cancel(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     or_return!(read(&e, |ctx| ctx.llm_job(id)));
     e.store.send(StoreOp::LlmJobCancel {
@@ -356,7 +446,7 @@ pub async fn job_cancel(
         now_s: store::now_s(),
     });
     e.store.flush().await;
-    Redirect::to("/ui/jobs").into_response()
+    Redirect::to(&format!("{}/jobs", e.cfg.console_path)).into_response()
 }
 
 /// One new live call with the old call's envelope and the current
@@ -370,8 +460,11 @@ pub async fn resend(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let call = or_return!(read(&e, |ctx| ctx.llm_call(id)));
     if !["label", "explain", "classify", "draft"].contains(&call.point.as_str()) {
@@ -381,13 +474,19 @@ pub async fn resend(
                 422,
                 "Cannot re-send",
                 &format!("re-send does not support the {} point", call.point),
+                &e.cfg.console_path,
             ),
         );
     }
     let Some(subject) = &call.subject else {
         return page(
             StatusCode::UNPROCESSABLE_ENTITY,
-            pages::error_page(422, "Cannot re-send", "the old call has no subject"),
+            pages::error_page(
+                422,
+                "Cannot re-send",
+                "the old call has no subject",
+                &e.cfg.console_path,
+            ),
         );
     };
     let subject = match crate::llm::parse_subject(&format!("{}:{}", subject.scope, subject.id)) {
@@ -395,7 +494,7 @@ pub async fn resend(
         Err(err) => {
             return page(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                pages::error_page(422, "Cannot re-send", &err.to_string()),
+                pages::error_page(422, "Cannot re-send", &err.to_string(), &e.cfg.console_path),
             );
         }
     };
@@ -406,6 +505,7 @@ pub async fn resend(
                 503,
                 "LLM unconfigured",
                 "LEESIDED_LLM_URL or LEESIDED_LLM_KEY is unset",
+                &e.cfg.console_path,
             ),
         );
     };
@@ -437,29 +537,36 @@ pub async fn resend(
     let out = match out {
         Ok(Ok(out)) => out,
         Ok(Err(err)) => {
+            let prefix = &e.cfg.console_path;
             return page(
                 StatusCode::BAD_GATEWAY,
                 pages::error_page(
                     502,
                     "Re-send failed",
                     &format!(
-                        "{err} (the failed attempt is logged; find it newest-first on /ui/llm)"
+                        "{err} (the failed attempt is logged; find it newest-first on {prefix}/llm)"
                     ),
+                    prefix,
                 ),
             );
         }
         Err(err) => {
             return page(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                pages::error_page(500, "Re-send failed", &err.to_string()),
+                pages::error_page(500, "Re-send failed", &err.to_string(), &e.cfg.console_path),
             );
         }
     };
     match out.call_id {
-        Some(new) => Redirect::to(&format!("/ui/llm/{new}")).into_response(),
+        Some(new) => Redirect::to(&format!("{}/llm/{new}", e.cfg.console_path)).into_response(),
         None => page(
             StatusCode::INTERNAL_SERVER_ERROR,
-            pages::error_page(500, "Re-send failed", "the call went out but logged no row"),
+            pages::error_page(
+                500,
+                "Re-send failed",
+                "the call went out but logged no row",
+                &e.cfg.console_path,
+            ),
         ),
     }
 }
@@ -488,7 +595,7 @@ pub async fn turn_detail(
     uri: Uri,
     Path(turn_id): Path<String>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let turn = or_return!(read(&e, |ctx| ctx.turn(&turn_id)));
     let tap = queries::tap_info(
         &e.ja4_classes,
@@ -498,7 +605,15 @@ pub async fn turn_detail(
     let (features, scores) = or_return!(read(&e, |ctx| ctx.trace_features(&turn)));
     page(
         StatusCode::OK,
-        pages::turn_detail(&turn, &tap, &features, &scores, &thresholds(&e)),
+        pages::turn_detail(
+            &turn,
+            &tap,
+            &features,
+            &scores,
+            &thresholds(&e),
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -508,14 +623,20 @@ pub async fn trace_view(
     uri: Uri,
     Path(turn_id): Path<String>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let turn = or_return!(read(&e, |ctx| ctx.turn(&turn_id)));
     let idents = queries::idents_for_turn(&e.resolver, &turn);
     let now = store::now_s();
     let trace = or_return!(read(&e, |ctx| ctx.trace(&turn, &idents, now)));
     page(
         StatusCode::OK,
-        pages::trace_view(&trace, &thresholds(&e), now),
+        pages::trace_view(
+            &trace,
+            &thresholds(&e),
+            now,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -525,7 +646,7 @@ pub async fn actors_list(
     uri: Uri,
     Query(q): Query<PageQuery>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let page_no = q.page.unwrap_or(0).max(0);
     let now = store::now_s();
     let (rows, total) = or_return!(read(&e, |ctx| Ok((
@@ -534,7 +655,14 @@ pub async fn actors_list(
     ))));
     page(
         StatusCode::OK,
-        pages::actors_list(&rows, page_no, total, &thresholds(&e)),
+        pages::actors_list(
+            &rows,
+            page_no,
+            total,
+            &thresholds(&e),
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -557,7 +685,15 @@ pub async fn actor_detail(
     );
     page(
         StatusCode::OK,
-        pages::actor_detail_page(&detail, &tap, &thresholds(&e), &session.csrf, now),
+        pages::actor_detail_page(
+            &detail,
+            &tap,
+            &thresholds(&e),
+            &session.csrf,
+            now,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -567,7 +703,7 @@ pub async fn clusters_list(
     uri: Uri,
     Query(q): Query<PageQuery>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let page_no = q.page.unwrap_or(0).max(0);
     let (rows, total) = or_return!(read(&e, |ctx| Ok((
         ctx.clusters(page_no)?,
@@ -575,7 +711,14 @@ pub async fn clusters_list(
     ))));
     page(
         StatusCode::OK,
-        pages::clusters_list(&rows, page_no, total, &thresholds(&e)),
+        pages::clusters_list(
+            &rows,
+            page_no,
+            total,
+            &thresholds(&e),
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -592,7 +735,13 @@ pub async fn cluster_detail(
     }));
     page(
         StatusCode::OK,
-        pages::cluster_detail_page(&detail, &thresholds(&e), &session.csrf),
+        pages::cluster_detail_page(
+            &detail,
+            &thresholds(&e),
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -604,24 +753,26 @@ pub struct LabelForm {
     window_end_ts: i64,
 }
 
-fn bad_label(value: &str) -> Response {
+fn bad_label(e: &Engine, value: &str) -> Response {
     page(
         StatusCode::BAD_REQUEST,
         pages::error_page(
             400,
             "Bad label",
             &format!("label must be benign, malicious or unknown, not {value:?}"),
+            &e.cfg.console_path,
         ),
     )
 }
 
-fn stale_window() -> Response {
+fn stale_window(e: &Engine) -> Response {
     page(
         StatusCode::CONFLICT,
         pages::error_page(
             409,
             "Window moved",
             "a newer window landed since the form rendered; reload and label again",
+            &e.cfg.console_path,
         ),
     )
 }
@@ -637,14 +788,17 @@ pub async fn actor_label(
     Form(f): Form<LabelForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let label: &'static str = match f.label.as_str() {
         "benign" => "benign",
         "malicious" => "malicious",
         "unknown" => "unknown",
-        _ => return bad_label(&f.label),
+        _ => return bad_label(&e, &f.label),
     };
     let now = store::now_s();
     let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
@@ -654,10 +808,10 @@ pub async fn actor_label(
         &HashMap::new()
     )));
     let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
-        return stale_window();
+        return stale_window(&e);
     };
     if window_end_ts != f.window_end_ts {
-        return stale_window();
+        return stale_window(&e);
     }
     e.store.send(StoreOp::Label(store::LabelRow {
         scope: "actor",
@@ -675,7 +829,7 @@ pub async fn actor_label(
         daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
-    Redirect::to(&format!("/ui/actors/{}", detail.head.id)).into_response()
+    Redirect::to(&format!("{}/actors/{}", e.cfg.console_path, detail.head.id)).into_response()
 }
 
 pub async fn cluster_label(
@@ -686,23 +840,26 @@ pub async fn cluster_label(
     Form(f): Form<LabelForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let label: &'static str = match f.label.as_str() {
         "benign" => "benign",
         "malicious" => "malicious",
         "unknown" => "unknown",
-        _ => return bad_label(&f.label),
+        _ => return bad_label(&e, &f.label),
     };
     let detail = or_return!(read(&e, |ctx| {
         ctx.cluster_detail(&key, 0, &HashMap::new())
     }));
     let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
-        return stale_window();
+        return stale_window(&e);
     };
     if window_end_ts != f.window_end_ts {
-        return stale_window();
+        return stale_window(&e);
     }
     e.store.send(StoreOp::Label(store::LabelRow {
         scope: "cluster",
@@ -720,7 +877,11 @@ pub async fn cluster_label(
         daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
-    Redirect::to(&format!("/ui/clusters/{}", detail.row.key)).into_response()
+    Redirect::to(&format!(
+        "{}/clusters/{}",
+        e.cfg.console_path, detail.row.key
+    ))
+    .into_response()
 }
 
 /// Queue one draft job for a cluster: the button on either page. The
@@ -733,6 +894,7 @@ async fn draft_for(e: &Arc<Engine>, cluster: String, back_to: String) -> Respons
                 503,
                 "LLM unconfigured",
                 "LEESIDED_LLM_URL or LEESIDED_LLM_KEY is unset",
+                &e.cfg.console_path,
             ),
         );
     };
@@ -757,8 +919,11 @@ pub async fn actor_draft(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
         &id,
@@ -773,10 +938,11 @@ pub async fn actor_draft(
                 422,
                 "Nothing to draft over",
                 "this actor's turns carry no cluster key",
+                &e.cfg.console_path,
             ),
         );
     };
-    let back_to = format!("/ui/actors/{}", detail.head.id);
+    let back_to = format!("{}/actors/{}", e.cfg.console_path, detail.head.id);
     draft_for(&e, cluster, back_to).await
 }
 
@@ -788,13 +954,16 @@ pub async fn cluster_draft(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let detail = or_return!(read(&e, |ctx| {
         ctx.cluster_detail(&key, 0, &HashMap::new())
     }));
-    let back_to = format!("/ui/clusters/{}", detail.row.key);
+    let back_to = format!("{}/clusters/{}", e.cfg.console_path, detail.row.key);
     draft_for(&e, detail.row.key.clone(), back_to).await
 }
 
@@ -809,8 +978,11 @@ pub async fn actor_block(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let ids = or_return!(read(&e, |ctx| ctx.actor_ids(&id)));
     let key = match crate::rules::windows::key16(&ids[0]) {
@@ -818,7 +990,12 @@ pub async fn actor_block(
         None => {
             return page(
                 StatusCode::NOT_FOUND,
-                pages::error_page(404, "No such actor", &format!("no actor {id}")),
+                pages::error_page(
+                    404,
+                    "No such actor",
+                    &format!("no actor {id}"),
+                    &e.cfg.console_path,
+                ),
             );
         }
     };
@@ -836,7 +1013,7 @@ pub async fn actor_block(
     e.decisions.insert(d.clone());
     e.store.send(StoreOp::DecisionUpsert(d));
     e.store.flush().await;
-    Redirect::to(&format!("/ui/actors/{}", ids[0])).into_response()
+    Redirect::to(&format!("{}/actors/{}", e.cfg.console_path, ids[0])).into_response()
 }
 
 pub async fn actor_unblock(
@@ -847,8 +1024,11 @@ pub async fn actor_unblock(
     Form(f): Form<CsrfForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let ids = or_return!(read(&e, |ctx| ctx.actor_ids(&id)));
     let key = match crate::rules::windows::key16(&ids[0]) {
@@ -856,14 +1036,24 @@ pub async fn actor_unblock(
         None => {
             return page(
                 StatusCode::NOT_FOUND,
-                pages::error_page(404, "No such actor", &format!("no actor {id}")),
+                pages::error_page(
+                    404,
+                    "No such actor",
+                    &format!("no actor {id}"),
+                    &e.cfg.console_path,
+                ),
             );
         }
     };
     if !e.decisions.remove(crate::rules::model::Scope::Actor, key) {
         return page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "Nothing to lift", "no live block on this actor"),
+            pages::error_page(
+                404,
+                "Nothing to lift",
+                "no live block on this actor",
+                &e.cfg.console_path,
+            ),
         );
     }
     e.store.send(StoreOp::DecisionDelete {
@@ -871,7 +1061,7 @@ pub async fn actor_unblock(
         key,
     });
     e.store.flush().await;
-    Redirect::to(&format!("/ui/actors/{}", ids[0])).into_response()
+    Redirect::to(&format!("{}/actors/{}", e.cfg.console_path, ids[0])).into_response()
 }
 
 pub async fn review_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
@@ -879,7 +1069,13 @@ pub async fn review_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: 
     let rows = or_return!(read(&e, |ctx| ctx.review_queue(&thresholds(&e), 20)));
     page(
         StatusCode::OK,
-        pages::review_list(&rows, &thresholds(&e), &session.csrf),
+        pages::review_list(
+            &rows,
+            &thresholds(&e),
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -901,8 +1097,11 @@ pub async fn review_decide(
     Form(f): Form<DecideForm>,
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, &f.csrf) {
-        return forbidden();
+        return forbidden(&e);
     }
     let now = store::now_s();
     let detail = or_return!(read(&e, |ctx| ctx.actor_detail(
@@ -912,10 +1111,10 @@ pub async fn review_decide(
         &thresholds(&e)
     )));
     let (Some(window_end_ts), surface) = (detail.window_end_ts, detail.window_surface) else {
-        return stale_window();
+        return stale_window(&e);
     };
     if window_end_ts != f.window_end_ts {
-        return stale_window();
+        return stale_window(&e);
     }
     let (label, note): (&'static str, String) = match f.verdict.as_str() {
         "confirm" => match &detail.proposal {
@@ -923,19 +1122,24 @@ pub async fn review_decide(
                 "benign" => ("benign", "confirmed llm_proposed".to_string()),
                 "malicious" => ("malicious", "confirmed llm_proposed".to_string()),
                 "unknown" => ("unknown", "confirmed llm_proposed".to_string()),
-                _ => return bad_label(&p.label.label),
+                _ => return bad_label(&e, &p.label.label),
             },
             None => {
                 return page(
                     StatusCode::UNPROCESSABLE_ENTITY,
-                    pages::error_page(422, "Nothing to confirm", "this row has no proposal"),
+                    pages::error_page(
+                        422,
+                        "Nothing to confirm",
+                        "this row has no proposal",
+                        &e.cfg.console_path,
+                    ),
                 );
             }
         },
         "benign" => ("benign", "review console".to_string()),
         "malicious" => ("malicious", "review console".to_string()),
         "unknown" => ("unknown", "review console".to_string()),
-        _ => return bad_label(&f.verdict),
+        _ => return bad_label(&e, &f.verdict),
     };
     e.store.send(StoreOp::Label(store::LabelRow {
         scope: "actor",
@@ -953,7 +1157,7 @@ pub async fn review_decide(
         daily_tokens: llm_budgets(&e).1,
     }));
     e.store.flush().await;
-    Redirect::to("/ui/review").into_response()
+    Redirect::to(&format!("{}/review", e.cfg.console_path)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -969,10 +1173,10 @@ pub async fn labels_list(
     uri: Uri,
     Query(q): Query<LabelsQuery>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     if let Some(l) = q.label.as_deref() {
         if !["benign", "malicious", "unknown"].contains(&l) {
-            return bad_label(l);
+            return bad_label(&e, l);
         }
     }
     let page_no = q.page.unwrap_or(0).max(0);
@@ -992,6 +1196,8 @@ pub async fn labels_list(
             q.label.as_deref(),
             page_no,
             total,
+            session.role,
+            &e.cfg.console_path,
         ),
     )
 }
@@ -1002,7 +1208,13 @@ pub async fn rules_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
     let (rules, drafts) = or_return!(read(&e, |ctx| Ok((ctx.rules(now)?, ctx.rule_drafts()?))));
     page(
         StatusCode::OK,
-        pages::rules_list(&rules, &drafts, &session.csrf),
+        pages::rules_list(
+            &rules,
+            &drafts,
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
@@ -1015,14 +1227,22 @@ async fn rule_flip(
     enabled: bool,
 ) -> Response {
     let session = or_return!(require(e, headers, uri));
+    if let Err(r) = require_admin(e, &session) {
+        return *r;
+    }
     if !csrf_ok(&session, csrf) {
-        return forbidden();
+        return forbidden(e);
     }
     let exists = or_return!(read(e, |ctx| ctx.rule_exists(id)));
     if !exists {
         return page(
             StatusCode::NOT_FOUND,
-            pages::error_page(404, "No such rule", &format!("no rule {id}")),
+            pages::error_page(
+                404,
+                "No such rule",
+                &format!("no rule {id}"),
+                &e.cfg.console_path,
+            ),
         );
     }
     e.store.send(StoreOp::RuleState {
@@ -1038,10 +1258,10 @@ async fn rule_flip(
     if let Err(err) = e.rules.load() {
         return page(
             StatusCode::INTERNAL_SERVER_ERROR,
-            pages::error_page(500, "Reload failed", &err.to_string()),
+            pages::error_page(500, "Reload failed", &err.to_string(), &e.cfg.console_path),
         );
     }
-    Redirect::to("/ui/rules").into_response()
+    Redirect::to(&format!("{}/rules", e.cfg.console_path)).into_response()
 }
 
 pub async fn rule_enable(
@@ -1070,13 +1290,16 @@ pub async fn payloads_list(
     uri: Uri,
     Query(q): Query<PageQuery>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let page_no = q.page.unwrap_or(0).max(0);
     let (rows, total) = or_return!(read(&e, |ctx| Ok((
         ctx.payload_patterns(page_no)?,
         ctx.payload_count()?
     ))));
-    page(StatusCode::OK, pages::payloads_list(&rows, page_no, total))
+    page(
+        StatusCode::OK,
+        pages::payloads_list(&rows, page_no, total, session.role, &e.cfg.console_path),
+    )
 }
 
 pub async fn payload_detail(
@@ -1085,13 +1308,16 @@ pub async fn payload_detail(
     uri: Uri,
     Path(hash): Path<String>,
 ) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let row = or_return!(read(&e, |ctx| ctx.payload_detail(&hash)));
-    page(StatusCode::OK, pages::payload_detail_page(&row))
+    page(
+        StatusCode::OK,
+        pages::payload_detail_page(&row, session.role, &e.cfg.console_path),
+    )
 }
 
 pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     let loaded = e.windside.loaded.as_ref();
     let thresholds: Vec<(String, f64)> = loaded
         .map(|l| {
@@ -1121,22 +1347,26 @@ pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
     };
     page(
         StatusCode::OK,
-        pages::model_page(&queries::ModelView {
-            windside_mode: e.windside.mode.as_str().to_string(),
-            model_version: loaded.map(|l| l.manifest.model_version.clone()),
-            features_version: loaded.map(|l| l.manifest.features_version),
-            thresholds,
-            manifest_pretty,
-            shadow,
-            shadow_error,
-        }),
+        pages::model_page(
+            &queries::ModelView {
+                windside_mode: e.windside.mode.as_str().to_string(),
+                model_version: loaded.map(|l| l.manifest.model_version.clone()),
+                features_version: loaded.map(|l| l.manifest.features_version),
+                thresholds,
+                manifest_pretty,
+                shadow,
+                shadow_error,
+            },
+            session.role,
+            &e.cfg.console_path,
+        ),
     )
 }
 
 pub async fn features_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
-    let _ = or_return!(require(&e, &headers, &uri));
+    let session = or_return!(require(&e, &headers, &uri));
     page(
         StatusCode::OK,
-        pages::features_page(&queries::feature_table()),
+        pages::features_page(&queries::feature_table(), session.role, &e.cfg.console_path),
     )
 }

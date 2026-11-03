@@ -99,6 +99,55 @@ impl Harness {
         }
     }
 
+    /// A harness with the console knobs set: viewer token, mount
+    /// path, trusted proxy and allowlist.
+    async fn open_console(
+        dir: PathBuf,
+        api_token: Option<&str>,
+        viewer_token: Option<&str>,
+        console_path: &str,
+        trusted_proxy: Option<&str>,
+        console_allow: &[&str],
+    ) -> Harness {
+        use leesided::config::Cidr;
+        let cfg = Config {
+            socket_dir: dir.clone(),
+            db: dir.join("leesided.sqlite"),
+            api: "127.0.0.1:0".parse().unwrap(),
+            enforce: true,
+            rules_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/install")),
+            socket_mode: 0o600,
+            socket_gid: None,
+            api_token: api_token.map(String::from),
+            viewer_token: viewer_token.map(String::from),
+            console_path: console_path.to_string(),
+            trusted_proxy: trusted_proxy.map(|s| Cidr::parse(s).unwrap()),
+            console_allow: console_allow
+                .iter()
+                .map(|s| Cidr::parse(s).unwrap())
+                .collect(),
+            hash_key: Some("test-key".into()),
+            geoip_asn: None,
+            geoip_country: None,
+            ja4_classes: Some(PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/data/ja4-classes.json"
+            ))),
+            honeytoken_routes: Vec::new(),
+            business_routes: Vec::new(),
+            windside_model: None,
+            windside_mode: leesided::config::WindsideMode::Off,
+            ..Config::default()
+        };
+        let engine = Engine::open(cfg).await.expect("engine open");
+        let running = serve(engine.clone()).await.expect("serve");
+        Harness {
+            dir,
+            engine,
+            running,
+        }
+    }
+
     async fn open_llm(dir: PathBuf, api_token: Option<&str>) -> Harness {
         let cfg = Config {
             socket_dir: dir.clone(),
@@ -257,13 +306,25 @@ impl Harness {
         }
     }
 
-    /// A raw request at the inspector: (status, header block, body).
+    /// A raw request at the console: (status, header block, body).
     async fn ui(
         &self,
         method: &str,
         path: &str,
         cookie: Option<&str>,
         form: Option<&str>,
+    ) -> (u16, String, String) {
+        self.ui_h(method, path, cookie, form, None).await
+    }
+
+    /// `ui` with extra raw header lines (for `X-Forwarded-For`).
+    async fn ui_h(
+        &self,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        form: Option<&str>,
+        extra: Option<&str>,
     ) -> (u16, String, String) {
         let mut s = TcpStream::connect(self.running.api_addr).await.unwrap();
         let body = form.unwrap_or("");
@@ -275,8 +336,9 @@ impl Harness {
         } else {
             ""
         };
+        let extra = extra.unwrap_or("");
         let req = format!(
-            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\n{ck}{ct}Content-Length: {}\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\n{ck}{ct}{extra}Content-Length: {}\r\n\r\n{body}",
             body.len()
         );
         s.write_all(req.as_bytes()).await.unwrap();
@@ -295,9 +357,9 @@ impl Harness {
     async fn ui_login(&self, token: &str) -> (u16, String, String) {
         self.ui(
             "POST",
-            "/ui/login",
+            "/windside/login",
             None,
-            Some(&format!("token={token}&next=%2Fui%2Fllm")),
+            Some(&format!("token={token}&next=%2Fwindside%2Fllm")),
         )
         .await
     }
@@ -314,7 +376,7 @@ fn ui_cookie(headers: &str) -> String {
     let set = ui_header(headers, "set-cookie").expect("a login sets a cookie");
     assert!(set.contains("HttpOnly"), "{set}");
     assert!(set.contains("SameSite=Strict"), "{set}");
-    assert!(set.contains("Path=/ui"), "{set}");
+    assert!(set.contains("Path=/windside"), "{set}");
     set.split(';').next().unwrap().trim().to_string()
 }
 
@@ -339,6 +401,20 @@ async fn ui_harness(token: Option<&str>) -> Harness {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     Harness::open_with(dir, token).await
+}
+
+async fn ui_console_harness(
+    token: Option<&str>,
+    viewer: Option<&str>,
+    prefix: &str,
+    trusted: Option<&str>,
+    allow: &[&str],
+) -> Harness {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    Harness::open_console(dir, token, viewer, prefix, trusted, allow).await
 }
 
 /// A harness with the LLM configured in dry mode (dummy endpoint, never
@@ -3277,41 +3353,41 @@ fn every_subcommand_answers_help() {
 async fn ui_pages_redirect_without_a_session() {
     let h = Harness::start().await;
     for path in [
-        "/ui/",
-        "/ui/llm",
-        "/ui/llm/1",
-        "/ui/jobs",
-        "/ui/turns/abc",
-        "/ui/trace/abc",
-        "/ui/actors",
-        "/ui/actors/abc",
-        "/ui/clusters",
-        "/ui/clusters/abc",
-        "/ui/review",
-        "/ui/labels",
-        "/ui/rules",
-        "/ui/model",
-        "/ui/features",
+        "/windside/",
+        "/windside/llm",
+        "/windside/llm/1",
+        "/windside/jobs",
+        "/windside/turns/abc",
+        "/windside/trace/abc",
+        "/windside/actors",
+        "/windside/actors/abc",
+        "/windside/clusters",
+        "/windside/clusters/abc",
+        "/windside/review",
+        "/windside/labels",
+        "/windside/rules",
+        "/windside/model",
+        "/windside/features",
     ] {
         let (st, headers, _) = h.ui("GET", path, None, None).await;
         assert_eq!(st, 303, "{path}");
         let loc = ui_header(&headers, "location").unwrap();
-        assert!(loc.starts_with("/ui/login?next="), "{path} -> {loc}");
+        assert!(loc.starts_with("/windside/login?next="), "{path} -> {loc}");
     }
     for (method, path) in [
-        ("POST", "/ui/jobs/1/retry"),
-        ("POST", "/ui/jobs/1/cancel"),
-        ("POST", "/ui/llm/1/resend"),
+        ("POST", "/windside/jobs/1/retry"),
+        ("POST", "/windside/jobs/1/cancel"),
+        ("POST", "/windside/llm/1/resend"),
     ] {
         let (st, headers, _) = h.ui(method, path, None, Some("csrf=x")).await;
         assert_eq!(st, 303, "{method} {path}");
         assert!(ui_header(&headers, "location")
             .unwrap()
-            .starts_with("/ui/login?next="));
+            .starts_with("/windside/login?next="));
     }
     // A bogus cookie is no session either.
     let (st, _, _) = h
-        .ui("GET", "/ui/llm", Some("leeside_ui=deadbeef"), None)
+        .ui("GET", "/windside/llm", Some("leeside_ui=deadbeef"), None)
         .await;
     assert_eq!(st, 303);
     h.running.abort();
@@ -3321,30 +3397,209 @@ async fn ui_pages_redirect_without_a_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_login_round_trip() {
     let h = ui_harness(Some("op-token")).await;
-    let (st, _, body) = h.ui("GET", "/ui/login", None, None).await;
+    let (st, _, body) = h.ui("GET", "/windside/login", None, None).await;
     assert_eq!(st, 200);
-    assert!(body.contains("Operator token"), "{body}");
+    assert!(body.contains("Log in to Windside"), "{body}");
+    assert!(body.contains("Operator or viewer token."), "{body}");
     let (st, headers, body) = h.ui_login("wrong").await;
     assert_eq!(st, 401);
     assert!(body.contains("wrong token"), "{body}");
     assert!(ui_header(&headers, "set-cookie").is_none());
     let (st, headers, _) = h.ui_login("op-token").await;
     assert_eq!(st, 303);
-    assert_eq!(ui_header(&headers, "location"), Some("/ui/llm"));
+    assert_eq!(ui_header(&headers, "location"), Some("/windside/llm"));
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/llm", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/llm", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     // An open redirect through `next` is refused.
     let (st, headers, _) = h
         .ui(
             "POST",
-            "/ui/login",
+            "/windside/login",
             None,
             Some("token=op-token&next=https%3A%2F%2Fevil"),
         )
         .await;
     assert_eq!(st, 303);
-    assert_eq!(ui_header(&headers, "location"), Some("/ui/llm"));
+    assert_eq!(ui_header(&headers, "location"), Some("/windside/llm"));
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_viewer_reads_but_cannot_mutate() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    // Admin login still works and the header carries the role.
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/llm", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains(">admin<"), "{body}");
+    // Viewer login.
+    let (st, headers, _) = h.ui_login("view-token").await;
+    assert_eq!(st, 303);
+    let cookie = ui_cookie(&headers);
+    // Every page renders, with the viewer role and no mutation form.
+    for path in [
+        "/windside/",
+        "/windside/llm",
+        "/windside/jobs",
+        "/windside/actors",
+        "/windside/clusters",
+        "/windside/review",
+        "/windside/labels",
+        "/windside/rules",
+        "/windside/model",
+        "/windside/features",
+        "/windside/payloads",
+    ] {
+        let (st, _, body) = h.ui("GET", path, Some(&cookie), None).await;
+        assert_eq!(st, 200, "{path}");
+        assert!(body.contains(">viewer<"), "{path}");
+        assert!(!body.contains("method=\"post\""), "{path}");
+    }
+    // Every mutation answers 403, whatever the form carries. The
+    // label and decide forms must parse (axum 422s a malformed form
+    // before the handler runs), so they go out complete.
+    for (path, form) in [
+        ("/windside/jobs/1/retry", "csrf=x"),
+        ("/windside/jobs/1/cancel", "csrf=x"),
+        ("/windside/llm/1/resend", "csrf=x"),
+        (
+            "/windside/actors/abc/label",
+            "csrf=x&label=benign&window_end_ts=1",
+        ),
+        ("/windside/actors/abc/draft", "csrf=x"),
+        ("/windside/actors/abc/block", "csrf=x"),
+        ("/windside/actors/abc/unblock", "csrf=x"),
+        (
+            "/windside/clusters/abc/label",
+            "csrf=x&label=benign&window_end_ts=1",
+        ),
+        ("/windside/clusters/abc/draft", "csrf=x"),
+        (
+            "/windside/review/decide",
+            "csrf=x&scope_id=abc&window_end_ts=1&verdict=benign",
+        ),
+        ("/windside/rules/abc/enable", "csrf=x"),
+        ("/windside/rules/abc/disable", "csrf=x"),
+    ] {
+        let (st, _, _) = h.ui("POST", path, Some(&cookie), Some(form)).await;
+        assert_eq!(st, 403, "POST {path}");
+    }
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_prefix_moves_routes_cookies_and_redirects() {
+    let h = ui_console_harness(Some("op-token"), None, "/ops", None, &[]).await;
+    // No session redirects under the prefix.
+    let (st, headers, _) = h.ui("GET", "/ops/llm", None, None).await;
+    assert_eq!(st, 303);
+    assert!(ui_header(&headers, "location")
+        .unwrap()
+        .starts_with("/ops/login?next="));
+    // The default mount is gone with it.
+    let (st, _, _) = h.ui("GET", "/windside/llm", None, None).await;
+    assert_eq!(st, 404);
+    // Login sets the prefixed cookie path and lands under the prefix.
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            "/ops/login",
+            None,
+            Some("token=op-token&next=%2Fops%2Fllm"),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let set = ui_header(&headers, "set-cookie").unwrap();
+    assert!(set.contains("Path=/ops"), "{set}");
+    assert_eq!(ui_header(&headers, "location"), Some("/ops/llm"));
+    let cookie = set.split(';').next().unwrap().trim().to_string();
+    // Pages link under the prefix.
+    let (st, _, body) = h.ui("GET", "/ops/llm", Some(&cookie), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("href=\"/ops/review\""), "{body}");
+    // A `next` outside the prefix falls back under it.
+    let (st, headers, _) = h
+        .ui(
+            "POST",
+            "/ops/login",
+            None,
+            Some("token=op-token&next=%2Fwindside%2Fllm"),
+        )
+        .await;
+    assert_eq!(st, 303);
+    assert_eq!(ui_header(&headers, "location"), Some("/ops/llm"));
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_console_allow_gates_on_client_ip() {
+    let h = ui_console_harness(
+        Some("op-token"),
+        None,
+        "/windside",
+        Some("127.0.0.1"),
+        &["10.0.0.0/8"],
+    )
+    .await;
+    // An allowed client behind the trusted proxy reaches the login redirect.
+    let (st, _, _) = h
+        .ui_h(
+            "GET",
+            "/windside/llm",
+            None,
+            None,
+            Some("X-Forwarded-For: 10.1.2.3\r\n"),
+        )
+        .await;
+    assert_eq!(st, 303);
+    // A denied client gets 403, even on the login page.
+    let (st, _, _) = h
+        .ui_h(
+            "GET",
+            "/windside/login",
+            None,
+            None,
+            Some("X-Forwarded-For: 192.168.1.1\r\n"),
+        )
+        .await;
+    assert_eq!(st, 403);
+    // No header: the peer (127.0.0.1) is outside the allowlist.
+    let (st, _, _) = h.ui("GET", "/windside/llm", None, None).await;
+    assert_eq!(st, 403);
+    // Off-console paths are unaffected.
+    let (st, _) = h.http("GET", "/health", None).await;
+    assert_eq!(st, 200);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_console_allow_ignores_untrusted_forwarded_for() {
+    // The proxy is elsewhere: the X-Forwarded-For the 127.0.0.1 peer
+    // sends is ignored, and the peer is outside the allowlist.
+    let h = ui_console_harness(
+        Some("op-token"),
+        None,
+        "/windside",
+        Some("10.9.9.9"),
+        &["10.0.0.0/8"],
+    )
+    .await;
+    let (st, _, _) = h
+        .ui_h(
+            "GET",
+            "/windside/llm",
+            None,
+            None,
+            Some("X-Forwarded-For: 10.1.2.3\r\n"),
+        )
+        .await;
+    assert_eq!(st, 403);
     h.running.abort();
     h.engine.shutdown().await;
 }
@@ -3354,27 +3609,31 @@ async fn ui_empty_store_renders() {
     let h = ui_harness(Some("op-token")).await;
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/llm", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/llm", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("No calls logged yet."), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/jobs", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/jobs", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("No jobs in this state."), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/llm/1", Some(&cookie), None).await;
     assert_eq!(st, 404);
     assert!(body.contains("No such call"), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/actors", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/actors", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("No actors yet."), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/clusters", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/clusters", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("No clusters yet."), "{body}");
-    let (st, _, _) = h.ui("GET", "/ui/turns/abc", Some(&cookie), None).await;
-    assert_eq!(st, 404);
-    let (st, _, _) = h.ui("GET", "/ui/trace/abc", Some(&cookie), None).await;
+    let (st, _, _) = h
+        .ui("GET", "/windside/turns/abc", Some(&cookie), None)
+        .await;
     assert_eq!(st, 404);
     let (st, _, _) = h
-        .ui("GET", "/ui/jobs?status=bogus", Some(&cookie), None)
+        .ui("GET", "/windside/trace/abc", Some(&cookie), None)
+        .await;
+    assert_eq!(st, 404);
+    let (st, _, _) = h
+        .ui("GET", "/windside/jobs?status=bogus", Some(&cookie), None)
         .await;
     assert_eq!(st, 400);
     h.running.abort();
@@ -3426,7 +3685,7 @@ async fn ui_exchange_renders_verbatim() {
         created_at: 1_700_000_000,
     }));
     h.engine.store.flush().await;
-    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/llm/1", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     // The stored bytes, pretty-printed and escaped: nothing lost.
     let pretty =
@@ -3465,7 +3724,7 @@ async fn ui_exchange_renders_verbatim() {
     )
     .unwrap();
     drop(db);
-    let (st, _, body) = h.ui("GET", "/ui/llm/1", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/llm/1", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("What happened next"), "{body}");
     assert!(body.contains("rejected</span>"), "operator rejected");
@@ -3495,7 +3754,7 @@ async fn ui_jobs_retry_and_cancel() {
     .unwrap();
     let queued = db.last_insert_rowid();
     drop(db);
-    let (st, _, body) = h.ui("GET", "/ui/jobs", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/jobs", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(
         body.contains("actor:aa") && body.contains("cluster:bb"),
@@ -3505,13 +3764,13 @@ async fn ui_jobs_retry_and_cancel() {
     let (st, headers, _) = h
         .ui(
             "POST",
-            &format!("/ui/jobs/{failed}/retry"),
+            &format!("/windside/jobs/{failed}/retry"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
         .await;
     assert_eq!(st, 303);
-    assert_eq!(ui_header(&headers, "location"), Some("/ui/jobs"));
+    assert_eq!(ui_header(&headers, "location"), Some("/windside/jobs"));
     let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
     let (status, attempts): (String, i64) = db
         .query_row(
@@ -3525,7 +3784,7 @@ async fn ui_jobs_retry_and_cancel() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/jobs/{queued}/cancel"),
+            &format!("/windside/jobs/{queued}/cancel"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -3546,7 +3805,7 @@ async fn ui_jobs_retry_and_cancel() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/jobs/{failed}/retry"),
+            &format!("/windside/jobs/{failed}/retry"),
             Some(&cookie),
             Some("csrf=wrong"),
         )
@@ -3555,7 +3814,7 @@ async fn ui_jobs_retry_and_cancel() {
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/jobs/9999/retry",
+            "/windside/jobs/9999/retry",
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -3641,7 +3900,7 @@ async fn ui_trace_lists_all_seven_steps() {
     let (st, _, body) = h
         .ui(
             "GET",
-            "/ui/trace/00000000000000000000000000000005",
+            "/windside/trace/00000000000000000000000000000005",
             Some(&cookie),
             None,
         )
@@ -3651,7 +3910,7 @@ async fn ui_trace_lists_all_seven_steps() {
         "1 · Turn",
         "2 · Resolution",
         "3 · Feature rows",
-        "4 · Scores",
+        "4 · Windside scores",
         "5 · Proposal",
         "6 · Labels",
         "7 · Decision",
@@ -3662,14 +3921,17 @@ async fn ui_trace_lists_all_seven_steps() {
     assert!(body.contains("turns_held"), "feature values named");
     assert!(body.contains("0.9700"), "score value");
     assert!(body.contains("wordlist paths"), "proposal reason");
-    assert!(body.contains("/ui/llm/7"), "proposal links the exchange");
+    assert!(
+        body.contains("/windside/llm/7"),
+        "proposal links the exchange"
+    );
     assert!(body.contains("llm_proposed"), "labels listed");
     assert!(body.contains("operator v0"), "sticky decision shown");
     // The turn page shows the same turn's columns, tap join and rows.
     let (st, _, body) = h
         .ui(
             "GET",
-            "/ui/turns/00000000000000000000000000000005",
+            "/windside/turns/00000000000000000000000000000005",
             Some(&cookie),
             None,
         )
@@ -3679,7 +3941,7 @@ async fn ui_trace_lists_all_seven_steps() {
     assert!(body.contains("Tap join"), "{body}");
     assert!(body.contains("turns_held"), "its feature row");
     let (st, _, _) = h
-        .ui("GET", "/ui/turns/does-not-exist", Some(&cookie), None)
+        .ui("GET", "/windside/turns/does-not-exist", Some(&cookie), None)
         .await;
     assert_eq!(st, 404);
     h.running.abort();
@@ -3691,11 +3953,16 @@ async fn ui_actor_pages_label_block_unblock() {
     let (h, actor, _) = ui_actor_harness().await;
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/actors", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/actors", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains(&actor), "actor listed");
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/actors/{actor}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     for section in [
@@ -3703,7 +3970,7 @@ async fn ui_actor_pages_label_block_unblock() {
         "Client",
         "Cluster",
         "Activity",
-        "Scores",
+        "Windside scores",
         "Labels",
         "Decisions",
         "Similar actors",
@@ -3718,7 +3985,7 @@ async fn ui_actor_pages_label_block_unblock() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/label"),
+            &format!("/windside/actors/{actor}/label"),
             Some(&cookie),
             Some(&format!("csrf={csrf}&label=evil&window_end_ts={window}")),
         )
@@ -3727,7 +3994,7 @@ async fn ui_actor_pages_label_block_unblock() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/label"),
+            &format!("/windside/actors/{actor}/label"),
             Some(&cookie),
             Some(&format!("csrf={csrf}&label=benign&window_end_ts=1")),
         )
@@ -3736,7 +4003,7 @@ async fn ui_actor_pages_label_block_unblock() {
     let (st, headers, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/label"),
+            &format!("/windside/actors/{actor}/label"),
             Some(&cookie),
             Some(&format!(
                 "csrf={csrf}&label=malicious&note=reviewed&window_end_ts={window}"
@@ -3746,7 +4013,7 @@ async fn ui_actor_pages_label_block_unblock() {
     assert_eq!(st, 303);
     assert_eq!(
         ui_header(&headers, "location").unwrap(),
-        format!("/ui/actors/{actor}")
+        format!("/windside/actors/{actor}")
     );
     let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
     let (label, note): (String, Option<String>) = db
@@ -3762,7 +4029,12 @@ async fn ui_actor_pages_label_block_unblock() {
     );
     drop(db);
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/actors/{actor}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200);
     assert!(body.contains("reviewed"), "label reflected on reload");
@@ -3770,7 +4042,7 @@ async fn ui_actor_pages_label_block_unblock() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/block"),
+            &format!("/windside/actors/{actor}/block"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -3787,14 +4059,19 @@ async fn ui_actor_pages_label_block_unblock() {
     assert_eq!(rule, "operator");
     drop(db);
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/actors/{actor}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert!(body.contains("blocked</span>"), "{body}");
     assert_eq!(st, 200);
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/unblock"),
+            &format!("/windside/actors/{actor}/unblock"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -3803,7 +4080,7 @@ async fn ui_actor_pages_label_block_unblock() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/unblock"),
+            &format!("/windside/actors/{actor}/unblock"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -3833,14 +4110,19 @@ async fn ui_cluster_pages_and_labels() {
     drop(db);
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/clusters", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/clusters", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains(&key), "cluster listed");
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/clusters/{key}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
-    for section in ["Actors", "Activity", "Scores", "Labels", "Turns"] {
+    for section in ["Actors", "Activity", "Windside scores", "Labels", "Turns"] {
         assert!(body.contains(section), "{section} present");
     }
     let csrf = ui_csrf(&body);
@@ -3848,7 +4130,7 @@ async fn ui_cluster_pages_and_labels() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/clusters/{key}/label"),
+            &format!("/windside/clusters/{key}/label"),
             Some(&cookie),
             Some(&format!("csrf={csrf}&label=unknown&window_end_ts={window}")),
         )
@@ -3887,7 +4169,7 @@ async fn ui_review_decide_writes_the_operator_label() {
     )
     .unwrap();
     drop(db);
-    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/review", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains(&actor), "row queued");
     assert!(body.contains("0.9700"), "why carries the score");
@@ -3897,7 +4179,7 @@ async fn ui_review_decide_writes_the_operator_label() {
     let (st, headers, _) = h
         .ui(
             "POST",
-            "/ui/review/decide",
+            "/windside/review/decide",
             Some(&cookie),
             Some(&format!(
                 "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=confirm"
@@ -3905,7 +4187,7 @@ async fn ui_review_decide_writes_the_operator_label() {
         )
         .await;
     assert_eq!(st, 303);
-    assert_eq!(ui_header(&headers, "location"), Some("/ui/review"));
+    assert_eq!(ui_header(&headers, "location"), Some("/windside/review"));
     let db = rusqlite::Connection::open(h.dir.join("leesided.sqlite")).unwrap();
     let (label, note): (String, Option<String>) = db
         .query_row(
@@ -3919,7 +4201,7 @@ async fn ui_review_decide_writes_the_operator_label() {
         ("malicious", Some("confirmed llm_proposed"))
     );
     drop(db);
-    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/review", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(
         !body.contains(&actor),
@@ -3929,7 +4211,7 @@ async fn ui_review_decide_writes_the_operator_label() {
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/review/decide",
+            "/windside/review/decide",
             Some(&cookie),
             Some(&format!(
                 "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=benign"
@@ -3940,7 +4222,7 @@ async fn ui_review_decide_writes_the_operator_label() {
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/review/decide",
+            "/windside/review/decide",
             Some(&cookie),
             Some(&format!(
                 "csrf={csrf}&scope_id={actor}&window_end_ts={window}&verdict=evil"
@@ -3957,7 +4239,7 @@ async fn ui_step4_pages_render() {
     let h = ui_harness(Some("op-token")).await;
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     for section in [
         "Health",
@@ -3968,20 +4250,20 @@ async fn ui_step4_pages_render() {
     ] {
         assert!(body.contains(section), "{section} present");
     }
-    let (st, _, body) = h.ui("GET", "/ui/review", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/review", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("Nothing scored yet"), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/labels", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/labels", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("No labels under these filters."), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/rules", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("portal-otp-burst"), "install set listed");
     assert!(body.contains("No drafts"), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/model", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/model", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("No model loaded"), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/features", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/features", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("turns_held"), "{body}");
     assert!(body.contains("distinct user agents minus one"), "{body}");
@@ -4025,20 +4307,20 @@ async fn ui_rule_disable_lifts_the_rule_from_the_probe_path() {
     assert_eq!(v["action"], "block", "rule trips first: {v}");
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (_, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    let (_, _, body) = h.ui("GET", "/windside/rules", Some(&cookie), None).await;
     let csrf = ui_csrf(&body);
     assert!(body.contains("ui-toggle-burst"), "{body}");
     // Disable: the page, the compiled set, and the probe path agree.
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/rules/ui-toggle-burst/disable",
+            "/windside/rules/ui-toggle-burst/disable",
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
         .await;
     assert_eq!(st, 303);
-    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/rules", Some(&cookie), None).await;
     assert_eq!(st, 200);
     assert!(body.contains("disabled</span>"), "{body}");
     assert!(!h
@@ -4080,7 +4362,7 @@ async fn ui_rule_disable_lifts_the_rule_from_the_probe_path() {
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/rules/ui-toggle-burst/enable",
+            "/windside/rules/ui-toggle-burst/enable",
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -4109,7 +4391,7 @@ async fn ui_rule_disable_lifts_the_rule_from_the_probe_path() {
     let (st, _, _) = h
         .ui(
             "POST",
-            "/ui/rules/no-such-rule/disable",
+            "/windside/rules/no-such-rule/disable",
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -4141,7 +4423,12 @@ async fn ui_actor_explanation_renders_with_its_turn() {
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/actors/{actor}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     assert!(
@@ -4149,7 +4436,7 @@ async fn ui_actor_explanation_renders_with_its_turn() {
         "{body}"
     );
     assert!(
-        body.contains("/ui/turns/00000000000000000000000000000005"),
+        body.contains("/windside/turns/00000000000000000000000000000005"),
         "{body}"
     );
     h.running.abort();
@@ -4167,7 +4454,7 @@ async fn ui_rules_drafts_render_verbatim() {
     );
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/rules", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/rules", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("draft-burst"), "{body}");
     assert!(body.contains("Three scanners, one shape."), "{body}");
@@ -4188,15 +4475,19 @@ async fn ui_payloads_list_and_detail() {
     );
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
-    let (st, _, body) = h.ui("GET", "/ui/payloads", Some(&cookie), None).await;
+    let (st, _, body) = h.ui("GET", "/windside/payloads", Some(&cookie), None).await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("/venues/{id}"), "{body}");
     assert!(body.contains("enumeration"), "{body}");
-    let (st, _, body) = h.ui("GET", "/ui/payloads/ph", Some(&cookie), None).await;
+    let (st, _, body) = h
+        .ui("GET", "/windside/payloads/ph", Some(&cookie), None)
+        .await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("enumeration"), "{body}");
     assert!(body.contains("0.80"), "{body}");
-    let (st, _, _) = h.ui("GET", "/ui/payloads/nope", Some(&cookie), None).await;
+    let (st, _, _) = h
+        .ui("GET", "/windside/payloads/nope", Some(&cookie), None)
+        .await;
     assert_eq!(st, 404);
     h.running.abort();
     h.engine.shutdown().await;
@@ -4480,7 +4771,12 @@ async fn draft_buttons_queue_one_job() {
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/clusters/{key}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("Draft a rule"), "button present");
@@ -4488,7 +4784,7 @@ async fn draft_buttons_queue_one_job() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/clusters/{key}/draft"),
+            &format!("/windside/clusters/{key}/draft"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -4496,7 +4792,12 @@ async fn draft_buttons_queue_one_job() {
     assert_eq!(st, 303);
     // The actor button resolves the same cluster; the guard dedups.
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/actors/{actor}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/actors/{actor}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     assert!(body.contains("Draft a rule"), "actor button present");
@@ -4504,7 +4805,7 @@ async fn draft_buttons_queue_one_job() {
     let (st, _, _) = h
         .ui(
             "POST",
-            &format!("/ui/actors/{actor}/draft"),
+            &format!("/windside/actors/{actor}/draft"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )
@@ -4545,14 +4846,19 @@ async fn draft_button_is_unavailable_unconfigured() {
     let (_, headers, _) = h.ui_login("op-token").await;
     let cookie = ui_cookie(&headers);
     let (st, _, body) = h
-        .ui("GET", &format!("/ui/clusters/{key}"), Some(&cookie), None)
+        .ui(
+            "GET",
+            &format!("/windside/clusters/{key}"),
+            Some(&cookie),
+            None,
+        )
         .await;
     assert_eq!(st, 200, "{body}");
     let csrf = ui_csrf(&body);
     let (st, _, body) = h
         .ui(
             "POST",
-            &format!("/ui/clusters/{key}/draft"),
+            &format!("/windside/clusters/{key}/draft"),
             Some(&cookie),
             Some(&format!("csrf={csrf}")),
         )

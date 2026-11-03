@@ -1,7 +1,7 @@
-//! The inspector's pages (docs/inspector.md): server-rendered HTML,
-//! one inlined stylesheet, no JavaScript beyond `<details>` toggles
-//! and a copy button. Everything from the store is HTML-escaped on
-//! the way out: turns carry attacker text.
+//! The Windside console's pages (docs/inspector.md): server-rendered
+//! HTML, one inlined stylesheet, no JavaScript beyond `<details>`
+//! toggles and a copy button. Everything from the store is
+//! HTML-escaped on the way out: turns carry attacker text.
 //!
 //! Tokens are `docs/console.md` section 5, dark first. Fonts fall back
 //! to the system stacks; the box carries no webfonts.
@@ -11,6 +11,7 @@ use super::queries::{
     FeatureRowView, Job, LabelRef, ModelView, Outcome, PayloadRow, ReviewFull, RuleView, ScoreView,
     TapInfo, Trace, TraceProposal, Turn, TurnLite,
 };
+use super::Role;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -212,66 +213,76 @@ document.addEventListener("click", function (ev) {
 </script>"#;
 
 /// The nav only links pages that exist; later steps extend it.
-fn nav(active: &str) -> String {
+/// `active` is the path suffix (`/actors`), empty when none matches.
+fn nav(prefix: &str, active: &str) -> String {
     let mut out = String::from("<nav>");
-    for (path, name) in [
-        ("/ui/", "Overview"),
-        ("/ui/review", "Review"),
-        ("/ui/actors", "Actors"),
-        ("/ui/clusters", "Clusters"),
-        ("/ui/labels", "Labels"),
-        ("/ui/llm", "LLM calls"),
-        ("/ui/jobs", "Jobs"),
-        ("/ui/rules", "Rules"),
-        ("/ui/payloads", "Payloads"),
-        ("/ui/model", "Model"),
-        ("/ui/features", "Features"),
+    for (suffix, name) in [
+        ("/", "Overview"),
+        ("/review", "Review"),
+        ("/actors", "Actors"),
+        ("/clusters", "Clusters"),
+        ("/labels", "Labels"),
+        ("/llm", "LLM calls"),
+        ("/jobs", "Jobs"),
+        ("/rules", "Rules"),
+        ("/payloads", "Payloads"),
+        ("/model", "Windside model"),
+        ("/features", "Features"),
     ] {
-        let on = if active == path { " class=\"on\"" } else { "" };
-        let _ = write!(out, "<a href=\"{path}\"{on}>{name}</a>");
+        let on = if active == suffix {
+            " class=\"on\""
+        } else {
+            ""
+        };
+        let _ = write!(out, "<a href=\"{prefix}{suffix}\"{on}>{name}</a>");
     }
     out.push_str("</nav>");
     out
 }
 
-fn layout(title: &str, active: &str, body: &str) -> String {
+fn layout(title: &str, active: &str, body: &str, prefix: &str, role: Option<Role>) -> String {
+    let badge = role.map(|r| chip(r.as_str(), "muted")).unwrap_or_default();
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{} · leeside inspector</title><style>{STYLE}</style></head>\
+         <title>{} · Windside</title><style>{STYLE}</style></head>\
          <body><header class=\"top\"><span class=\"brand\">\
-         <a href=\"/ui/llm\">leeside inspector</a></span>{}</header>\
+         <a href=\"{prefix}/llm\">Windside</a></span>{badge}{}</header>\
          <main>{body}</main>{COPY_SCRIPT}</body></html>",
         esc(title),
-        nav(active),
+        nav(prefix, active),
     )
 }
 
-pub fn login_page(next: &str, error: Option<&str>) -> String {
-    let mut body = String::from("<h1>Log in</h1><p class=\"sub\">The operator token.</p>");
+pub fn login_page(next: &str, error: Option<&str>, prefix: &str) -> String {
+    let mut body =
+        String::from("<h1>Log in to Windside</h1><p class=\"sub\">Operator or viewer token.</p>");
     if let Some(e) = error {
         let _ = write!(body, "<p class=\"error\">{}</p>", esc(e));
     }
     let _ = write!(
         body,
-        "<form class=\"login\" method=\"post\" action=\"/ui/login\">\
+        "<form class=\"login\" method=\"post\" action=\"{prefix}/login\">\
          <input type=\"hidden\" name=\"next\" value=\"{}\">\
-         <label>Operator token<br><input type=\"password\" name=\"token\" autofocus></label><br>\
+         <label>Token<br><input type=\"password\" name=\"token\" autofocus></label><br>\
          <input class=\"btn\" type=\"submit\" value=\"Log in\"></form>",
         esc(next),
     );
-    layout("Log in", "", &body)
+    layout("Log in", "", &body, prefix, None)
 }
 
-pub fn error_page(status: u16, title: &str, detail: &str) -> String {
+pub fn error_page(status: u16, title: &str, detail: &str, prefix: &str) -> String {
+    let back = format!("{prefix}/llm");
     layout(
         title,
         "",
         &format!(
-            "<h1>{status} · {}</h1><p>{}</p><p><a href=\"/ui/llm\">Back to LLM calls</a></p>",
+            "<h1>{status} · {}</h1><p>{}</p><p><a href=\"{back}\">Back to LLM calls</a></p>",
             esc(title),
             esc(detail)
         ),
+        prefix,
+        None,
     )
 }
 
@@ -295,12 +306,12 @@ fn pager(base: &str, page: i64, total: i64) -> String {
     out
 }
 
-/// `/ui/llm`: every call, newest first.
-pub fn llm_list(calls: &[CallRow], page: i64, total: i64) -> String {
+/// `{prefix}/llm`: every call, newest first.
+pub fn llm_list(calls: &[CallRow], page: i64, total: i64, role: Role, prefix: &str) -> String {
     let mut body = String::from("<h1>LLM calls</h1>");
     if calls.is_empty() {
         body.push_str("<p class=\"empty\">No calls logged yet.</p>");
-        return layout("LLM calls", "/ui/llm", &body);
+        return layout("LLM calls", "/llm", &body, prefix, Some(role));
     }
     body.push_str(
         "<table><tr><th>Time</th><th>Point</th><th>Subject</th><th>Model</th>\
@@ -318,7 +329,7 @@ pub fn llm_list(calls: &[CallRow], page: i64, total: i64) -> String {
              <td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
              <td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
              <td class=\"num\">{}</td><td>{}</td>\
-             <td><a href=\"/ui/llm/{}\">open</a></td></tr>",
+             <td><a href=\"{prefix}/llm/{}\">open</a></td></tr>",
             esc(&fmt_ts_s(c.created_at)),
             esc(&c.point),
             esc(&c.model),
@@ -335,8 +346,8 @@ pub fn llm_list(calls: &[CallRow], page: i64, total: i64) -> String {
         );
     }
     body.push_str("</table>");
-    body.push_str(&pager("/ui/llm?", page, total));
-    layout("LLM calls", "/ui/llm", &body)
+    body.push_str(&pager(&format!("{prefix}/llm?"), page, total));
+    layout("LLM calls", "/llm", &body, prefix, Some(role))
 }
 
 fn validation_block(c: &Call) -> String {
@@ -397,8 +408,8 @@ fn label_block(l: &LabelRef) -> String {
     out
 }
 
-/// `/ui/llm/{id}`: one exchange in three columns, verbatim.
-pub fn llm_detail(c: &Call, csrf: &str) -> String {
+/// `{prefix}/llm/{id}`: one exchange in three columns, verbatim.
+pub fn llm_detail(c: &Call, csrf: &str, role: Role, prefix: &str) -> String {
     let mut head = format!(
         "<h1>Call {}</h1><p class=\"sub\">{} · {} · {}</p>",
         c.id,
@@ -431,7 +442,7 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
     if let Some(j) = &c.job {
         let _ = write!(
             head,
-            "<dt>Job</dt><dd><a href=\"/ui/jobs#{}\">job {}</a> ({}) {}</dd>",
+            "<dt>Job</dt><dd><a href=\"{prefix}/jobs#{}\">job {}</a> ({}) {}</dd>",
             j.id,
             j.id,
             esc(&j.point),
@@ -441,7 +452,7 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
     if let Some(r) = &c.resend_parent {
         let _ = write!(
             head,
-            "<dt>Re-send of</dt><dd><a href=\"/ui/llm/{r}\">call {r}</a></dd>"
+            "<dt>Re-send of</dt><dd><a href=\"{prefix}/llm/{r}\">call {r}</a></dd>"
         );
     }
     if !c.resend_children.is_empty() {
@@ -450,7 +461,7 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
             if i > 0 {
                 head.push_str(" · ");
             }
-            let _ = write!(head, "<a href=\"/ui/llm/{r}\">call {r}</a>");
+            let _ = write!(head, "<a href=\"{prefix}/llm/{r}\">call {r}</a>");
         }
         head.push_str("</dd>");
     }
@@ -552,7 +563,7 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
         for s in &c.siblings {
             let _ = write!(
                 interp,
-                "<tr><td><a href=\"/ui/llm/{}\">call {}</a>{}</td>\
+                "<tr><td><a href=\"{prefix}/llm/{}\">call {}</a>{}</td>\
                  <td class=\"mono\">{}</td><td class=\"mono\">budget {}</td>\
                  <td>{}</td></tr>",
                 s.id,
@@ -567,29 +578,42 @@ pub fn llm_detail(c: &Call, csrf: &str) -> String {
     }
     interp.push_str("</section>");
 
-    let mut tail = format!(
-        "<section><h2>Re-send</h2>\
-         <p class=\"sub\">Admin only. Same point, same subject, fresh budget; \
-         the new call links back to this one.</p>\
-         <form method=\"post\" action=\"/ui/llm/{}/resend\">\
-         <input type=\"hidden\" name=\"csrf\" value=\"{}\">\
-         <button class=\"btn btn-warn\" type=\"submit\">Re-send this call</button>\
-         </form></section>",
-        c.id, csrf,
-    );
-    if c.siblings.iter().any(|s| !s.is_self && s.id > c.id) {
-        tail.push_str("<p class=\"empty\">Note: a newer attempt exists on this subject.</p>");
+    let mut tail = String::new();
+    if role == Role::Admin {
+        tail = format!(
+            "<section><h2>Re-send</h2>\
+             <p class=\"sub\">Same point, same subject, fresh budget; \
+             the new call links back to this one.</p>\
+             <form method=\"post\" action=\"{prefix}/llm/{}/resend\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{}\">\
+             <button class=\"btn btn-warn\" type=\"submit\">Re-send this call</button>\
+             </form></section>",
+            c.id, csrf,
+        );
+        if c.siblings.iter().any(|s| !s.is_self && s.id > c.id) {
+            tail.push_str("<p class=\"empty\">Note: a newer attempt exists on this subject.</p>");
+        }
     }
 
     layout(
         &format!("Call {}", c.id),
-        "/ui/llm",
+        "/llm",
         &format!("{head}<div class=\"cols\">{sent}{received}{interp}</div>{tail}"),
+        prefix,
+        Some(role),
     )
 }
 
-/// `/ui/jobs`: the queue, newest first, with retry and cancel forms.
-pub fn jobs_list(jobs: &[Job], status: Option<&str>, page: i64, total: i64, csrf: &str) -> String {
+/// `{prefix}/jobs`: the queue, newest first, with retry and cancel forms.
+pub fn jobs_list(
+    jobs: &[Job],
+    status: Option<&str>,
+    page: i64,
+    total: i64,
+    csrf: &str,
+    role: Role,
+    prefix: &str,
+) -> String {
     let mut body = String::from("<h1>Jobs</h1><p class=\"sub\">Filter: ");
     let filters: &[(&str, &str)] = &[
         ("all", "all"),
@@ -611,13 +635,13 @@ pub fn jobs_list(jobs: &[Job], status: Option<&str>, page: i64, total: i64, csrf
             } else {
                 format!("status={v}&")
             };
-            let _ = write!(body, "<a href=\"/ui/jobs?{q}\">{name}</a>");
+            let _ = write!(body, "<a href=\"{prefix}/jobs?{q}\">{name}</a>");
         }
     }
     body.push_str("</p>");
     if jobs.is_empty() {
         body.push_str("<p class=\"empty\">No jobs in this state.</p>");
-        return layout("Jobs", "/ui/jobs", &body);
+        return layout("Jobs", "/jobs", &body, prefix, Some(role));
     }
     body.push_str(
         "<table><tr><th>Id</th><th>Point</th><th>Subject</th><th>Status</th>\
@@ -644,22 +668,22 @@ pub fn jobs_list(jobs: &[Job], status: Option<&str>, page: i64, total: i64, csrf
             esc(&fmt_ts_s(j.updated_at)),
             j.produced_call.map_or_else(
                 || "—".to_string(),
-                |id| format!("<a href=\"/ui/llm/{id}\">call {id}</a>"),
+                |id| format!("<a href=\"{prefix}/llm/{id}\">call {id}</a>"),
             ),
         );
-        if j.status == "failed" {
+        if role == Role::Admin && j.status == "failed" {
             let _ = write!(
                 body,
-                "<form class=\"inline\" method=\"post\" action=\"/ui/jobs/{}/retry\">\
+                "<form class=\"inline\" method=\"post\" action=\"{prefix}/jobs/{}/retry\">\
                  <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <button class=\"btn\" type=\"submit\">retry</button></form>",
                 j.id,
             );
         }
-        if j.status == "queued" {
+        if role == Role::Admin && j.status == "queued" {
             let _ = write!(
                 body,
-                "<form class=\"inline\" method=\"post\" action=\"/ui/jobs/{}/cancel\">\
+                "<form class=\"inline\" method=\"post\" action=\"{prefix}/jobs/{}/cancel\">\
                  <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <button class=\"btn btn-warn\" type=\"submit\">cancel</button></form>",
                 j.id,
@@ -669,11 +693,11 @@ pub fn jobs_list(jobs: &[Job], status: Option<&str>, page: i64, total: i64, csrf
     }
     body.push_str("</table>");
     let base = match status {
-        Some(s) => format!("/ui/jobs?status={s}&"),
-        None => "/ui/jobs?".to_string(),
+        Some(s) => format!("{prefix}/jobs?status={s}&"),
+        None => format!("{prefix}/jobs?"),
     };
     body.push_str(&pager(&base, page, total));
-    layout("Jobs", "/ui/jobs", &body)
+    layout("Jobs", "/jobs", &body, prefix, Some(role))
 }
 
 fn score_chip(score: f64, threshold: Option<f64>) -> String {
@@ -699,22 +723,26 @@ fn opt_f64(v: Option<f64>) -> String {
         .unwrap_or_else(|| "—".to_string())
 }
 
-fn turn_link(turn_id: &Option<String>) -> String {
+fn turn_link(prefix: &str, turn_id: &Option<String>) -> String {
     match turn_id {
-        Some(t) => format!("<a href=\"/ui/turns/{}\">{}</a>", esc(t), mono(t)),
+        Some(t) => format!("<a href=\"{prefix}/turns/{}\">{}</a>", esc(t), mono(t)),
         None => "—".to_string(),
     }
 }
 
-fn actor_link(id: &str) -> String {
-    format!("<a href=\"/ui/actors/{}\">{}</a>", esc(id), mono(id))
+fn actor_link(prefix: &str, id: &str) -> String {
+    format!("<a href=\"{prefix}/actors/{}\">{}</a>", esc(id), mono(id))
 }
 
-fn cluster_link(key: &str) -> String {
-    format!("<a href=\"/ui/clusters/{}\">{}</a>", esc(key), mono(key))
+fn cluster_link(prefix: &str, key: &str) -> String {
+    format!(
+        "<a href=\"{prefix}/clusters/{}\">{}</a>",
+        esc(key),
+        mono(key)
+    )
 }
 
-fn turn_table(turns: &[TurnLite]) -> String {
+fn turn_table(prefix: &str, turns: &[TurnLite]) -> String {
     if turns.is_empty() {
         return "<p class=\"empty\">No turns.</p>".to_string();
     }
@@ -728,7 +756,7 @@ fn turn_table(turns: &[TurnLite]) -> String {
             "<tr><td class=\"mono\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
              <td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
             esc(&fmt_ts_us(t.ts_us)),
-            turn_link(&t.turn_id),
+            turn_link(prefix, &t.turn_id),
             mono(&t.route),
             mono(&t.verb),
             t.status,
@@ -739,7 +767,7 @@ fn turn_table(turns: &[TurnLite]) -> String {
                 .unwrap_or_else(|| "—".to_string()),
             t.actor_id
                 .as_deref()
-                .map(actor_link)
+                .map(|id| actor_link(prefix, id))
                 .unwrap_or_else(|| "—".to_string()),
         );
     }
@@ -775,7 +803,7 @@ fn label_table(labels: &[LabelRef]) -> String {
     out
 }
 
-fn proposal_block(p: &TraceProposal) -> String {
+fn proposal_block(prefix: &str, p: &TraceProposal) -> String {
     let mut out = String::from("<dl class=\"kv\">");
     let _ = write!(
         out,
@@ -792,7 +820,7 @@ fn proposal_block(p: &TraceProposal) -> String {
         Some(id) => {
             let _ = write!(
                 out,
-                "<dt>Exchange</dt><dd><a href=\"/ui/llm/{id}\">call {id}</a></dd>"
+                "<dt>Exchange</dt><dd><a href=\"{prefix}/llm/{id}\">call {id}</a></dd>"
             );
         }
         None => out.push_str("<dt>Exchange</dt><dd>—</dd>"),
@@ -805,8 +833,8 @@ fn score_block(s: &ScoreView, threshold: Option<f64>) -> String {
     let mut out = String::from("<dl class=\"kv\">");
     let _ = write!(
         out,
-        "<dt>Score</dt><dd>{}</dd>\
-         <dt>Model</dt><dd>{}</dd>\
+        "<dt>Windside score</dt><dd>{}</dd>\
+         <dt>Windside model</dt><dd>{}</dd>\
          <dt>Surface</dt><dd>{}</dd>\
          <dt>Scored</dt><dd class=\"mono\">{}</dd>",
         score_chip(s.score, threshold),
@@ -885,7 +913,7 @@ fn decision_table(decisions: &[DecisionView], now_s: i64) -> String {
     out
 }
 
-/// `/ui/turns/{turn_id}`: every stored column, the probe answer, the
+/// `{prefix}/turns/{turn_id}`: every stored column, the probe answer, the
 /// resolution, the tap join, the rows and scores it produced.
 pub fn turn_detail(
     t: &Turn,
@@ -893,6 +921,8 @@ pub fn turn_detail(
     features: &[FeatureRowView],
     scores: &[ScoreView],
     thresholds: &HashMap<String, f64>,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let title = t.turn_id.as_deref().unwrap_or("?");
     let mut body = format!(
@@ -928,11 +958,11 @@ pub fn turn_detail(
         "<dt>Actor</dt><dd>{}</dd><dt>Cluster</dt><dd>{}</dd>",
         t.actor_id
             .as_deref()
-            .map(actor_link)
+            .map(|id| actor_link(prefix, id))
             .unwrap_or_else(|| "—".to_string()),
         t.cluster_key
             .as_deref()
-            .map(cluster_link)
+            .map(|key| cluster_link(prefix, key))
             .unwrap_or_else(|| "—".to_string()),
     );
     body.push_str("</dl><h2>Tap join</h2><dl class=\"kv\">");
@@ -949,7 +979,7 @@ pub fn turn_detail(
             chip("no", "muted")
         },
     );
-    body.push_str("</dl><h2>Scores</h2>");
+    body.push_str("</dl><h2>Windside scores</h2>");
     if scores.is_empty() {
         body.push_str(
             "<p class=\"empty\">This turn scored nothing (below the floor, or Windside off).</p>",
@@ -1029,7 +1059,7 @@ pub fn turn_detail(
         let _ = write!(body, "<dt>{k}</dt><dd>{}</dd>", mono(v));
     }
     body.push_str("</dl>");
-    layout(&format!("Turn {title}"), "", &body)
+    layout(&format!("Turn {title}"), "", &body, prefix, Some(role))
 }
 
 fn pretty_json(raw: &str) -> String {
@@ -1038,8 +1068,14 @@ fn pretty_json(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// `/ui/trace/{turn_id}`: the seven steps as a vertical list.
-pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> String {
+/// `{prefix}/trace/{turn_id}`: the seven steps as a vertical list.
+pub fn trace_view(
+    t: &Trace,
+    thresholds: &HashMap<String, f64>,
+    now_s: i64,
+    role: Role,
+    prefix: &str,
+) -> String {
     let title = t.turn.turn_id.as_deref().unwrap_or("?");
     let mut body = format!(
         "<h1>Trace {}</h1><p class=\"sub\">{} · seven steps from request to decision</p>",
@@ -1060,7 +1096,7 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
             .as_deref()
             .map(verdict_chip)
             .unwrap_or_else(|| "—".to_string()),
-        turn_link(&t.turn.turn_id),
+        turn_link(prefix, &t.turn.turn_id),
     );
     // 2. resolution
     body.push_str("<h2>2 · Resolution</h2><p class=\"sub\">from actor_bindings, live; the turn's identifiers replayed from its columns</p>");
@@ -1072,7 +1108,7 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
                  <dt>Confirmed</dt><dd>{}</dd>\
                  <dt>Opened</dt><dd class=\"mono\">{}</dd>\
                  <dt>Turns</dt><dd class=\"mono\">{}</dd></dl>",
-                actor_link(&a.id),
+                actor_link(prefix, &a.id),
                 id_cell(&a.id),
                 if a.confirmed {
                     chip("confirmed", "good")
@@ -1088,7 +1124,7 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
         }
     }
     if let Some(c) = &t.resolution.cluster_key {
-        let _ = write!(body, "<p>Cluster {}</p>", cluster_link(c));
+        let _ = write!(body, "<p>Cluster {}</p>", cluster_link(prefix, c));
     }
     if !t.resolution.bindings.is_empty() {
         body.push_str("<table><tr><th>Kind</th><th>Value</th><th>First</th><th>Last</th><th>Returned</th><th></th></tr>");
@@ -1122,7 +1158,7 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
         body.push_str(&feature_block(f));
     }
     // 4. scores
-    body.push_str("<h2>4 · Scores</h2><p class=\"sub\">from scores, keyed by turn</p>");
+    body.push_str("<h2>4 · Windside scores</h2><p class=\"sub\">from scores, keyed by turn</p>");
     if t.scores.is_empty() {
         body.push_str(
             "<p class=\"empty\">No score: below the cold-start floor, or Windside off.</p>",
@@ -1141,7 +1177,7 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
         "<h2>5 · Proposal</h2><p class=\"sub\">the latest llm_proposed label for the subject</p>",
     );
     match &t.proposal {
-        Some(p) => body.push_str(&proposal_block(p)),
+        Some(p) => body.push_str(&proposal_block(prefix, p)),
         None => body.push_str("<p class=\"empty\">No proposal for this subject.</p>"),
     }
     // 6. labels
@@ -1172,24 +1208,26 @@ pub fn trace_view(t: &Trace, thresholds: &HashMap<String, f64>, now_s: i64) -> S
         Some(d) => body.push_str(&decision_table(std::slice::from_ref(d), now_s)),
         None => body.push_str("<p class=\"empty\">No live sticky decision on this actor.</p>"),
     }
-    layout(&format!("Trace {title}"), "", &body)
+    layout(&format!("Trace {title}"), "", &body, prefix, Some(role))
 }
 
-/// `/ui/actors`: actors by latest score.
+/// `{prefix}/actors`: actors by latest score.
 pub fn actors_list(
     rows: &[ActorRow],
     page: i64,
     total: i64,
     thresholds: &HashMap<String, f64>,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let mut body = String::from("<h1>Actors</h1>");
     if rows.is_empty() {
         body.push_str("<p class=\"empty\">No actors yet.</p>");
-        return layout("Actors", "/ui/actors", &body);
+        return layout("Actors", "/actors", &body, prefix, Some(role));
     }
     body.push_str(
         "<table><tr><th>Actor</th><th>Kind</th><th>Surfaces</th><th>Confirmed</th>\
-         <th>Turns held</th><th>Score</th><th>State</th><th>Cluster</th></tr>",
+         <th>Turns held</th><th>Windside score</th><th>State</th><th>Cluster</th></tr>",
     );
     for r in rows {
         let state = [
@@ -1204,7 +1242,7 @@ pub fn actors_list(
             body,
             "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
              <td class=\"num\">{}</td><td>{}</td><td>{} {}</td><td>{}</td></tr>",
-            actor_link(&r.id),
+            actor_link(prefix, &r.id),
             esc(&r.kind),
             esc(&r.surfaces.join(", ")),
             if r.confirmed { "yes" } else { "no" },
@@ -1223,13 +1261,13 @@ pub fn actors_list(
             esc(r.latest_label.as_deref().unwrap_or("")),
             r.cluster
                 .as_deref()
-                .map(cluster_link)
+                .map(|key| cluster_link(prefix, key))
                 .unwrap_or_else(|| "—".to_string()),
         );
     }
     body.push_str("</table>");
-    body.push_str(&pager("/ui/actors?", page, total));
-    layout("Actors", "/ui/actors", &body)
+    body.push_str(&pager(&format!("{prefix}/actors?"), page, total));
+    layout("Actors", "/actors", &body, prefix, Some(role))
 }
 
 fn activity_block(a: &super::queries::ActivityView) -> String {
@@ -1261,16 +1299,16 @@ fn activity_block(a: &super::queries::ActivityView) -> String {
 }
 
 /// Ask the draft point for a rule over the subject's cluster. The
-/// draft lands in the review table on `/ui/rules`, never live.
-fn draft_form(scope: &str, id: &str, csrf: &str) -> String {
+/// draft lands in the review table on `{prefix}/rules`, never live.
+fn draft_form(prefix: &str, scope: &str, id: &str, csrf: &str) -> String {
     let (action, sub) = if scope == "actor" {
         (
-            format!("/ui/actors/{id}/draft"),
+            format!("{prefix}/actors/{id}/draft"),
             "drafts a rule for this actor's cluster",
         )
     } else {
         (
-            format!("/ui/clusters/{id}/draft"),
+            format!("{prefix}/clusters/{id}/draft"),
             "drafts a rule for this cluster",
         )
     };
@@ -1282,11 +1320,17 @@ fn draft_form(scope: &str, id: &str, csrf: &str) -> String {
     )
 }
 
-fn label_form(scope: &str, id: &str, window_end_ts: Option<i64>, csrf: &str) -> String {
+fn label_form(
+    prefix: &str,
+    scope: &str,
+    id: &str,
+    window_end_ts: Option<i64>,
+    csrf: &str,
+) -> String {
     let action = if scope == "actor" {
-        format!("/ui/actors/{id}/label")
+        format!("{prefix}/actors/{id}/label")
     } else {
-        format!("/ui/clusters/{id}/label")
+        format!("{prefix}/clusters/{id}/label")
     };
     match window_end_ts {
         Some(ts) => format!(
@@ -1307,13 +1351,15 @@ fn label_form(scope: &str, id: &str, window_end_ts: Option<i64>, csrf: &str) -> 
     }
 }
 
-/// `/ui/actors/{id}`: everything console.md §3 lists, in plain tables.
+/// `{prefix}/actors/{id}`: everything console.md §3 lists, in plain tables.
 pub fn actor_detail_page(
     d: &ActorDetail,
     tap: &TapInfo,
     thresholds: &HashMap<String, f64>,
     csrf: &str,
     now_s: i64,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let mut body = format!(
         "<h1>Actor {}</h1><p class=\"sub\">{} · {} · {}</p>",
@@ -1355,7 +1401,7 @@ pub fn actor_detail_page(
             if i > 0 {
                 body.push_str(" · ");
             }
-            body.push_str(&actor_link(m));
+            body.push_str(&actor_link(prefix, m));
         }
         body.push_str("</dd>");
     }
@@ -1425,7 +1471,7 @@ pub fn actor_detail_page(
             let _ = write!(
                 body,
                 "<p>{} · {} actors</p>",
-                cluster_link(c),
+                cluster_link(prefix, c),
                 d.cluster_actors
             );
         }
@@ -1433,7 +1479,7 @@ pub fn actor_detail_page(
     }
     body.push_str("<h2>Activity</h2>");
     body.push_str(&activity_block(&d.activity));
-    body.push_str("<h2>Scores</h2>");
+    body.push_str("<h2>Windside scores</h2>");
     match &d.scores.latest {
         Some(s) => {
             body.push_str(&score_block(
@@ -1447,7 +1493,7 @@ pub fn actor_detail_page(
         None => body.push_str("<p class=\"empty\">No scores yet.</p>"),
     }
     if !d.scores.history.is_empty() {
-        body.push_str("<h2>Score history</h2><table><tr><th>Time</th><th>Score</th></tr>");
+        body.push_str("<h2>Score history</h2><table><tr><th>Time</th><th>Windside score</th></tr>");
         for (ts, v) in &d.scores.history {
             let _ = write!(
                 body,
@@ -1465,7 +1511,7 @@ pub fn actor_detail_page(
                 "<blockquote>{}</blockquote>\
                  <p class=\"sub\">score {score:.4} on turn {turn} · {ts}</p>",
                 esc(&e.text),
-                turn = turn_link(&Some(e.turn_id.clone())),
+                turn = turn_link(prefix, &Some(e.turn_id.clone())),
                 ts = esc(&fmt_ts_us(e.ts_us)),
                 score = e.score,
             );
@@ -1476,50 +1522,60 @@ pub fn actor_detail_page(
     body.push_str(&label_table(&d.labels));
     body.push_str("<h2>Pending proposal</h2>");
     match &d.proposal {
-        Some(p) => body.push_str(&proposal_block(p)),
+        Some(p) => body.push_str(&proposal_block(prefix, p)),
         None => body.push_str("<p class=\"empty\">No proposal for this actor.</p>"),
     }
-    body.push_str("<h2>Label verdicts</h2>");
-    body.push_str(&label_form("actor", &d.head.id, d.window_end_ts, csrf));
-    body.push_str("<h2>Draft a rule</h2>");
-    if d.row.cluster.is_some() {
-        body.push_str(&draft_form("actor", &d.head.id, csrf));
-    } else {
-        body.push_str(
-            "<p class=\"empty\">No cluster on this actor's turns: nothing to draft over.</p>",
-        );
+    if role == Role::Admin {
+        body.push_str("<h2>Label verdicts</h2>");
+        body.push_str(&label_form(
+            prefix,
+            "actor",
+            &d.head.id,
+            d.window_end_ts,
+            csrf,
+        ));
+        body.push_str("<h2>Draft a rule</h2>");
+        if d.row.cluster.is_some() {
+            body.push_str(&draft_form(prefix, "actor", &d.head.id, csrf));
+        } else {
+            body.push_str(
+                "<p class=\"empty\">No cluster on this actor's turns: nothing to draft over.</p>",
+            );
+        }
     }
     body.push_str("<h2>Decisions</h2>");
     body.push_str(&decision_table(&d.decisions, now_s));
-    if d.row.blocked {
-        let _ = write!(
-            body,
-            "<form method=\"post\" action=\"/ui/actors/{}/unblock\">\
-             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-             <button class=\"btn\" type=\"submit\">Unblock this actor</button></form>",
-            d.head.id,
-        );
-    } else {
-        let _ = write!(
-            body,
-            "<form method=\"post\" action=\"/ui/actors/{}/block\">\
-             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-             <button class=\"btn btn-warn\" type=\"submit\">Block this actor for 24 h</button></form>\
-             <p class=\"sub\">A sticky actor-scope block, rule “operator”; it answers only in enforce mode.</p>",
-            d.head.id,
-        );
+    if role == Role::Admin {
+        if d.row.blocked {
+            let _ = write!(
+                body,
+                "<form method=\"post\" action=\"{prefix}/actors/{}/unblock\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <button class=\"btn\" type=\"submit\">Unblock this actor</button></form>",
+                d.head.id,
+            );
+        } else {
+            let _ = write!(
+                body,
+                "<form method=\"post\" action=\"{prefix}/actors/{}/block\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <button class=\"btn btn-warn\" type=\"submit\">Block this actor for 24 h</button></form>\
+                 <p class=\"sub\">A sticky actor-scope block, rule “operator”; it answers only in enforce mode.</p>",
+                d.head.id,
+            );
+        }
     }
     body.push_str("<h2>Similar actors</h2>");
     if d.similar.is_empty() {
         body.push_str("<p class=\"empty\">No other actor shares this cluster.</p>");
     } else {
-        body.push_str("<table><tr><th>Actor</th><th>Kind</th><th>Score</th><th>Turns</th><th>Last seen</th></tr>");
+        body.push_str("<table><tr><th>Actor</th><th>Kind</th><th>Windside score</th><th>Turns</th><th>Last seen</th></tr>");
         for s in &d.similar {
             let _ = write!(
                 body,
                 "<tr><td>{}</td><td>{}</td><td class=\"num\">{}</td>\
                  <td class=\"num\">{}</td><td class=\"mono\">{}</td></tr>",
-                actor_link(&s.id),
+                actor_link(prefix, &s.id),
                 esc(&s.kind),
                 s.score
                     .map(|v| format!("{v:.4}"))
@@ -1531,37 +1587,45 @@ pub fn actor_detail_page(
         body.push_str("</table>");
     }
     body.push_str("<h2>Turns</h2>");
-    body.push_str(&turn_table(&d.turns));
+    body.push_str(&turn_table(prefix, &d.turns));
     body.push_str(&pager(
-        &format!("/ui/actors/{}?", d.head.id),
+        &format!("{prefix}/actors/{}?", d.head.id),
         d.page,
         d.turn_total,
     ));
-    layout(&format!("Actor {}", d.head.id), "/ui/actors", &body)
+    layout(
+        &format!("Actor {}", d.head.id),
+        "/actors",
+        &body,
+        prefix,
+        Some(role),
+    )
 }
 
-/// `/ui/clusters`: clusters by latest score.
+/// `{prefix}/clusters`: clusters by latest score.
 pub fn clusters_list(
     rows: &[ClusterRow],
     page: i64,
     total: i64,
     thresholds: &HashMap<String, f64>,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let mut body = String::from("<h1>Clusters</h1>");
     if rows.is_empty() {
         body.push_str("<p class=\"empty\">No clusters yet.</p>");
-        return layout("Clusters", "/ui/clusters", &body);
+        return layout("Clusters", "/clusters", &body, prefix, Some(role));
     }
     body.push_str(
         "<table><tr><th>Cluster</th><th>Turns</th><th>Actors</th><th>Surfaces</th>\
-         <th>Score</th><th>State</th></tr>",
+         <th>Windside score</th><th>State</th></tr>",
     );
     for r in rows {
         let _ = write!(
             body,
             "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td>\
              <td>{}</td><td>{} {}</td></tr>",
-            cluster_link(&r.key),
+            cluster_link(prefix, &r.key),
             r.turns,
             r.actors,
             esc(&r.surfaces.join(", ")),
@@ -1582,15 +1646,17 @@ pub fn clusters_list(
         );
     }
     body.push_str("</table>");
-    body.push_str(&pager("/ui/clusters?", page, total));
-    layout("Clusters", "/ui/clusters", &body)
+    body.push_str(&pager(&format!("{prefix}/clusters?"), page, total));
+    layout("Clusters", "/clusters", &body, prefix, Some(role))
 }
 
-/// `/ui/clusters/{key}`: the cluster scope in the same shape.
+/// `{prefix}/clusters/{key}`: the cluster scope in the same shape.
 pub fn cluster_detail_page(
     d: &ClusterDetail,
     thresholds: &HashMap<String, f64>,
     csrf: &str,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let mut body = format!(
         "<h1>Cluster {}</h1><p class=\"sub\">{} turns · {} actors</p>",
@@ -1617,13 +1683,13 @@ pub fn cluster_detail_page(
             if i > 0 {
                 body.push_str(" · ");
             }
-            body.push_str(&actor_link(a));
+            body.push_str(&actor_link(prefix, a));
         }
         body.push_str("</p>");
     }
     body.push_str("<h2>Activity</h2>");
     body.push_str(&activity_block(&d.activity));
-    body.push_str("<h2>Scores</h2>");
+    body.push_str("<h2>Windside scores</h2>");
     match &d.scores.latest {
         Some(s) => {
             body.push_str(&score_block(
@@ -1640,35 +1706,55 @@ pub fn cluster_detail_page(
     body.push_str(&label_table(&d.labels));
     body.push_str("<h2>Pending proposal</h2>");
     match &d.proposal {
-        Some(p) => body.push_str(&proposal_block(p)),
+        Some(p) => body.push_str(&proposal_block(prefix, p)),
         None => body.push_str("<p class=\"empty\">No proposal for this cluster.</p>"),
     }
-    body.push_str("<h2>Label verdicts</h2>");
-    body.push_str(&label_form("cluster", &d.row.key, d.window_end_ts, csrf));
-    body.push_str("<h2>Draft a rule</h2>");
-    body.push_str(&draft_form("cluster", &d.row.key, csrf));
+    if role == Role::Admin {
+        body.push_str("<h2>Label verdicts</h2>");
+        body.push_str(&label_form(
+            prefix,
+            "cluster",
+            &d.row.key,
+            d.window_end_ts,
+            csrf,
+        ));
+        body.push_str("<h2>Draft a rule</h2>");
+        body.push_str(&draft_form(prefix, "cluster", &d.row.key, csrf));
+    }
     body.push_str("<h2>Turns</h2>");
-    body.push_str(&turn_table(&d.turns));
+    body.push_str(&turn_table(prefix, &d.turns));
     body.push_str(&pager(
-        &format!("/ui/clusters/{}?", d.row.key),
+        &format!("{prefix}/clusters/{}?", d.row.key),
         d.page,
         d.turn_total,
     ));
-    layout(&format!("Cluster {}", d.row.key), "/ui/clusters", &body)
+    layout(
+        &format!("Cluster {}", d.row.key),
+        "/clusters",
+        &body,
+        prefix,
+        Some(role),
+    )
 }
 
-/// `/ui/review`: the queue in the CLI's order, with `why_in_queue`.
-pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf: &str) -> String {
+/// `{prefix}/review`: the queue in the CLI's order, with `why_in_queue`.
+pub fn review_list(
+    rows: &[ReviewFull],
+    thresholds: &HashMap<String, f64>,
+    csrf: &str,
+    role: Role,
+    prefix: &str,
+) -> String {
     let mut body = String::from("<h1>Review</h1><p class=\"sub\">Disagreements first, then uncertain, unlabelled proposals, and the rest, as the CLI orders them. Decided rows leave until new evidence re-queues them.</p>");
     if rows.is_empty() {
         body.push_str("<p class=\"empty\">Nothing scored yet: no queue.</p>");
-        return layout("Review", "/ui/review", &body);
+        return layout("Review", "/review", &body, prefix, Some(role));
     }
     for r in rows {
         let subject = if r.row.scope == "cluster" {
-            cluster_link(&r.row.scope_id)
+            cluster_link(prefix, &r.row.scope_id)
         } else {
-            actor_link(&r.row.scope_id)
+            actor_link(prefix, &r.row.scope_id)
         };
         let _ = write!(
             body,
@@ -1680,7 +1766,7 @@ pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf:
         body.push_str("<dl class=\"kv\">");
         let _ = write!(
             body,
-            "<dt>Score</dt><dd>{}</dd>\
+            "<dt>Windside score</dt><dd>{}</dd>\
              <dt>Surface</dt><dd>{}</dd>\
              <dt>Top features</dt><dd>{}</dd>\
              <dt>Turns held</dt><dd class=\"mono\">{}</dd>\
@@ -1734,10 +1820,10 @@ pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf:
         }
         // Decide is actor-only until the console round reworks it;
         // cluster rows decide in the CLI.
-        if r.row.scope == "actor" {
+        if role == Role::Admin && r.row.scope == "actor" {
             let _ = write!(
                 body,
-                "<form method=\"post\" action=\"/ui/review/decide\">\
+                "<form method=\"post\" action=\"{prefix}/review/decide\">\
                  <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <input type=\"hidden\" name=\"scope_id\" value=\"{}\">\
                  <input type=\"hidden\" name=\"window_end_ts\" value=\"{}\">",
@@ -1752,14 +1838,17 @@ pub fn review_list(rows: &[ReviewFull], thresholds: &HashMap<String, f64>, csrf:
                  <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"malicious\">malicious</button> \
                  <button class=\"btn\" type=\"submit\" name=\"verdict\" value=\"unknown\">unknown</button></form>",
             );
+        } else if role == Role::Viewer && r.row.scope == "actor" {
+            body.push_str("<p class=\"empty\">Deciding needs an admin session.</p>");
         } else {
             body.push_str("<p class=\"empty\">Cluster rows decide in the CLI for now.</p>");
         }
     }
-    layout("Review", "/ui/review", &body)
+    layout("Review", "/review", &body, prefix, Some(role))
 }
 
-/// `/ui/labels`: every label, with source and value filters.
+/// `{prefix}/labels`: every label, with source and value filters.
+#[allow(clippy::too_many_arguments)]
 pub fn labels_list(
     labels: &[LabelRef],
     sources: &[String],
@@ -1767,6 +1856,8 @@ pub fn labels_list(
     label: Option<&str>,
     page: i64,
     total: i64,
+    role: Role,
+    prefix: &str,
 ) -> String {
     let mut body = String::from("<h1>Labels</h1><p class=\"sub\">Source: ");
     let link = |text: &str, href: Option<String>| {
@@ -1774,7 +1865,7 @@ pub fn labels_list(
             .unwrap_or_else(|| format!("<strong>{text}</strong>"))
     };
     let base = |s: Option<&str>, l: Option<&str>| {
-        let mut q = String::from("/ui/labels?");
+        let mut q = format!("{prefix}/labels?");
         if let Some(s) = s {
             q.push_str(&format!("source={s}&"));
         }
@@ -1802,7 +1893,7 @@ pub fn labels_list(
     body.push_str("</p>");
     if labels.is_empty() {
         body.push_str("<p class=\"empty\">No labels under these filters.</p>");
-        return layout("Labels", "/ui/labels", &body);
+        return layout("Labels", "/labels", &body, prefix, Some(role));
     }
     body.push_str(
         "<table><tr><th>Created</th><th>Subject</th><th>Scope</th><th>Source</th>\
@@ -1810,9 +1901,9 @@ pub fn labels_list(
     );
     for l in labels {
         let subject = if l.scope == "actor" {
-            actor_link(&l.scope_id)
+            actor_link(prefix, &l.scope_id)
         } else {
-            cluster_link(&l.scope_id)
+            cluster_link(prefix, &l.scope_id)
         };
         let _ = write!(
             body,
@@ -1832,13 +1923,19 @@ pub fn labels_list(
     }
     body.push_str("</table>");
     body.push_str(&pager(&base(source, label), page, total));
-    layout("Labels", "/ui/labels", &body)
+    layout("Labels", "/labels", &body, prefix, Some(role))
 }
 
-/// `/ui/rules`: the install set and the overrides, plus what the
+/// `{prefix}/rules`: the install set and the overrides, plus what the
 /// draft point wrote. Drafts are read-only here: one becomes a rule
 /// through the overrides file, never through the page.
-pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> String {
+pub fn rules_list(
+    rules: &[RuleView],
+    drafts: &[DraftView],
+    csrf: &str,
+    role: Role,
+    prefix: &str,
+) -> String {
     let mut body = String::from("<h1>Rules</h1><p class=\"sub\">The flag is per app and reversible; retire stays as removal from the overrides file.</p>");
     if rules.is_empty() {
         body.push_str("<p class=\"empty\">No rules installed.</p>");
@@ -1850,14 +1947,21 @@ pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> Strin
         );
         for r in rules {
             let action = if r.enabled { "disable" } else { "enable" };
+            let flip = if role == Role::Admin {
+                format!(
+                    "<form class=\"inline\" method=\"post\" action=\"{prefix}/rules/{}/{action}\">\
+                     <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                     <button class=\"btn\" type=\"submit\">{action}</button></form>",
+                    esc(&r.id),
+                )
+            } else {
+                String::new()
+            };
             let _ = write!(
                 body,
                 "<tr><td>{}</td><td class=\"num\">{}</td><td>{}</td><td>{}</td><td>{}</td>\
                  <td>{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td>\
-                 <td class=\"num\">{}</td><td>{}</td><td>\
-                 <form class=\"inline\" method=\"post\" action=\"/ui/rules/{}/{action}\">\
-                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                 <button class=\"btn\" type=\"submit\">{action}</button></form></td></tr>",
+                 <td class=\"num\">{}</td><td>{}</td><td>{}</td></tr>",
                 mono(&r.id),
                 r.version,
                 mono(&r.state),
@@ -1873,7 +1977,7 @@ pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> Strin
                 } else {
                     chip("disabled", "muted")
                 },
-                esc(&r.id),
+                flip,
             );
         }
         body.push_str("</table>");
@@ -1890,7 +1994,7 @@ pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> Strin
             };
             let call = d
                 .call_id
-                .map(|c| format!("<a href=\"/ui/llm/{c}\">call {c}</a>"))
+                .map(|c| format!("<a href=\"{prefix}/llm/{c}\">call {c}</a>"))
                 .unwrap_or_else(|| "—".to_string());
             let _ = write!(
                 body,
@@ -1905,7 +2009,7 @@ pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> Strin
                  </dl>",
                 d.id,
                 parse,
-                cluster_link(&d.cluster_key),
+                cluster_link(prefix, &d.cluster_key),
                 mono(&d.rule),
                 esc(&d.reason),
                 mono(&d.status),
@@ -1918,12 +2022,18 @@ pub fn rules_list(rules: &[RuleView], drafts: &[DraftView], csrf: &str) -> Strin
             );
         }
     }
-    layout("Rules", "/ui/rules", &body)
+    layout("Rules", "/rules", &body, prefix, Some(role))
 }
 
-/// `/ui/payloads`: the observed request patterns and what the
+/// `{prefix}/payloads`: the observed request patterns and what the
 /// classify point made of them.
-pub fn payloads_list(rows: &[PayloadRow], page: i64, total: i64) -> String {
+pub fn payloads_list(
+    rows: &[PayloadRow],
+    page: i64,
+    total: i64,
+    role: Role,
+    prefix: &str,
+) -> String {
     let mut body = String::from(
         "<h1>Payloads</h1><p class=\"sub\">One row per distinct request pattern; the class is the classify point's verdict.</p>",
     );
@@ -1937,7 +2047,7 @@ pub fn payloads_list(rows: &[PayloadRow], page: i64, total: i64) -> String {
         for r in rows {
             let _ = write!(
                 body,
-                "<tr><td><a href=\"/ui/payloads/{}\">{}</a></td><td>{}</td>\
+                "<tr><td><a href=\"{prefix}/payloads/{}\">{}</a></td><td>{}</td>\
                  <td class=\"num\">{}</td><td>{}</td><td class=\"num\">{}</td>\
                  <td class=\"mono\">{}</td></tr>",
                 esc(&r.pattern_hash),
@@ -1955,16 +2065,16 @@ pub fn payloads_list(rows: &[PayloadRow], page: i64, total: i64) -> String {
             );
         }
         body.push_str("</table>");
-        body.push_str(&pager("/ui/payloads?", page, total));
+        body.push_str(&pager(&format!("{prefix}/payloads?"), page, total));
     }
-    layout("Payloads", "/ui/payloads", &body)
+    layout("Payloads", "/payloads", &body, prefix, Some(role))
 }
 
-/// `/ui/payloads/{hash}`: one pattern and its class.
-pub fn payload_detail_page(r: &PayloadRow) -> String {
+/// `{prefix}/payloads/{hash}`: one pattern and its class.
+pub fn payload_detail_page(r: &PayloadRow, role: Role, prefix: &str) -> String {
     let call = r
         .call_id
-        .map(|c| format!("<a href=\"/ui/llm/{c}\">call {c}</a>"))
+        .map(|c| format!("<a href=\"{prefix}/llm/{c}\">call {c}</a>"))
         .unwrap_or_else(|| "—".to_string());
     let mut body = format!(
         "<h1>Pattern {}</h1><p class=\"sub\">{} {}</p>",
@@ -1994,12 +2104,12 @@ pub fn payload_detail_page(r: &PayloadRow) -> String {
         esc(&fmt_ts_s(r.first_seen_s)),
         esc(&fmt_ts_s(r.last_seen_s)),
     );
-    layout("Payloads", "/ui/payloads", &body)
+    layout("Payloads", "/payloads", &body, prefix, Some(role))
 }
 
-/// `/ui/model`: version, mode, thresholds, manifest, shadow report.
-pub fn model_page(m: &ModelView) -> String {
-    let mut body = String::from("<h1>Model</h1><dl class=\"kv\">");
+/// `{prefix}/model`: version, mode, thresholds, manifest, shadow report.
+pub fn model_page(m: &ModelView, role: Role, prefix: &str) -> String {
+    let mut body = String::from("<h1>Windside model</h1><dl class=\"kv\">");
     let _ = write!(
         body,
         "<dt>Windside mode</dt><dd>{}</dd>\
@@ -2044,7 +2154,7 @@ pub fn model_page(m: &ModelView) -> String {
             let _ = write!(
                 body,
                 "<dl class=\"kv\"><dt>Since</dt><dd class=\"mono\">{}</dd>\
-                 <dt>Model</dt><dd>{}</dd>\
+                 <dt>Windside model</dt><dd>{}</dd>\
                  <dt>Agreement</dt><dd class=\"mono\">{} of {}</dd>\
                  <dt>Above without block</dt><dd class=\"mono\">{}</dd>\
                  <dt>Below with block</dt><dd class=\"mono\">{}</dd>\
@@ -2090,12 +2200,12 @@ pub fn model_page(m: &ModelView) -> String {
                 body.push_str("</table>");
             }
             if !r.disagreements.is_empty() {
-                body.push_str("<h2>Disagreements</h2><table><tr><th>Actor</th><th>Surface</th><th>Score</th><th></th><th>Rule</th></tr>");
+                body.push_str("<h2>Disagreements</h2><table><tr><th>Actor</th><th>Surface</th><th>Windside score</th><th></th><th>Rule</th></tr>");
                 for d in &r.disagreements {
                     let _ = write!(
                         body,
                         "<tr><td>{}</td><td>{}</td><td class=\"num\">{:.4}</td><td>{}</td><td>{}</td></tr>",
-                        actor_link(&d.scope_id),
+                        actor_link(prefix, &d.scope_id),
                         mono(opt(&d.surface)),
                         d.score,
                         if d.above_without_block { "above, no block" } else { "below, blocked" },
@@ -2113,11 +2223,11 @@ pub fn model_page(m: &ModelView) -> String {
             }
         }
     }
-    layout("Model", "/ui/model", &body)
+    layout("Windside model", "/model", &body, prefix, Some(role))
 }
 
-/// `/ui/features`: the feature names in order, with descriptions.
-pub fn features_page(table: &[(String, String)]) -> String {
+/// `{prefix}/features`: the feature names in order, with descriptions.
+pub fn features_page(table: &[(String, String)], role: Role, prefix: &str) -> String {
     let mut body = String::from(
         "<h1>Features</h1><p class=\"sub\">v2 vector, in stored order, from the code's table.</p>",
     );
@@ -2132,11 +2242,17 @@ pub fn features_page(table: &[(String, String)]) -> String {
         );
     }
     body.push_str("</table>");
-    layout("Features", "/ui/features", &body)
+    layout("Features", "/features", &body, prefix, Some(role))
 }
 
-/// `/ui/`: health, counts, today's LLM usage, the newest events.
-pub fn dashboard(health: &serde_json::Value, d: &super::queries::Dashboard, now_s: i64) -> String {
+/// `{prefix}/`: health, counts, today's LLM usage, the newest events.
+pub fn dashboard(
+    health: &serde_json::Value,
+    d: &super::queries::Dashboard,
+    now_s: i64,
+    role: Role,
+    prefix: &str,
+) -> String {
     let mut body = String::from("<h1>Overview</h1><h2>Health</h2><dl class=\"kv\">");
     if let Some(map) = health.as_object() {
         let mut keys: Vec<&String> = map.keys().collect();
@@ -2173,14 +2289,14 @@ pub fn dashboard(health: &serde_json::Value, d: &super::queries::Dashboard, now_
         );
     }
     body.push_str("</table><h2>Latest turns</h2>");
-    body.push_str(&turn_table(&d.turns));
+    body.push_str(&turn_table(prefix, &d.turns));
     body.push_str("<h2>Latest decisions</h2>");
     body.push_str(&decision_table(&d.decisions, now_s));
     body.push_str("<h2>Latest proposals</h2>");
     body.push_str(&label_table(&d.proposals));
     body.push_str("<h2>Latest labels</h2>");
     body.push_str(&label_table(&d.labels));
-    layout("Overview", "/ui/", &body)
+    layout("Overview", "/", &body, prefix, Some(role))
 }
 
 #[cfg(test)]
