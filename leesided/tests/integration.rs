@@ -909,14 +909,14 @@ async fn api_v1_review_decide_and_block() {
         .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["total"], 1);
-    // Attack writes the label and the block together.
+    // Confirm writes the label and the block together.
     let decide = |scope: &str, id: &str| format!("/windside/api/v1/review/{scope}/{id}/decision");
     let (st, v) = h
         .ui_json(
             "POST",
             &decide("actor", "abcdef0123456789"),
             Some(&admin),
-            Some(&json!({"decision": "attack", "window_end_ts": ts_us})),
+            Some(&json!({"decision": "confirm", "window_end_ts": ts_us})),
         )
         .await;
     assert_eq!(st, 200, "{v}");
@@ -948,13 +948,13 @@ async fn api_v1_review_decide_and_block() {
         .unwrap();
     assert_eq!(block.0, "block");
     assert_eq!(block.2, "operator");
-    // Unsure writes the label alone; stale windows conflict.
+    // Unknown writes the label alone; stale windows conflict.
     let (st, v) = h
         .ui_json(
             "POST",
             &decide("actor", "abcdef0123456789"),
             Some(&admin),
-            Some(&json!({"decision": "unsure", "window_end_ts": ts_us})),
+            Some(&json!({"decision": "unknown", "window_end_ts": ts_us})),
         )
         .await;
     assert_eq!(st, 200, "{v}");
@@ -965,7 +965,7 @@ async fn api_v1_review_decide_and_block() {
             "POST",
             &decide("actor", "abcdef0123456789"),
             Some(&admin),
-            Some(&json!({"decision": "fine", "window_end_ts": ts_us - 1})),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us - 1})),
         )
         .await;
     assert_eq!(st, 409);
@@ -975,7 +975,7 @@ async fn api_v1_review_decide_and_block() {
             "POST",
             &decide("cluster", "c9"),
             Some(&admin),
-            Some(&json!({"decision": "attack", "window_end_ts": ts_us})),
+            Some(&json!({"decision": "confirm", "window_end_ts": ts_us})),
         )
         .await;
     assert_eq!(st, 200, "{v}");

@@ -4468,6 +4468,7 @@ impl<'a> Ctx<'a> {
                     "id": d.scope_id,
                     "operator": d.operator_label,
                     "proposal": d.proposal,
+                    "proposal_confidence": d.proposal_confidence,
                     "agreed": d.agreed,
                     "at": d.operator_ts,
                 })
@@ -4890,6 +4891,11 @@ impl<'a> Ctx<'a> {
         let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
         for s in &signals {
+            // Failed claims keep their turn links on the signal row,
+            // but only surviving signals mark the table rows cited.
+            if failed.contains(&s.name) {
+                continue;
+            }
             for rowid in &s.rowids {
                 cited_by.entry(*rowid).or_default().push(s.name.clone());
             }
@@ -5151,6 +5157,11 @@ impl<'a> Ctx<'a> {
         let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
         for s in &signals {
+            // Failed claims keep their turn links on the signal row,
+            // but only surviving signals mark the table rows cited.
+            if failed.contains(&s.name) {
+                continue;
+            }
             for rowid in &s.rowids {
                 cited_by.entry(*rowid).or_default().push(s.name.clone());
             }
@@ -5283,10 +5294,15 @@ impl<'a> Ctx<'a> {
         limit: i64,
     ) -> Result<serde_json::Value, QueryError> {
         let canonical = self.actor_ids(id)?[0].clone();
-        let (signals, _) = self.cited_signals("actor", &canonical)?;
+        let (signals, failed) = self.cited_signals("actor", &canonical)?;
         let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
             std::collections::HashMap::new();
         for s in &signals {
+            // Failed claims keep their turn links on the signal row,
+            // but only surviving signals mark the table rows cited.
+            if failed.contains(&s.name) {
+                continue;
+            }
             for rowid in &s.rowids {
                 cited_by.entry(*rowid).or_default().push(s.name.clone());
             }
@@ -5842,6 +5858,14 @@ mod tests {
         assert_eq!(q["items"][6]["why"], "score");
         assert_eq!(q["decided"]["total"], 3);
         assert_eq!(q["decided"]["agreed"], 2);
+        let mut confs: Vec<f64> = q["decided"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["proposal_confidence"].as_f64().unwrap())
+            .collect();
+        confs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(confs, vec![0.7, 0.8, 0.8]);
     }
 
     #[test]
@@ -5889,10 +5913,16 @@ mod tests {
         assert_eq!(v["evidence"]["cited"].as_array().unwrap().len(), 3);
         assert_eq!(v["evidence"]["cluster_size"], 2);
         // Newest first; t5 is newest, t2 shows its folded path and flag.
-        // t5 is cited by the failed claim, t4 by the surviving one.
+        // t5's only claim failed, so it stays unmarked; t4 is surviving-cited.
         assert_eq!(v["evidence"]["turns"][0]["trace"], "t5");
-        assert_eq!(v["evidence"]["turns"][0]["cited"], true);
-        assert_eq!(v["evidence"]["turns"][0]["signals"][0], "machine_cadence");
+        assert_eq!(v["evidence"]["turns"][0]["cited"], false);
+        assert_eq!(
+            v["evidence"]["turns"][0]["signals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         assert_eq!(v["evidence"]["turns"][1]["cited"], true);
         assert_eq!(v["evidence"]["turns"][1]["signals"][0], "scanner_paths");
         assert_eq!(v["evidence"]["turns"][3]["route"], "/[id]");

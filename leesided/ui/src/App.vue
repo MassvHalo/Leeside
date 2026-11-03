@@ -6,16 +6,16 @@
     </header>
     <aside class="sidebar" aria-label="Console">
       <label class="jump"><input ref="jumpInput" v-model="jump" type="text" placeholder="Jump to actor id" aria-label="Jump to an actor by id prefix" @keydown.enter="doJump"><kbd>/</kbd></label>
-      <nav class="nav" aria-label="Sections">
-        <a class="nav-link is-current" href="#" aria-current="page"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 6.6 L7 2.4 L12 6.6 V12 H8.6 V8.8 H5.4 V12 H2 Z" fill="none"></path></svg><span class="nav-label">Dashboard</span></a>
+      <nav class="nav" aria-label="Sections" @click="navClick">
+        <a class="nav-link" :class="{ 'is-current': route.group === 'dashboard' }" href="#/" :aria-current="route.group === 'dashboard' ? 'page' : null"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 6.6 L7 2.4 L12 6.6 V12 H8.6 V8.8 H5.4 V12 H2 Z" fill="none"></path></svg><span class="nav-label">Dashboard</span></a>
         <div class="nav-section">Daily</div>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.8" y="1.8" width="10.4" height="10.4" rx="2.4" fill="none"></rect><path d="M4.4 7.2 L6.3 9.1 L9.8 5.2" fill="none"></path></svg><span class="nav-label">Review</span><span v-if="pending > 0" class="count-pill" data-field="review.pending">{{ pending }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Queue</a><a class="nav-link nav-child" href="#">Decided</a></details>
+        <details class="nav-group" :open="route.group === 'review' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'review' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.8" y="1.8" width="10.4" height="10.4" rx="2.4" fill="none"></rect><path d="M4.4 7.2 L6.3 9.1 L9.8 5.2" fill="none"></path></svg><span class="nav-label">Review</span><span v-if="pending > 0" class="count-pill" data-field="review.pending">{{ pending }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-queue' }" href="#/review" :aria-current="route.name === 'review-queue' ? 'page' : null">Queue</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-decided' }" href="#/review/decided" :aria-current="route.name === 'review-decided' ? 'page' : null">Decided</a></details>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7 H3.6 L5.2 3 L8 11 L9.8 7 H13" fill="none"></path></svg><span class="nav-label">Traffic</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Actors</a><a class="nav-link nav-child" href="#">Clusters</a><a class="nav-link nav-child" href="#">Live</a></details>
         <div class="nav-section">Control</div>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 L12 3 V7 C12 10 9.8 11.9 7 12.8 C4.2 11.9 2 10 2 7 V3 Z" fill="none"></path></svg><span class="nav-label">Protection</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Rules</a><a class="nav-link nav-child" href="#">Drafts</a><a class="nav-link nav-child" href="#">Decisions</a><a class="nav-link nav-child" href="#">Mode</a></details>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none"></circle><circle cx="7" cy="7" r="2.2" fill="none"></circle></svg><span class="nav-label">Intelligence</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Model</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">Evals</a><a class="nav-link nav-child" href="#">Fingerprints</a></details>
-        <div class="nav-section">System</div>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">App</a><a class="nav-link nav-child" href="#">Surfaces</a><a class="nav-link nav-child" href="#">Redaction</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">GeoIP</a><a class="nav-link nav-child" href="#">Access</a></details>
+        <template v-if="role !== 'viewer'"><div class="nav-section">System</div>
+        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">App</a><a class="nav-link nav-child" href="#">Surfaces</a><a class="nav-link nav-child" href="#">Redaction</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">GeoIP</a><a class="nav-link nav-child" href="#">Access</a></details></template>
       </nav>
       <div class="sidebar-foot">
         <button type="button" class="app-switch" aria-haspopup="menu"><span data-field="app.host">{{ host }}</span><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 L5 6.5 L8 3.5"></path></svg></button>
@@ -26,6 +26,7 @@
     <main class="content">
       <div v-if="disconnected" class="banner" role="status">Can't reach leesided. <template v-if="lastSeen !== null">This is what it last reported at <time class="time" data-field="app.last_seen">{{ fmtClock(lastSeen) }}</time>. </template>Retrying.</div>
       <div :class="disconnected ? 'content-dimmed' : ''">
+      <template v-if="route.group === 'dashboard'">
       <div class="hero">
         <header class="hero-text">
           <p class="crumb">Windside <span aria-hidden="true">&rsaquo;</span> <b>Dashboard</b></p>
@@ -33,7 +34,7 @@
           <h1 v-else-if="summary.attacks === 0" class="headline">Watching.</h1>
           <h1 v-else class="headline"><span class="headline-dim"><span data-field="summary.attacks">{{ fmtInt(summary.attacks) }}</span> attacks in <span data-field="summary.window">{{ summary.window }}</span>.</span> <span class="headline-rest"><span data-field="summary.stopped">{{ fmtInt(summary.stopped) }}</span> {{ stoppedWord }}.</span><span v-if="showTail" class="headline-tail">In shadow, Windside would have stopped <span data-field="summary.would_have_stopped">{{ fmtInt(summary.would_have_stopped) }}</span> more.</span></h1>
           <div v-if="summary" class="subline-row"><span class="mode-chip" :data-mode="summary.mode"><span data-field="summary.mode">{{ summary.mode }}</span> mode</span><p v-if="summary.attacks === 0" class="subline"><span data-field="summary.requests">{{ fmtInt(summary.requests) }}</span> requests seen<template v-if="summary.fingerprinted !== null">, <span data-field="summary.fingerprinted">{{ summary.fingerprinted }}%</span> fingerprinted</template>, nothing hostile yet</p><p v-else class="subline"><span data-field="summary.waiting">{{ fmtInt(summary.waiting) }}</span> waiting on you.</p></div>
-          <div v-if="summary && summary.attacks > 0" class="cta-row"><a v-if="summary.waiting > 0" class="cta cta-primary" :href="`${consolePrefix}/ui/review`">Review what's waiting</a><a class="cta cta-ghost" :href="`${consolePrefix}/ui/traffic`">See all traffic</a></div>
+          <div v-if="summary && summary.attacks > 0" class="cta-row"><a v-if="summary.waiting > 0" class="cta cta-primary" href="#/review">Review what's waiting</a><a class="cta cta-ghost" :href="`${consolePrefix}/ui/traffic`">See all traffic</a></div>
         </header>
         <div class="hero-card">
           <div class="hero-card-head"><span class="card-label">Traffic</span><div class="window-toggle" role="group" aria-label="Time window"><button v-for="w in windows" :key="w" type="button" :data-window="w" :aria-pressed="String(win === w)" @click="setWindow(w)">{{ windowLabel(w) }}</button></div></div>
@@ -69,6 +70,24 @@
         <a class="tile" :href="`${consolePrefix}/ui/rules`"><span class="tile-label">How your rules are doing</span><span class="tile-line"><span data-field="tiles.rules.active">{{ fmtInt(summary.tiles.rules.active) }}</span><span class="tile-of">active</span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.rules.active, summary.tiles.rules.active + summary.tiles.rules.ready)}`"></span></span><span class="tile-caption"><span data-field="tiles.rules.ready">{{ fmtInt(summary.tiles.rules.ready) }}</span> ready to turn on</span><span class="tile-more">See your rules<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
         <a class="tile" :href="`${consolePrefix}/ui/model`"><span class="tile-label">Can you trust the detection</span><span class="tile-line"><span data-field="tiles.reviews.agreed">{{ fmtInt(summary.tiles.reviews.agreed) }}</span><span class="tile-of">/ <span data-field="tiles.reviews.total">{{ fmtInt(summary.tiles.reviews.total) }}</span></span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.reviews.agreed, summary.tiles.reviews.total)}`"></span></span><span class="tile-caption">agreed with the proposal</span><span class="tile-more">See how it decides<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
       </section>
+      </template>
+      <ReviewPanel
+        v-else
+        :queue="review ? review.items : null"
+        :queue-total="review ? review.total : 0"
+        :queue-disagree="review ? review.disagree : 0"
+        :decided="review ? review.decided : emptyDecided"
+        :item="reviewItem"
+        :item-loading="reviewItemLoading"
+        :tab="route.name === 'review-decided' ? 'decided' : 'queue'"
+        :selected-key="reviewSelectionKey"
+        :can-decide="canDecide"
+        :disconnected="disconnected"
+        :console-prefix="consolePrefix"
+        @select="reviewSelect"
+        @next="reviewNext"
+        @decide="reviewDecide"
+      />
       </div>
     </main>
   </div>
@@ -77,8 +96,31 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import EpisodePanel from './EpisodePanel.vue'
+import ReviewPanel from './ReviewPanel.vue'
 import { fmtClock, fmtInt } from './fmt.js'
-import { getEpisodes, getSummary, getTraffic, postDecision, prefix } from './api.js'
+import {
+  getEpisodes,
+  getReview,
+  getReviewItem,
+  getSummary,
+  getTraffic,
+  postDecision,
+  postReviewDecision,
+  prefix,
+} from './api.js'
+
+// Hash routes: '' or '#/' dashboard, '#/review' queue, '#/review/decided',
+// '#/review/{actor|cluster}/{id}' queue with a selected item. Unknown hashes
+// fall back to the dashboard; turn anchors use replaceState, never routing.
+function parseHash() {
+  const h = window.location.hash.replace(/^#/, '')
+  if (h === '' || h === '/') return { group: 'dashboard', name: 'dashboard', scope: null, id: null }
+  if (h === '/review') return { group: 'review', name: 'review-queue', scope: null, id: null }
+  if (h === '/review/decided') return { group: 'review', name: 'review-decided', scope: null, id: null }
+  const m = h.match(/^\/review\/(actor|cluster)\/(.+)$/)
+  if (m) return { group: 'review', name: 'review-queue', scope: m[1], id: decodeURIComponent(m[2]) }
+  return { group: 'dashboard', name: 'dashboard', scope: null, id: null }
+}
 
 const windows = ['24h', '7d', '30d']
 const bucketsFor = { '24h': '1h', '7d': '12h', '30d': '1d' }
@@ -100,6 +142,26 @@ const nowS = ref(Math.floor(Date.now() / 1000))
 const jump = ref('')
 const jumpInput = ref(null)
 let retryTimer = null
+
+const route = ref(parseHash())
+const review = ref(null)
+const reviewItem = ref(null)
+const reviewItemLoading = ref(false)
+const emptyDecided = { total: 0, agreed: 0, items: [] }
+
+// Selection is the route's item, else the first queue row. Plain #/review
+// shows the first item without rewriting the URL.
+const reviewSelection = computed(() => {
+  if (route.value.scope && route.value.id) return { scope: route.value.scope, id: route.value.id }
+  if (review.value && review.value.items.length > 0) {
+    const first = review.value.items[0]
+    return { scope: first.scope, id: first.id }
+  }
+  return null
+})
+const reviewSelectionKey = computed(() =>
+  reviewSelection.value ? `${reviewSelection.value.scope}:${reviewSelection.value.id}` : null,
+)
 
 const windowSeconds = computed(() => secondsFor[win.value])
 const buckets = computed(() => (traffic.value ? traffic.value.buckets : []))
@@ -145,7 +207,7 @@ function share(part, total) {
   return total > 0 ? (part / total).toFixed(3) : '0.000'
 }
 
-async function load() {
+async function loadDashboard() {
   const w = win.value
   const [s, e, t] = await Promise.all([
     getSummary(w),
@@ -165,6 +227,41 @@ async function load() {
   }
 }
 
+// The Decided tab reads a fixed 7-day window: the design gives the
+// Review page no window toggle.
+async function loadReview() {
+  const [s, r] = await Promise.all([getSummary('24h'), getReview('7d')])
+  summary.value = s
+  review.value = r
+  nowS.value = Math.floor(Date.now() / 1000)
+  disconnected.value = false
+  everLoaded.value = true
+  lastSeen.value = nowS.value
+  stopRetry()
+  await loadReviewItem()
+}
+
+async function loadReviewItem() {
+  const sel = reviewSelection.value
+  if (!sel) {
+    reviewItem.value = null
+    reviewItemLoading.value = false
+    return
+  }
+  if (reviewItem.value && reviewItem.value.scope === sel.scope && reviewItem.value.id === sel.id) return
+  reviewItemLoading.value = true
+  try {
+    reviewItem.value = await getReviewItem(sel.scope, sel.id)
+  } catch (err) {
+    if (err && err.message === 'logged out') return
+    // Unknown ids show the empty detail, not the banner.
+    if (err && err.status === 404) reviewItem.value = null
+    else throw err
+  } finally {
+    reviewItemLoading.value = false
+  }
+}
+
 function onDown() {
   if (disconnected.value) return
   disconnected.value = true
@@ -180,11 +277,37 @@ function stopRetry() {
 
 async function reload() {
   try {
-    await load()
+    if (route.value.group === 'review') await loadReview()
+    else await loadDashboard()
   } catch (err) {
     if (err && err.message === 'logged out') return
     onDown()
   }
+}
+
+function onHashChange() {
+  const prev = route.value
+  const next = parseHash()
+  route.value = next
+  if (next.group !== prev.group) {
+    void reload()
+  } else if (next.group === 'review' && (next.scope !== prev.scope || next.id !== prev.id)) {
+    reloadReviewItem()
+  }
+}
+
+async function reloadReviewItem() {
+  try {
+    await loadReviewItem()
+  } catch (err) {
+    if (err && err.message === 'logged out') return
+    onDown()
+  }
+}
+
+function navClick(ev) {
+  // Sections without a page yet stay dead instead of routing home.
+  if (ev.target && ev.target.closest && ev.target.closest('a[href="#"]')) ev.preventDefault()
 }
 
 async function setWindow(w) {
@@ -224,6 +347,51 @@ async function decide(action) {
   }
 }
 
+function reviewSelect(scope, id) {
+  if (disconnected.value) return
+  window.location.hash = `#/review/${scope}/${encodeURIComponent(id)}`
+}
+
+function reviewNext(dir) {
+  if (disconnected.value || !review.value || review.value.items.length === 0) return
+  const items = review.value.items
+  const step = dir === -1 ? -1 : 1
+  const sel = reviewSelection.value
+  const i = sel ? items.findIndex((q) => q.scope === sel.scope && q.id === sel.id) : -1
+  const at = i < 0 ? 0 : (i + step + items.length) % items.length
+  window.location.hash = `#/review/${items[at].scope}/${encodeURIComponent(items[at].id)}`
+}
+
+async function reviewDecide(action) {
+  const item = reviewItem.value
+  if (!item || !canDecide.value || !item.window || item.window.window_end_ts === null) return
+  const nextKey = item.queue.next ? `${item.queue.next.scope}:${item.queue.next.id}` : null
+  try {
+    await postReviewDecision(item.scope, item.id, action, item.window.window_end_ts)
+    reviewItem.value = null
+    const [s, r] = await Promise.all([getSummary('24h'), getReview('7d')])
+    summary.value = s
+    review.value = r
+    const still = nextKey && r.items.some((q) => `${q.scope}:${q.id}` === nextKey)
+    if (still) {
+      const [scope, ...rest] = nextKey.split(':')
+      window.location.hash = `#/review/${scope}/${encodeURIComponent(rest.join(':'))}`
+    } else if (r.items.length > 0) {
+      window.location.hash = `#/review/${r.items[0].scope}/${encodeURIComponent(r.items[0].id)}`
+    } else {
+      window.location.hash = '#/review'
+      await loadReviewItem()
+    }
+  } catch (err) {
+    if (err && err.message === 'logged out') return
+    if (err && err.status === 409) {
+      await reload()
+      return
+    }
+    onDown()
+  }
+}
+
 function doJump() {
   const id = jump.value.trim()
   if (id) window.location.assign(`${consolePrefix}/ui/actors/${encodeURIComponent(id)}`)
@@ -238,6 +406,15 @@ function onKey(ev) {
     return
   }
   if (disconnected.value) return
+  if (route.value.group === 'review') {
+    if (route.value.name !== 'review-queue') return
+    if (ev.key === 'j') reviewNext(1)
+    else if (ev.key === 'k') reviewNext(-1)
+    else if (ev.key === '1') void reviewDecide('confirm')
+    else if (ev.key === '2') void reviewDecide('benign')
+    else if (ev.key === '3') void reviewDecide('unknown')
+    return
+  }
   if (ev.key === 'j') next(1)
   else if (ev.key === 'k') next(-1)
   else if (ev.key === '1') void decide('confirm')
@@ -247,11 +424,13 @@ function onKey(ev) {
 
 onMounted(() => {
   window.addEventListener('keydown', onKey)
+  window.addEventListener('hashchange', onHashChange)
   void reload()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('hashchange', onHashChange)
   stopRetry()
 })
 </script>

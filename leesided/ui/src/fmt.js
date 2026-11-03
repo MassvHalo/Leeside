@@ -11,6 +11,25 @@ export function fmtClock(ts) {
   return `${h}:${m}`
 }
 
+export function fmtTime(ts) {
+  const d = new Date(ts * 1000)
+  const h = String(d.getHours()).padStart(2, '0')
+  const m = String(d.getMinutes()).padStart(2, '0')
+  const s = String(d.getSeconds()).padStart(2, '0')
+  return `${h}:${m}:${s}`
+}
+
+export function fmtMillis(tsUs) {
+  const d = new Date(Math.floor(tsUs / 1000))
+  const h = String(d.getHours()).padStart(2, '0')
+  const m = String(d.getMinutes()).padStart(2, '0')
+  const s = String(d.getSeconds()).padStart(2, '0')
+  const ms = String(Math.floor(tsUs / 1000) % 1000).padStart(3, '0')
+  return `${h}:${m}:${s}.${ms}`
+}
+
+export const fmtConf = (n) => Number(n).toFixed(2)
+
 // "08:00 to now", "Through the day", "HH:MM to HH:MM", or one
 // clock time when the whole span falls inside a minute. Half the
 // window and up reads as the day; clock pairs past midnight would

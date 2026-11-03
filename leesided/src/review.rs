@@ -411,6 +411,7 @@ pub struct DecidedRow {
     pub operator_label: String,
     pub operator_ts: i64,
     pub proposal: Option<String>,
+    pub proposal_confidence: Option<f64>,
     pub agreed: bool,
 }
 
@@ -436,22 +437,25 @@ pub fn decided_list(conn: &Connection, since_s: i64) -> Result<Vec<DecidedRow>, 
         .collect();
     let mut out = Vec::with_capacity(ops.len());
     for (scope, scope_id, operator_label, operator_ts) in ops {
-        let proposal: Option<String> = conn
+        let proposal: Option<(String, f64)> = conn
             .query_row(
-                "SELECT label FROM labels \
+                "SELECT label, confidence FROM labels \
                  WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' AND created_at <= ?3 \
                  ORDER BY created_at DESC, id DESC LIMIT 1",
                 params![scope, scope_id, operator_ts],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok();
-        let agreed = proposal.as_deref() == Some(operator_label.as_str());
+        let agreed = proposal
+            .as_ref()
+            .is_some_and(|(label, _)| label == &operator_label);
         out.push(DecidedRow {
             scope,
             scope_id,
             operator_label,
             operator_ts,
-            proposal,
+            proposal: proposal.as_ref().map(|(label, _)| label.clone()),
+            proposal_confidence: proposal.map(|(_, confidence)| confidence),
             agreed,
         });
     }
@@ -710,16 +714,16 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE labels (id INTEGER PRIMARY KEY, scope TEXT, scope_id TEXT, \
-             label TEXT, source TEXT, created_at INTEGER); \
-             INSERT INTO labels (scope, scope_id, label, source, created_at) VALUES \
-             ('actor', 'a1', 'malicious', 'llm_proposed', 100), \
-             ('actor', 'a1', 'malicious', 'operator', 200), \
-             ('actor', 'a2', 'unknown', 'llm_proposed', 100), \
-             ('actor', 'a2', 'unknown', 'operator', 210), \
-             ('actor', 'a3', 'malicious', 'llm_proposed', 100), \
-             ('actor', 'a3', 'benign', 'operator', 220), \
-             ('actor', 'a4', 'benign', 'operator', 230), \
-             ('actor', 'a5', 'malicious', 'operator', 10);",
+             label TEXT, source TEXT, confidence REAL, created_at INTEGER); \
+             INSERT INTO labels (scope, scope_id, label, source, confidence, created_at) VALUES \
+             ('actor', 'a1', 'malicious', 'llm_proposed', 0.9, 100), \
+             ('actor', 'a1', 'malicious', 'operator', 1.0, 200), \
+             ('actor', 'a2', 'unknown', 'llm_proposed', 0.4, 100), \
+             ('actor', 'a2', 'unknown', 'operator', 1.0, 210), \
+             ('actor', 'a3', 'malicious', 'llm_proposed', 0.8, 100), \
+             ('actor', 'a3', 'benign', 'operator', 1.0, 220), \
+             ('actor', 'a4', 'benign', 'operator', 1.0, 230), \
+             ('actor', 'a5', 'malicious', 'operator', 1.0, 10);",
         )
         .unwrap();
         let rows = decided_list(&conn, 100).unwrap();
@@ -730,6 +734,7 @@ mod tests {
         assert!(!rows[0].agreed);
         assert_eq!(rows[1].scope_id, "a3");
         assert_eq!(rows[1].proposal.as_deref(), Some("malicious"));
+        assert_eq!(rows[1].proposal_confidence, Some(0.8));
         assert!(!rows[1].agreed);
         assert_eq!(rows[2].scope_id, "a2");
         assert!(rows[2].agreed);

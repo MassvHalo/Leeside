@@ -29,3 +29,10 @@ export const getEpisodes = (window) => call(`/episodes?window=${window}`)
 export const getTraffic = (window, bucket) => call(`/traffic?window=${window}&bucket=${bucket}`)
 export const postDecision = (id, decision, window_end_ts) =>
   call(`/episodes/${id}/decision`, { method: 'POST', body: { decision, window_end_ts } })
+export const getReview = (window) => call(`/review?window=${window}`)
+export const getReviewItem = (scope, id) => call(`/review/${scope}/${encodeURIComponent(id)}`)
+export const postReviewDecision = (scope, id, decision, window_end_ts) =>
+  call(`/review/${scope}/${encodeURIComponent(id)}/decision`, {
+    method: 'POST',
+    body: { decision, window_end_ts },
+  })

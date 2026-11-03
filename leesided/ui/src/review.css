@@ -1,0 +1,135 @@
+/* Review page rules from docs/design/windside-review-actor.html, verbatim.
+ * Imported BEFORE dashboard.css: these are base-layer rules and the
+ * review-only HaloWiFi overrides, in handoff order. dashboard.css
+ * carries the shared overrides (cards, pills, tracked labels), which
+ * apply on top exactly as in the handoff. Actor panel rules land
+ * with the actor page. */
+
+/* ---------- Tokens added for these pages ---------- */
+:root {
+  --hostile-band: rgba(255, 127, 92, 0.1);
+  --size-section: 13px;
+  --panel-gap: var(--space-5);
+}
+
+/* ---------- Links and small parts ---------- */
+.is-malicious { color: var(--hostile); }
+.count-link { color: inherit; text-decoration: underline; text-decoration-color: var(--line-strong); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.count-link:hover { text-decoration-color: var(--text); }
+.copy { padding: 0 var(--space-2); height: 20px; border: 1px solid var(--line); border-radius: var(--radius-2); font-size: var(--size-mono-small); line-height: 18px; color: var(--text-3); }
+.copy:hover { color: var(--text); border-color: var(--line-strong); }
+.inline-more { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.inline-more:hover { color: var(--text); }
+.section-label { font-size: var(--size-label); font-weight: var(--weight-regular); line-height: 15px; color: var(--text-3); }
+.mono-cell { font-family: var(--font-mono); font-size: var(--size-mono-small); }
+
+/* ---------- Page head with tabs ---------- */
+.page-head-tabs { align-items: flex-end; flex-wrap: wrap; }
+.page-head-tabs .page-head-text { flex: 1 1 560px; }
+.crumb { font-size: var(--size-small); line-height: 17px; color: var(--text-2); }
+.crumb:hover { color: var(--text); }
+
+.tabs { flex: none; display: flex; align-items: center; height: 32px; padding: 2px; border: 1px solid var(--line-strong); border-radius: var(--radius-3); }
+.tab { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: var(--radius-2); font-size: var(--size-small); color: var(--text-2); }
+.tab:hover { color: var(--text); }
+.tab[aria-current="page"] { background: var(--selected); color: var(--text); }
+.tab-count { font: var(--weight-regular) var(--size-mono-small)/15px var(--font-mono); color: var(--text-3); }
+
+/* ---------- Queue ---------- */
+.queue { display: flex; flex-direction: column; padding: var(--space-2) 0; background: var(--surface-1); }
+.queue-item { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; column-gap: 10px; width: 100%; padding: 10px var(--space-4); }
+.queue-item:hover { background: var(--surface-2); }
+.queue-item[aria-current="true"] { background: var(--selected); }
+.queue-order { font: var(--weight-regular) var(--size-mono-small)/19px var(--font-mono); color: var(--text-3); }
+.queue-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.queue-why { line-height: 19px; }
+.queue-subject { font-size: var(--size-label); line-height: 15px; color: var(--text-3); overflow-wrap: anywhere; }
+.queue-disagree { font-size: var(--size-label); line-height: 15px; color: var(--hostile); }
+.queue-label { font: var(--weight-regular) var(--size-mono-small)/19px var(--font-mono); color: var(--text-2); white-space: nowrap; }
+.queue-label.is-malicious { color: var(--hostile); }
+.queue-none { padding-top: var(--space-3); }
+
+/* ---------- Proposal detail ---------- */
+.review-detail { gap: var(--space-5); }
+.subject-id { color: var(--text); font-size: var(--size-mono); }
+.verdicts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: var(--space-5); padding-top: var(--space-3); border-top: 1px solid var(--line-strong); }
+.verdict { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.verdict-value { font: var(--weight-light) var(--size-tile)/26px var(--font-sans); }
+.verdict-text { font-size: var(--size-lead); line-height: 26px; }
+.verdict-note { font-size: var(--size-small); line-height: 17px; color: var(--text-2); }
+.signals { display: flex; flex-direction: column; gap: var(--space-2); }
+.signal-list { display: flex; flex-direction: column; }
+.signal-row { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; column-gap: var(--space-3); align-items: baseline; padding: 7px 0; border-top: 1px solid var(--line); }
+.signal-mark { font: var(--weight-regular) var(--size-mono-small)/19px var(--font-mono); color: var(--text-2); }
+.signal-mark[data-passed="false"] { color: var(--hostile); }
+.signal-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.signal-name { font: var(--weight-regular) var(--size-mono)/19px var(--font-mono); }
+.signal-row.is-failed .signal-name { color: var(--text-3); text-decoration: line-through; }
+.signal-reason { font-size: var(--size-small); line-height: 17px; color: var(--text-2); }
+.signal-turns { display: flex; align-items: baseline; gap: var(--space-1); font: var(--weight-regular) var(--size-mono-small)/19px var(--font-mono); color: var(--text-3); }
+.signal-row.is-failed .signal-turns { color: var(--text-3); }
+.signal-window { font-family: var(--font-sans); font-size: var(--size-label); }
+.turn-link { min-width: 18px; padding: 0 var(--space-1); border: 1px solid var(--line-strong); border-radius: var(--radius-1); line-height: 17px; text-align: center; color: var(--text-2); }
+.turn-link:hover { color: var(--text); border-color: var(--text-3); }
+.reason { display: flex; flex-direction: column; gap: var(--space-2); }
+.decision-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); padding: var(--space-3) 0; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line-strong); }
+/* Doubled class: this file loads before dashboard.css, whose .decisions
+ * sets the column direction later at equal specificity. The handoff's
+ * own order puts this rule after; the extra class restores that win
+ * with the identical declaration. */
+.decisions.decisions-row { flex-direction: row; margin-top: 0; }
+.decisions-row .decision { min-width: 136px; }
+.review-turns { display: flex; flex-direction: column; gap: var(--space-2); }
+
+/* ---------- Dense table ---------- */
+.table-wrap { overflow-x: auto; min-width: 0; }
+.dense-table { width: 100%; border-collapse: collapse; }
+.dense-table th { padding: 0 var(--space-3) 6px 0; border-bottom: 1px solid var(--line-strong); font-size: var(--size-label); font-weight: var(--weight-regular); line-height: 15px; text-align: left; color: var(--text-3); white-space: nowrap; }
+.dense-table td { padding: 4px var(--space-3) 4px 0; border-bottom: 1px solid var(--line); font-size: var(--size-small); line-height: 17px; white-space: nowrap; }
+.dense-table tbody tr:hover td { background: var(--surface-1); }
+.turn-row.is-cited td { background: var(--hostile-band); }
+.turn-row.is-cited:hover td { background: var(--hostile-band); }
+.turn-row:target td { box-shadow: inset 0 1px 0 var(--text-3), inset 0 -1px 0 var(--text-3); }
+.turn-index { font: var(--weight-regular) var(--size-mono-small)/17px var(--font-mono); color: var(--text-3); }
+.turn-status { font-family: var(--font-mono); font-size: var(--size-mono-small); }
+.turn-flags { color: var(--text-2); }
+.turn-cited { font-size: var(--size-label); color: var(--hostile); }
+.dense-table a.time:hover { color: var(--text); }
+.agreement { font-size: var(--size-small); color: var(--text-2); }
+.agreement[data-agreed="false"] { color: var(--hostile); }
+.filter-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.filter-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-3); font-size: var(--size-small); color: var(--text-2); white-space: nowrap; }
+.filter-chip:hover { color: var(--text); background: var(--surface-2); }
+.filter-chip[aria-pressed="true"] { background: var(--selected); color: var(--text); }
+
+/* Structural panel rules for the Decided tab (the actor panels follow). */
+.panel { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-5); min-width: 0; border-bottom: 1px solid var(--line); }
+.panel:nth-child(odd):not(.panel-wide) { border-right: 1px solid var(--line); }
+.panel-wide { grid-column: 1 / -1; }
+.panel-flat { border-top: 1px solid var(--line); }
+
+/* ---------- Loading ---------- */
+.skeleton { display: block; border-radius: var(--radius-1); background: var(--surface-2); animation: skeleton-pulse 1.6s ease-in-out infinite; }
+.skeleton-title { height: 30px; width: 60%; margin: var(--space-1) 0; }
+.skeleton-line { height: 12px; width: 100%; }
+.skeleton-short { width: 45%; }
+.skeleton-list { gap: var(--space-1); }
+.skeleton-item { display: flex; flex-direction: column; gap: var(--space-2); padding: 12px var(--space-4); }
+.skeleton-row { padding: var(--space-3) 0; border-top: 1px solid var(--line); }
+@keyframes skeleton-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+
+/* HaloWiFi-layer review rules (the shared ones live in dashboard.css). */
+.copy { border-radius: var(--radius-pill); padding: 0 10px; }
+
+.decision-bar { border: 0; padding: 0; }
+
+/* ---------- Review ---------- */
+.queue-why { font-size: 13.5px; }
+.verdicts { gap: var(--space-2); column-gap: var(--space-2); padding: 0; border: 0; }
+.verdict { padding: 14px; background: var(--card-raised); border-radius: 12px; gap: var(--space-1); }
+.verdict-value { font: var(--weight-headline) 26px/1.15 var(--font-sans); letter-spacing: -0.03em; }
+.verdict-text { font-size: 15px; line-height: 30px; }
+.signal-row { padding: 9px 0; }
+
+.turn-row.is-cited td:first-child { border-radius: 4px 0 0 4px; }

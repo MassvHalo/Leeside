@@ -379,8 +379,11 @@ pub struct ReviewBody {
     window_end_ts: Option<i64>,
 }
 
-/// Decide a review item: `attack` writes the operator label and the
-/// block together, `unsure` and `fine` write the label alone. The
+/// Decide a review item, with the design's `data-action` vocabulary:
+/// `confirm` ("It's an attack") writes the malicious label and the
+/// block together, `benign` ("It's fine") and `unknown` ("Not sure")
+/// write the label alone. Unlike the dashboard decision, `confirm`
+/// does not take the proposal's label: it asserts malicious. The
 /// window is freshness-checked like the dashboard decision; a stale
 /// render re-reads and decides again. Clusters take the label only:
 /// blocks are actor-scope, like the inspector's.
@@ -410,10 +413,10 @@ pub async fn api_review_decide(
             "decision and window_end_ts are required",
         );
     };
-    if !matches!(decision.as_str(), "attack" | "unsure" | "fine") {
+    if !matches!(decision.as_str(), "confirm" | "benign" | "unknown") {
         return jerr(
             StatusCode::UNPROCESSABLE_ENTITY,
-            "decision must be attack, unsure or fine",
+            "decision must be confirm, benign or unknown",
         );
     }
     let now = store::now_s();
@@ -444,7 +447,7 @@ pub async fn api_review_decide(
     }
     // Resolve the block key before writing anything: an
     // unparseable id 404s with no label half-written.
-    let key = if decision == "attack" && scope == "actor" {
+    let key = if decision == "confirm" && scope == "actor" {
         match crate::rules::windows::key16(&canonical) {
             Some(k) => Some(k),
             None => return jerr(StatusCode::NOT_FOUND, &format!("no actor {canonical}")),
@@ -453,8 +456,8 @@ pub async fn api_review_decide(
         None
     };
     let label = match decision.as_str() {
-        "attack" => "malicious",
-        "unsure" => "unknown",
+        "confirm" => "malicious",
+        "unknown" => "unknown",
         _ => "benign",
     };
     let scope_static: &'static str = if scope == "actor" { "actor" } else { "cluster" };
