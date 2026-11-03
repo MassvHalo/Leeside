@@ -16,7 +16,6 @@ SAMPLE_DIR="$(dirname "$SCRIPT_DIR")"
 REPO_ROOT="$(dirname "$SAMPLE_DIR")"
 PROD=/var/www/leeside
 DOMAIN=webapp.leeside.halowifi.com
-UI_DOMAIN=leeside.halowifi.com
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -72,19 +71,17 @@ chmod 0640 /etc/leeside/leesided.env
 mkdir -p /var/www/leeside-ui
 chown www-data:www-data /var/www/leeside-ui
 
-for site in "$DOMAIN" "$UI_DOMAIN"; do
-    cp "$SCRIPT_DIR/nginx/$site.conf" /etc/nginx/sites-available/"$site.conf"
-    ln -sf /etc/nginx/sites-available/"$site.conf" /etc/nginx/sites-enabled/"$site.conf"
-done
+# The old leeside.halowifi.com UI site is retired: the console now
+# lives at /windside/ on the app domain, served by the daemon itself.
+cp "$SCRIPT_DIR/nginx/$DOMAIN.conf" /etc/nginx/sites-available/"$DOMAIN.conf"
+ln -sf /etc/nginx/sites-available/"$DOMAIN.conf" /etc/nginx/sites-enabled/"$DOMAIN.conf"
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
 systemctl enable --now nginx
 systemctl reload-or-restart nginx
 
-for site in "$DOMAIN" "$UI_DOMAIN"; do
-    certbot --nginx -d "$site" --redirect --agree-tos --no-eff-email \
-        -m mrinal@halowifi.com -n --deploy-hook 'systemctl reload nginx'
-done
+certbot --nginx -d "$DOMAIN" --redirect --agree-tos --no-eff-email \
+    -m mrinal@halowifi.com -n --deploy-hook 'systemctl reload nginx'
 certbot renew --dry-run
 
 cp "$SCRIPT_DIR/logrotate/leeside" /etc/logrotate.d/leeside
