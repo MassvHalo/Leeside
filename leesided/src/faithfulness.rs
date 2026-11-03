@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 /// matches. exclusions (robots.txt and friends) are documented with
 /// the list.
 const SCANNER_PATHS_JSON: &str = include_str!("../data/scanner-paths.json");
+const PAYLOAD_PATTERNS_JSON: &str = include_str!("../data/payload-patterns.json");
 
 /// The brief's table, in order. `no_assets` is retired: assets are
 /// served by nginx or artisan serve and never reach PHP, so the turns
@@ -25,7 +26,12 @@ const SCANNER_PATHS_JSON: &str = include_str!("../data/scanner-paths.json");
 /// `rejected_actions` joins the live signal enum with the outcomes
 /// round; its check already exists and fails closed until turns carry
 /// `app_outcome`.
-pub const SIGNALS: [&str; 13] = [
+///
+/// The package's UA vocabulary (`UserAgentClass`) has no `browser`:
+/// browsers are chromium, firefox, safari or other_browser. The
+/// checks compare with [`is_browser`], never with the family name.
+pub const SIGNALS: [&str; 14] = [
+    "attack_payload",
     "scanner_paths",
     "high_404_rate",
     "machine_cadence",
@@ -54,6 +60,55 @@ pub fn scanner_paths() -> HashSet<String> {
         .unwrap_or_default()
 }
 
+struct PayloadPattern {
+    class: String,
+    re: regex::Regex,
+}
+
+fn payload_patterns() -> &'static [PayloadPattern] {
+    static ONCE: std::sync::OnceLock<Vec<PayloadPattern>> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let v: Value = serde_json::from_str(PAYLOAD_PATTERNS_JSON).unwrap_or(Value::Null);
+        v.get("patterns")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| {
+                        let class = p.get("class")?.as_str()?;
+                        let pat = p.get("pattern")?.as_str()?;
+                        regex::RegexBuilder::new(pat)
+                            .case_insensitive(true)
+                            .build()
+                            .ok()
+                            .map(|re| PayloadPattern {
+                                class: class.to_string(),
+                                re,
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+/// The attack-payload class of a turn's evidence, if any: the first
+/// matching pattern's class over the sample query, the body slice,
+/// then the path. Only the class leaves this function; no raw values
+/// travel to the model.
+pub fn payload_hint(
+    sample_query: Option<&str>,
+    body_slice: Option<&str>,
+    path: &str,
+) -> Option<String> {
+    let fields = [sample_query, body_slice, Some(path)];
+    for p in payload_patterns() {
+        if fields.iter().flatten().any(|f| p.re.is_match(f)) {
+            return Some(p.class.clone());
+        }
+    }
+    None
+}
+
 pub struct Aux<'a> {
     pub honeytoken_routes: &'a HashSet<String>,
     pub scanner_paths: &'a HashSet<String>,
@@ -71,7 +126,8 @@ pub struct CitedSignal {
 /// `insufficient_data` (it argues for `unknown`, which has no side).
 pub fn side(signal: &str) -> Option<&'static str> {
     match signal {
-        "scanner_paths"
+        "attack_payload"
+        | "scanner_paths"
         | "high_404_rate"
         | "machine_cadence"
         | "ua_inconsistent"
@@ -104,6 +160,24 @@ fn window_num(window: Option<&serde_json::Map<String, Value>>, name: &str) -> Op
 
 fn str_field<'a>(t: &'a Value, name: &str) -> Option<&'a str> {
     t.get(name)?.as_str()
+}
+
+/// Mirror of the package's `UserAgentClass::isBrowser`.
+pub fn is_browser(class: Option<&str>) -> bool {
+    matches!(
+        class,
+        Some("chromium" | "firefox" | "safari" | "other_browser")
+    )
+}
+
+/// A known JA4 class, if any: the envelope writes `unknown` when the
+/// tap saw no handshake, which counts as absent wherever a check says
+/// "or null".
+fn ja4_known(t: &Value) -> Option<&str> {
+    match t.get("ja4_class").and_then(Value::as_str) {
+        None | Some("unknown") => None,
+        known => known,
+    }
 }
 
 fn status(t: &Value) -> Option<i64> {
@@ -187,6 +261,12 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
         }
         let ok = !bad_cite
             && match signal.name.as_str() {
+                "attack_payload" => {
+                    !cited_turns.is_empty()
+                        && cited_turns
+                            .iter()
+                            .any(|t| t.get("payload_hint").and_then(Value::as_str).is_some())
+                }
                 "scanner_paths" => {
                     (distinct_paths(&cited_turns).len() >= 3 && share(&cited_turns, is_404) > 0.5)
                         || cited_turns.iter().any(|t| {
@@ -199,9 +279,9 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
                         || window_num(win, "turns_last_60s").is_some_and(|v| v >= 30.0)
                 }
                 "ua_inconsistent" => cited_turns.iter().any(|t| {
-                    (str_field(t, "ua_class") == Some("browser")
+                    (is_browser(str_field(t, "ua_class"))
                         && flags(t).contains(&"ua_chromium_no_ch"))
-                        || str_field(t, "ja4_class") == Some("library")
+                        || ja4_known(t) == Some("library")
                 }),
                 "credential_stuffing" => distinct_rejected_creds(&cited_turns).len() >= 5,
                 "webhook_forgery" => {
@@ -225,7 +305,7 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
                     !cited_turns.is_empty()
                         && cited_turns
                             .iter()
-                            .all(|t| str_field(t, "ua_class") == Some("browser"))
+                            .all(|t| is_browser(str_field(t, "ua_class")))
                         && max_flag_rate(&all) <= 0.2
                         && window_num(win, "ratio_404").is_some_and(|v| v < 0.2)
                         && window_num(win, "turns_held").is_some_and(|v| v >= 10.0)
@@ -237,12 +317,14 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
                 "client_consistent" => {
                     !cited_turns.is_empty()
                         && cited_turns.iter().all(|t| {
-                            str_field(t, "ua_class") == Some("browser")
-                                && !flags(t).contains(&"ua_chromium_no_ch")
+                            !flags(t).contains(&"ua_chromium_no_ch")
                                 && !flags(t).contains(&"library_ua_on_web")
-                                && match t.get("ja4_class") {
+                                && !flags(t).contains(&"browser_no_accept_language")
+                                && match ja4_known(t) {
                                     None => true,
-                                    Some(v) => v.is_null() || v.as_str() == Some("browser"),
+                                    Some("browser") => is_browser(str_field(t, "ua_class")),
+                                    Some("library") => str_field(t, "ua_class") == Some("library"),
+                                    Some(_) => false,
                                 }
                         })
                 }
@@ -306,7 +388,7 @@ mod tests {
     fn turn(path: &str, status: i64) -> Value {
         json!({
             "method": "GET", "path": path, "status": status,
-            "ua_class": "browser", "flags": [],
+            "ua_class": "chromium", "flags": [],
             "credential_status": null, "tag_status": "absent",
             "ja4_class": "unknown", "surface": "web",
             "is_asset": 0, "cred": null,
@@ -505,28 +587,57 @@ mod tests {
     }
 
     #[test]
-    fn client_consistent_needs_a_clean_browser_client() {
+    fn is_browser_matches_the_package_vocabulary() {
+        for c in ["chromium", "firefox", "safari", "other_browser"] {
+            assert!(is_browser(Some(c)), "{c}");
+        }
+        for c in [None, Some("library"), Some("empty"), Some("browser")] {
+            assert!(!is_browser(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn client_consistent_needs_agreement_and_clean_flags() {
+        // Browser UA with a browser fingerprint agrees.
         let mut t = turn("/", 200);
         t["ja4_class"] = json!("browser");
         assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
-        // No fingerprint at all is consistent; a library or unknown
-        // one is not a browser client.
+        // So does safari: every browser member counts.
+        t["ua_class"] = json!("safari");
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // A self-naming tool agrees too.
+        t["ua_class"] = json!("library");
+        t["ja4_class"] = json!("library");
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // Crossed families disagree either way.
+        t["ua_class"] = json!("chromium");
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t["ua_class"] = json!("library");
+        t["ja4_class"] = json!("browser");
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // No fingerprint is no constraint: null, missing, and the
+        // envelope's unknown all count as absent.
+        t["ua_class"] = json!("chromium");
         t["ja4_class"] = json!(null);
         assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
-        t["ja4_class"] = json!("library");
-        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t.as_object_mut().unwrap().remove("ja4_class");
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
         t["ja4_class"] = json!("unknown");
-        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
-        // Either inconsistency flag fails it, as does a library UA.
-        t["ja4_class"] = json!("browser");
-        t["flags"] = json!(["ua_chromium_no_ch"]);
-        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
-        t["flags"] = json!(["library_ua_on_web"]);
-        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // Any of the three flags fails it, fingerprint or none.
+        for flag in [
+            "ua_chromium_no_ch",
+            "library_ua_on_web",
+            "browser_no_accept_language",
+        ] {
+            t["flags"] = json!([flag]);
+            assert!(
+                !check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty(),
+                "{flag}"
+            );
+        }
         t["flags"] = json!([]);
-        t["ua_class"] = json!("library");
-        assert!(!check(vec![t], json!({}), "client_consistent", &[0]).is_empty());
-        assert!(!check(vec![turn("/", 200)], json!({}), "client_consistent", &[]).is_empty());
+        assert!(!check(vec![t], json!({}), "client_consistent", &[]).is_empty());
     }
 
     #[test]
@@ -569,6 +680,56 @@ mod tests {
     }
 
     #[test]
+    fn payload_hint_names_the_class_across_fields() {
+        assert_eq!(
+            payload_hint(Some("id=1' OR '1'='1"), None, "/search"),
+            Some("sqli".to_string())
+        );
+        assert_eq!(
+            payload_hint(None, Some("<script>alert(1)</script>"), "/comment"),
+            Some("xss".to_string())
+        );
+        assert_eq!(
+            payload_hint(None, None, "/static/../../etc/passwd"),
+            Some("traversal".to_string())
+        );
+        assert_eq!(
+            payload_hint(Some("name={{7*7}}"), None, "/hello"),
+            Some("ssti".to_string())
+        );
+        assert_eq!(
+            payload_hint(None, Some("f=`id`"), "/run"),
+            Some("cmdi".to_string())
+        );
+    }
+
+    #[test]
+    fn payload_hint_stays_null_on_plain_input() {
+        assert_eq!(payload_hint(Some("page=2"), None, "/venues"), None);
+        assert_eq!(
+            payload_hint(None, Some("email=user@example.com"), "portal.register"),
+            None
+        );
+        assert_eq!(payload_hint(None, None, "/venues/12"), None);
+        assert_eq!(payload_hint(None, None, ""), None);
+    }
+
+    #[test]
+    fn attack_payload_needs_a_hinted_cited_turn() {
+        let mut t = turn("/search", 200);
+        t["payload_hint"] = json!("sqli");
+        assert!(check(vec![t], json!({}), "attack_payload", &[0]).is_empty());
+        assert!(!check(
+            vec![turn("/search", 200)],
+            json!({}),
+            "attack_payload",
+            &[0]
+        )
+        .is_empty());
+        assert!(!check(vec![turn("/search", 200)], json!({}), "attack_payload", &[]).is_empty());
+    }
+
+    #[test]
     fn check_proposal_lists_every_failure_in_claim_order() {
         let ts = vec![turn("/a", 404), turn("/b", 404), turn("/", 200)];
         let win = json!({"iri_cv": 0.02});
@@ -596,6 +757,7 @@ mod tests {
     #[test]
     fn sides_split_malicious_benign_and_sideless() {
         for s in [
+            "attack_payload",
             "scanner_paths",
             "high_404_rate",
             "machine_cadence",

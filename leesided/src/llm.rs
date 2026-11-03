@@ -51,7 +51,7 @@ pub const ENVELOPE_TURNS: i64 = 30;
 
 /// The point-1 schema of docs/llm.md section 8.1, sent as the
 /// `response_format` in schema mode.
-pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["name","turns"],"properties":{"name":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","human_cadence","client_consistent","insufficient_data"]},"turns":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":0}}}}}}}"#;
+pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["name","turns"],"properties":{"name":{"type":"string","enum":["attack_payload","scanner_paths","high_404_rate","machine_cadence","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","human_cadence","client_consistent","insufficient_data"]},"turns":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":0}}}}}}}"#;
 
 /// The point-2 schema of docs/llm.md section 8.2.
 pub const EXPLAIN_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["explanation"],"properties":{"explanation":{"type":"string","maxLength":240}}}"#;
@@ -73,7 +73,8 @@ pub fn prompt_for(point: &str) -> Result<(&'static str, &'static str), LlmError>
     }
 }
 
-pub const LABEL_SIGNALS: [&str; 12] = [
+pub const LABEL_SIGNALS: [&str; 13] = [
+    "attack_payload",
     "scanner_paths",
     "high_404_rate",
     "machine_cadence",
@@ -612,6 +613,10 @@ pub fn build_label_envelope_at(
          surface, is_asset, credential_hash, path_pattern \
          FROM turns WHERE {turn_col} = ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT {ENVELOPE_TURNS}"
     ))?;
+    // First-sight samples per pattern, for the payload_hint on each
+    // turn: only the matched class travels to the model.
+    let mut samples = conn
+        .prepare("SELECT sample_query, body_slice FROM payload_patterns WHERE pattern_hash = ?1")?;
     let mut turns: Vec<serde_json::Value> = stmt
         .query_map(params![subject.id, anchor], |r| {
             Ok((
@@ -637,14 +642,30 @@ pub fn build_label_envelope_at(
                 // Unrouted turns show their folded payload pattern, so scanner
                 // paths are visible (docs/llm.md 8.1); routed turns show the
                 // route name, the only path the store keeps for them.
-                let path = match (route.as_str(), pattern) {
-                    (UNROUTED, Some(p)) => p,
-                    _ => route,
+                let path = match (route.as_str(), pattern.as_deref()) {
+                    (UNROUTED, Some(p)) => p.to_string(),
+                    _ => route.clone(),
                 };
+                let (sample_query, body_slice): (Option<String>, Option<String>) =
+                    pattern_for_turn(&route, pattern.as_deref())
+                        .and_then(|p| {
+                            samples
+                                .query_row(params![pattern_hash(&verb, &p)], |r| {
+                                    Ok((r.get(0)?, r.get(1)?))
+                                })
+                                .ok()
+                        })
+                        .unwrap_or((None, None));
+                let hint = crate::faithfulness::payload_hint(
+                    sample_query.as_deref(),
+                    body_slice.as_deref(),
+                    &path,
+                );
                 serde_json::json!({
                     "t_ms": (ts - now_us) / 1000,
                     "method": verb,
                     "path": path,
+                    "payload_hint": hint,
                     "status": status,
                     "ua_class": ua,
                     "flags": flags.and_then(|f| serde_json::from_str::<serde_json::Value>(&f).ok()).unwrap_or(serde_json::Value::Null),

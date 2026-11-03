@@ -1232,7 +1232,14 @@ pub fn eval_build(
 ) -> Result<usize, LlmError> {
     check_point(point)?;
     let conn = open_db(db)?;
-    let now_us = now_s() * 1_000_000;
+    // The envelope clock anchors to the store's own last turn, not the
+    // wall: the same window builds the same envelope on every
+    // invocation, so regen dedupe is exact instead of luck-of-the-second.
+    let now_us: i64 = conn
+        .query_row("SELECT max(ts_us) FROM turns", [], |r| r.get(0))
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| now_s() * 1_000_000);
     let mut rows: Vec<String> = Vec::new();
     match point {
         "label" => {
@@ -1694,7 +1701,7 @@ mod tests {
     fn turn(path: &str, status: i64) -> serde_json::Value {
         serde_json::json!({
             "method": "GET", "path": path, "status": status,
-            "ua_class": "browser", "flags": [],
+            "ua_class": "chromium", "flags": [],
             "credential_status": null, "tag_status": "absent",
             "ja4_class": "unknown", "surface": "web",
             "is_asset": 0, "cred": null,

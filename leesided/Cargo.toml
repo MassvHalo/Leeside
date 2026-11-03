@@ -30,6 +30,10 @@ libc = "0.2"
 # ureq: the LLM module's Chat Completions client (docs/llm.md); rustls
 # with bundled webpki roots, json for the request/response bodies.
 ureq = { version = "3.5.0", features = ["json"] }
+# regex: the attack_payload hint matcher over the curated
+# data/payload-patterns.json list (docs/llm-evals.md 3); linear-time,
+# no backtracking blowup on hostile input.
+regex = "1"
 
 [dev-dependencies]
 criterion = "0.5"

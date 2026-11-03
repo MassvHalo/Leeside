@@ -22,10 +22,15 @@ object below.
 - Credential stuffing: repeated POSTs to a login route with failures, then
   a success; many principals from one actor.
 - Webhook forgery: unsigned or wrongly-signed machine requests.
+- A turn with a `payload_hint` carries an attack payload of that class (sqli, xss, traversal, ssti, cmdi).
 - A honeytoken hit is strong evidence of malice.
-- Inconsistency means a browser UA on a turn with `ua_chromium_no_ch`
-  or a library JA4 class. A tool that names itself (curl, a library
-  UA with its own fingerprint) is consistent, not inconsistent.
+- Consistency means the UA family and the JA4 class agree where the
+  fingerprint is known: a browser UA (chromium, firefox, safari)
+  with a browser class, a library UA with a library class, and none
+  of `ua_chromium_no_ch`, `library_ua_on_web`,
+  `browser_no_accept_language`. Inconsistency is a browser UA with
+  `ua_chromium_no_ch` or a library JA4 class; a tool that names
+  itself is consistent, not inconsistent.
 - Normal browsing: few routes, a browser UA, quiet flags, human
   intervals, a stable tag.
 - A verified partner credential on a business route is strong evidence of
@@ -41,8 +46,8 @@ Answer with one JSON object and nothing else:
 {"label": "benign" | "malicious" | "unknown",
  "confidence": 0.0 - 1.0,
  "reason": "one or two plain sentences, at most 600 characters",
- "signals": [{"name": "one of: scanner_paths, high_404_rate, machine_cadence,
-   ua_inconsistent, credential_stuffing, webhook_forgery,
+ "signals": [{"name": "one of: attack_payload, scanner_paths, high_404_rate,
+   machine_cadence, ua_inconsistent, credential_stuffing, webhook_forgery,
    honeytoken_hit, normal_browsing, verified_partner, human_cadence,
    client_consistent, insufficient_data",
    "turns": ["indices into the turns array above, at most 6"]},

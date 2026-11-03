@@ -903,6 +903,7 @@ dependencies = [
  "maxminddb",
  "parking_lot",
  "proptest",
+ "regex",
  "rusqlite",
  "schemars",
  "serde",

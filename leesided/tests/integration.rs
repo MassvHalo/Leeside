@@ -4693,6 +4693,7 @@ fn golden_sets_keep_their_shape() {
             .filter_map(|v| v.as_str())
             .collect();
         let mal: std::collections::HashSet<&str> = [
+            "attack_payload",
             "scanner_paths",
             "high_404_rate",
             "machine_cadence",
