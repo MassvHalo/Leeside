@@ -6,13 +6,16 @@ ground truth, explain rows from the e2e store's scored subjects,
 draft rows from attack-run clusters, and classify rows are
 hand-written test vectors.
 
-- `label.jsonl` (142): `llm eval-build --point label` (latest,
-  `--early`, and `--sample 3` windows) across all 22 generator run
-  stores, deduped on the envelope, then stratified to 8 warm and 4
-  cold rows per kind, round-robin over subjects (latest windows
-  first, coldest first). Two rules hold on every row: the envelope
-  pairs its window with exactly the turns up to that window's turn
-  id (`len(turns) == min(turns_held, 30)`), and any row with
+- `label.jsonl` (156): `llm eval-build --point label` (latest,
+  `--early`, `--sample 3`, and `--sample 5` on the small pools)
+  across 23 generator run stores, minus pre-watermark windows on
+  the unpurged stores (each row carries `window_turn_id` for the
+  filter), deduped on the envelope, then stratified to 8 warm and
+  4 cold rows per kind, round-robin over subjects (latest windows
+  first, coldest first). Browser rows come from the locale-fixed
+  reruns only. Two rules hold on every row: the envelope pairs its
+  window with exactly the turns up to that window's turn id
+  (`len(turns) == min(turns_held, 30)`), and any row with
   `turns_held` under 10 expects `unknown`. `expected_label` is
   prefilled from the window's labels (operator, then
   tool_run/synthetic_benign/verified_business), or the cold-start
@@ -20,9 +23,10 @@ hand-written test vectors.
   label would be hand-labelled from run-kind ground truth
   (`prefilled_from: hand`), of which this set needed none. The
   attack rows expect `malicious`, the benign rows `benign`, the 52
-  cold rows `unknown`. `allowed_signals` follows the label:
-  malicious rows allow the nine malicious signals plus
-  `insufficient_data`, benign rows the two benign signals plus
+  cold rows `unknown`; the 8 cold rows on verified-clean subjects
+  also accept `benign` (`also_accept`). `allowed_signals` follows
+  the label: malicious rows allow the eight malicious signals plus
+  `insufficient_data`, benign rows the four benign signals plus
   `insufficient_data`, unknown rows `insufficient_data` alone.
   Covers both scopes, 13 kinds, the cookie-keeping scraper, and the
   benign api client. No attack-promo rows: outcomes do not exist
