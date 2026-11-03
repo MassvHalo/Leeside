@@ -26,7 +26,9 @@ hand-written test vectors.
   (`prefilled_from: hand`), of which this set needed none. The
   attack rows expect `malicious`, the benign rows `benign`, the 44
   cold rows `unknown`; the 8 cold rows on verified-clean subjects
-  also accept `benign` (`also_accept`). `allowed_signals` follows
+  also accept `benign` (`also_accept`), and any cold row showing a
+  decisive single-turn signal also accepts its kind's label at grade
+  time (docs/llm-evals.md section 1). `allowed_signals` follows
   the label: malicious rows allow the nine malicious signals plus
   `insufficient_data`, benign rows the four benign signals plus
   `insufficient_data`, unknown rows `insufficient_data` alone.
