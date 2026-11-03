@@ -363,6 +363,37 @@ impl Harness {
         )
         .await
     }
+
+    /// A JSON request at the console API: (status, parsed body).
+    async fn ui_json(
+        &self,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        body: Option<&Value>,
+    ) -> (u16, Value) {
+        let mut s = TcpStream::connect(self.running.api_addr).await.unwrap();
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let ck = cookie
+            .map(|c| format!("Cookie: {c}\r\n"))
+            .unwrap_or_default();
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: leesided\r\nConnection: close\r\n{ck}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        s.read_to_end(&mut raw).await.unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        let status: u16 = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        let value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(body).unwrap_or(Value::String(body.to_string()))
+        };
+        (status, value)
+    }
 }
 
 fn ui_header<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -393,6 +424,279 @@ fn ui_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_v1_empty_shapes_and_roles() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    // No session: 401 JSON, not a login redirect.
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/summary?window=24h", None, None)
+        .await;
+    assert_eq!(st, 401);
+    assert_eq!(v["error"], "login required");
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    // Bad window and bucket are 400.
+    let (st, _) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/summary?window=1h",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400);
+    let (st, _) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/traffic?window=24h&bucket=30m",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400);
+    let (st, _) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/traffic?window=24h&bucket=7d",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400);
+    // Empty store shapes. The install set imports capped at shadow.
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/summary", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["window"], "24 hours");
+    assert_eq!(v["mode"], "off");
+    assert_eq!(v["attacks"], 0);
+    assert_eq!(v["stopped"], 0);
+    assert_eq!(v["waiting"], 0);
+    assert_eq!(v["watched"], 0);
+    assert_eq!(v["would_have_stopped"], 0);
+    assert_eq!(v["requests"], 0);
+    assert!(v["fingerprinted"].is_null(), "{v}");
+    assert_eq!(v["tiles"]["actors"]["total"], 0);
+    assert_eq!(v["tiles"]["actors"]["normal"], 0);
+    assert_eq!(v["tiles"]["rules"]["active"], 0);
+    assert_eq!(v["tiles"]["rules"]["ready"], 3);
+    assert_eq!(v["tiles"]["reviews"]["total"], 0);
+    assert_eq!(v["tiles"]["reviews"]["agreed"], 0);
+    assert_eq!(v["pending"], 0);
+    assert_eq!(v["role"], "admin");
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/summary?window=7d",
+            Some(&viewer),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["role"], "viewer");
+    assert_eq!(v["window"], "7 days");
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/episodes?window=24h",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v, Value::Array(vec![]));
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/traffic?window=24h&bucket=1h",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["buckets"].as_array().unwrap().len(), 24);
+    assert_eq!(v["window_total"], 0);
+    assert!(
+        v["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["total"] == 0 && b["hostile"] == 0),
+        "{v}"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_v1_decision_writes_operator_label() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    // An actor and a cluster with one window turn and one feature
+    // window each, straight into the store.
+    let now = leesided::store::now_s();
+    let ts_us = now * 1_000_000;
+    let db = h.dir.join("leesided.sqlite");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO actors (id, opened_us, last_us, turns) \
+             VALUES ('a1', {ts_us}, {ts_us}, 1); \
+             INSERT INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id) VALUES \
+             ('s1', {ts_us}, {now}, 'p1', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1'); \
+             INSERT INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, cluster_key) VALUES \
+             ('s2', {ts_us}, {now}, 'p2', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'c1'); \
+             INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
+             ('actor', 'a1', 't1', {ts_us}, 2, '[0.0]', 'web', 0), \
+             ('cluster', 'c1', 't2', {ts_us}, 2, '[0.0]', 'web', 0);",
+        ))
+        .unwrap();
+    let decide = |id: &str| format!("/windside/api/v1/episodes/{id}/decision");
+    // Roles first: no session is 401, viewer is 403.
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            None,
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 401);
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&viewer),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 403, "{v}");
+    // Bad ids, bad bodies, stale windows.
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_bogus_x"),
+            Some(&admin),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 404);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_missing"),
+            Some(&admin),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 404);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&admin),
+            Some(&json!({"decision": "malicious", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 422);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&admin),
+            Some(&json!({})),
+        )
+        .await;
+    assert_eq!(st, 422);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&admin),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us - 1})),
+        )
+        .await;
+    assert_eq!(st, 409);
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&admin),
+            Some(&json!({"decision": "confirm", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 422, "{v}");
+    assert_eq!(
+        v["error"],
+        "nothing to confirm: this subject has no proposal"
+    );
+    // The happy paths, actor then cluster.
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("ep_actor_a1"),
+            Some(&admin),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "benign");
+    assert_eq!(v["scope"], "actor");
+    assert_eq!(v["scope_id"], "a1");
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("ep_cluster_c1"),
+            Some(&admin),
+            Some(&json!({"decision": "unknown", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "unknown");
+    // The rows land exactly as the inspector's form writes them.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: (String, String, f64, Option<String>) = conn
+        .query_row(
+            "SELECT label, source, confidence, note FROM labels \
+             WHERE scope = 'actor' AND scope_id = 'a1' AND source = 'operator'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "benign".to_string(),
+            "operator".to_string(),
+            1.0,
+            Some("dashboard".to_string())
+        )
+    );
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM labels WHERE scope = 'cluster' AND scope_id = 'c1' \
+             AND source = 'operator' AND label = 'unknown'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    h.running.abort();
+    h.engine.shutdown().await;
 }
 
 async fn ui_harness(token: Option<&str>) -> Harness {

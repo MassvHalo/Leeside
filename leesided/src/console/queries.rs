@@ -3830,6 +3830,343 @@ impl Ctx<'_> {
             }),
         }))
     }
+}
+
+/// The dashboard headline numbers plus the three tiles.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActorTile {
+    pub total: i64,
+    pub normal: i64,
+}
+
+/// Active rules act; ready ones observe (monitor or shadow) and wait
+/// to be turned on. Proposed drafts are neither.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RulesTile {
+    pub active: i64,
+    pub ready: i64,
+}
+
+/// Operator decisions in the window, and how many agreed with the
+/// proposal standing when they were made.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewTile {
+    pub total: i64,
+    pub agreed: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SummaryTiles {
+    pub actors: ActorTile,
+    pub rules: RulesTile,
+    pub reviews: ReviewTile,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DashboardSummary {
+    pub window: String,
+    pub mode: String,
+    pub attacks: i64,
+    pub stopped: i64,
+    pub waiting: i64,
+    pub watched: i64,
+    pub would_have_stopped: i64,
+    pub requests: i64,
+    pub fingerprinted: Option<u8>,
+    pub tiles: SummaryTiles,
+    pub pending: i64,
+}
+
+/// One histogram bucket: the window slice starting here, in unix
+/// seconds, with its total and hostile turn counts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrafficBucket {
+    pub start: i64,
+    pub total: i64,
+    pub hostile: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Traffic {
+    pub buckets: Vec<TrafficBucket>,
+    pub window_total: i64,
+}
+
+/// The traffic bucket, validated. The API also requires the window
+/// to divide evenly into buckets no bigger than itself.
+pub fn parse_bucket(s: &str) -> Option<i64> {
+    match s {
+        "1h" => Some(3_600),
+        "6h" => Some(21_600),
+        "12h" => Some(43_200),
+        "1d" => Some(86_400),
+        "7d" => Some(604_800),
+        _ => None,
+    }
+}
+
+impl Ctx<'_> {
+    /// The dashboard summary: episode counts by state, the mode, the
+    /// three tiles, and the sidebar queue pill.
+    pub fn dashboard_summary(
+        &self,
+        window_s: i64,
+        now_s: i64,
+        thresholds: &std::collections::HashMap<String, f64>,
+        windside_mode: &str,
+    ) -> Result<DashboardSummary, QueryError> {
+        let shadow = windside_mode == "shadow";
+        let episodes = self.episodes(window_s, now_s, thresholds, shadow)?;
+        let mut stopped = 0;
+        let mut waiting = 0;
+        let mut watched = 0;
+        for e in &episodes {
+            match e.state.as_str() {
+                "stopped" => stopped += 1,
+                "waiting" => waiting += 1,
+                "watched" => watched += 1,
+                _ => {}
+            }
+        }
+        let since_us = (now_s - window_s).max(0) * 1_000_000;
+        let mut would_have_stopped = 0;
+        if shadow {
+            let mut stmt = self.conn().prepare(
+                "SELECT scope, scope_id, surface, score FROM ( \
+                   SELECT *, ROW_NUMBER() OVER \
+                     (PARTITION BY scope, scope_id ORDER BY ts_us DESC) AS rn \
+                   FROM scores WHERE scope IN ('actor', 'cluster') \
+                 ) WHERE rn = 1",
+            )?;
+            let latest: Vec<(String, String, Option<String>, f64)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for (scope, scope_id, surface, score) in latest {
+                let t = surface
+                    .as_deref()
+                    .and_then(|s| thresholds.get(s).copied())
+                    .unwrap_or(0.5);
+                if score < t {
+                    continue;
+                }
+                // Windowed like everything else in the summary: a quiet
+                // subject is not part of this window's story.
+                let col = if scope == "actor" {
+                    "actor_id"
+                } else {
+                    "cluster_key"
+                };
+                let active: bool = self
+                    .conn()
+                    .query_row(
+                        &format!("SELECT 1 FROM turns WHERE {col} = ?1 AND ts_us >= ?2 LIMIT 1"),
+                        params![scope_id, since_us],
+                        |_| Ok(true),
+                    )
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                        e => Err(QueryError::Sqlite(e)),
+                    })?;
+                if active
+                    && self
+                        .stopped_by(&scope, &scope_id, since_us, now_s)?
+                        .is_none()
+                {
+                    would_have_stopped += 1;
+                }
+            }
+        }
+        let requests: i64 = self.conn().query_row(
+            "SELECT count(*) FROM turns WHERE ts_us >= ?1",
+            params![since_us],
+            |r| r.get(0),
+        )?;
+        let fingerprinted = if requests == 0 {
+            None
+        } else {
+            let with_ja4: i64 = self.conn().query_row(
+                "SELECT count(*) FROM turns WHERE ts_us >= ?1 AND ja4 IS NOT NULL",
+                params![since_us],
+                |r| r.get(0),
+            )?;
+            Some((with_ja4 as f64 * 100.0 / requests as f64).round() as u8)
+        };
+        let mut stmt = self.conn().prepare(
+            "SELECT s.score, s.surface FROM \
+               (SELECT DISTINCT actor_id AS id FROM turns \
+                WHERE actor_id IS NOT NULL AND ts_us >= ?1) a \
+             LEFT JOIN (SELECT scope_id, surface, score, ROW_NUMBER() OVER \
+                          (PARTITION BY scope_id ORDER BY ts_us DESC) AS rn \
+                        FROM scores WHERE scope = 'actor') s \
+             ON s.scope_id = a.id AND s.rn = 1",
+        )?;
+        let actor_scores: Vec<(Option<f64>, Option<String>)> = stmt
+            .query_map(params![since_us], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let actors_total = actor_scores.len() as i64;
+        let mut actors_normal = 0;
+        for (score, surface) in actor_scores {
+            let hostile = score.is_some_and(|s| {
+                s >= surface
+                    .as_deref()
+                    .and_then(|sf| thresholds.get(sf).copied())
+                    .unwrap_or(0.5)
+            });
+            if !hostile {
+                actors_normal += 1;
+            }
+        }
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT mode, count(*) FROM rules WHERE state = 'active' GROUP BY mode")?;
+        let modes: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut rules_active = 0;
+        let mut rules_ready = 0;
+        for (mode, n) in modes {
+            if mode == "enforce" {
+                rules_active += n;
+            } else {
+                rules_ready += n;
+            }
+        }
+        let mut stmt = self.conn().prepare(
+            "SELECT scope, scope_id, label, created_at FROM labels \
+             WHERE source = 'operator' AND created_at >= ?1",
+        )?;
+        let decided: Vec<(String, String, String, i64)> = stmt
+            .query_map(params![now_s - window_s], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        let mut reviews_agreed = 0;
+        for (scope, scope_id, label, at) in &decided {
+            let proposal: Option<String> = self
+                .conn()
+                .query_row(
+                    "SELECT label FROM labels \
+                     WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+                     AND created_at <= ?3 ORDER BY created_at DESC, id DESC LIMIT 1",
+                    params![scope, scope_id, at],
+                    |r| r.get(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    e => Err(QueryError::Sqlite(e)),
+                })?;
+            if proposal.as_deref() == Some(label.as_str()) {
+                reviews_agreed += 1;
+            }
+        }
+        let queue = crate::review::review_rows(self.conn(), usize::MAX, thresholds).map_err(
+            |e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            },
+        )?;
+        Ok(DashboardSummary {
+            window: window_label(window_s).to_string(),
+            mode: windside_mode.to_string(),
+            attacks: episodes.len() as i64,
+            stopped,
+            waiting,
+            watched,
+            would_have_stopped,
+            requests,
+            fingerprinted,
+            tiles: SummaryTiles {
+                actors: ActorTile {
+                    total: actors_total,
+                    normal: actors_normal,
+                },
+                rules: RulesTile {
+                    active: rules_active,
+                    ready: rules_ready,
+                },
+                reviews: ReviewTile {
+                    total: decided.len() as i64,
+                    agreed: reviews_agreed,
+                },
+            },
+            pending: queue.len() as i64,
+        })
+    }
+
+    /// The traffic histogram: per bucket the total turns and the
+    /// hostile turns (turns of stopped or waiting subjects).
+    /// `window_total` is the sum of the buckets.
+    pub fn traffic(
+        &self,
+        window_s: i64,
+        bucket_s: i64,
+        now_s: i64,
+        thresholds: &std::collections::HashMap<String, f64>,
+        windside_shadow: bool,
+    ) -> Result<Traffic, QueryError> {
+        let episodes = self.episodes(window_s, now_s, thresholds, windside_shadow)?;
+        let mut hostile_actors: Vec<String> = Vec::new();
+        let mut hostile_clusters: Vec<String> = Vec::new();
+        for e in &episodes {
+            if e.state == "stopped" || e.state == "waiting" {
+                if e.scope == "actor" {
+                    hostile_actors.push(e.subject.clone());
+                } else {
+                    hostile_clusters.push(e.subject.clone());
+                }
+            }
+        }
+        // An empty IN list is a syntax error; the sentinel never
+        // matches a real 16-hex id.
+        if hostile_actors.is_empty() {
+            hostile_actors.push("\0".to_string());
+        }
+        if hostile_clusters.is_empty() {
+            hostile_clusters.push("\0".to_string());
+        }
+        let holes = |n: usize| vec!["?"; n].join(", ");
+        let sql = format!(
+            "SELECT count(*), count(CASE WHEN coalesce(actor_id, '') IN ({}) \
+             OR coalesce(cluster_key, '') IN ({}) THEN 1 END) \
+             FROM turns WHERE ts_us >= ? AND ts_us < ?",
+            holes(hostile_actors.len()),
+            holes(hostile_clusters.len())
+        );
+        let n = (window_s / bucket_s).max(1);
+        let mut buckets = Vec::with_capacity(n as usize);
+        let mut window_total = 0;
+        for j in 0..n {
+            let start = now_s - window_s + j * bucket_s;
+            let mut args: Vec<rusqlite::types::Value> = Vec::new();
+            for id in hostile_actors.iter().chain(hostile_clusters.iter()) {
+                args.push(rusqlite::types::Value::Text(id.clone()));
+            }
+            args.push(rusqlite::types::Value::Integer(start * 1_000_000));
+            args.push(rusqlite::types::Value::Integer(
+                (start + bucket_s) * 1_000_000,
+            ));
+            let (total, hostile): (i64, i64) =
+                self.conn()
+                    .query_row(&sql, rusqlite::params_from_iter(args), |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?;
+            window_total += total;
+            buckets.push(TrafficBucket {
+                start,
+                total,
+                hostile,
+            });
+        }
+        Ok(Traffic {
+            buckets,
+            window_total,
+        })
+    }
 
     /// Who came: the cluster's clients and networks, or the actor's
     /// derived kind with its network context.
@@ -4094,6 +4431,71 @@ mod tests {
         assert_eq!(parse_window("30d"), Some(2_592_000));
         assert_eq!(parse_window("1h"), None);
         assert_eq!(window_label(86_400), "24 hours");
+    }
+
+    #[test]
+    fn summary_counts_states_tiles_and_would_have_stopped() {
+        let (conn, now) = episode_db("summary");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let mut thresholds = std::collections::HashMap::new();
+        thresholds.insert("web".to_string(), 0.5);
+        let s = ctx
+            .dashboard_summary(86_400, now, &thresholds, "shadow")
+            .unwrap();
+        assert_eq!(s.window, "24 hours");
+        assert_eq!(s.mode, "shadow");
+        assert_eq!(s.attacks, 4);
+        assert_eq!(s.stopped, 2);
+        assert_eq!(s.waiting, 1);
+        assert_eq!(s.watched, 1);
+        // a_wait is above threshold with no decision; a_quiet is
+        // above threshold but has no window turns, so it stays out.
+        assert_eq!(s.would_have_stopped, 1);
+        assert_eq!(s.requests, 9);
+        assert_eq!(s.fingerprinted, Some(0));
+        assert_eq!(s.tiles.actors.total, 4);
+        assert_eq!(s.tiles.actors.normal, 3);
+        assert_eq!(s.tiles.rules.active, 0);
+        assert_eq!(s.tiles.rules.ready, 0);
+        assert_eq!(s.tiles.reviews.total, 0);
+        assert_eq!(s.tiles.reviews.agreed, 0);
+        assert_eq!(s.pending, 2);
+        // Outside shadow there is no would-have.
+        let s = ctx
+            .dashboard_summary(86_400, now, &thresholds, "active")
+            .unwrap();
+        assert_eq!(s.would_have_stopped, 0);
+        assert_eq!(parse_bucket("1h"), Some(3_600));
+        assert_eq!(parse_bucket("7d"), Some(604_800));
+        assert_eq!(parse_bucket("30m"), None);
+    }
+
+    #[test]
+    fn traffic_buckets_total_and_hostile() {
+        let (conn, now) = episode_db("traffic");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let mut thresholds = std::collections::HashMap::new();
+        thresholds.insert("web".to_string(), 0.5);
+        let t = ctx.traffic(86_400, 3_600, now, &thresholds, true).unwrap();
+        assert_eq!(t.buckets.len(), 24);
+        assert_eq!(t.window_total, 9);
+        assert_eq!(
+            t.window_total,
+            t.buckets.iter().map(|b| b.total).sum::<i64>()
+        );
+        assert_eq!(
+            6,
+            t.buckets.iter().map(|b| b.hostile).sum::<i64>(),
+            "stopped and waiting turns only"
+        );
+        let starts: Vec<i64> = t.buckets.iter().map(|b| b.start).collect();
+        let mut ordered = starts.clone();
+        ordered.sort();
+        assert_eq!(starts, ordered);
+        // t2 sits on the last bucket's lower edge (inclusive).
+        let last = t.buckets.last().unwrap();
+        assert_eq!(last.total, 8);
+        assert_eq!(last.hostile, 5);
     }
 
     #[test]

@@ -92,6 +92,16 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&u("/payloads/{hash}"), get(crate::console::payload_detail))
         .route(&u("/model"), get(crate::console::model_page))
         .route(&u("/features"), get(crate::console::features_page))
+        .route(&u("/api/v1/summary"), get(crate::console::api::api_summary))
+        .route(
+            &u("/api/v1/episodes"),
+            get(crate::console::api::api_episodes),
+        )
+        .route(&u("/api/v1/traffic"), get(crate::console::api::api_traffic))
+        .route(
+            &u("/api/v1/episodes/{id}/decision"),
+            post(crate::console::api::api_decide),
+        )
         .route_layer(middleware::from_fn(move |req: Request, next: Next| {
             let prefix = allow_prefix.clone();
             let trusted = allow_trusted;

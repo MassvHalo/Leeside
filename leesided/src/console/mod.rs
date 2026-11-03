@@ -4,6 +4,7 @@
 //! or the viewer token (read-only); viewer sessions render no mutation
 //! forms and get 403 on every POST.
 
+pub mod api;
 pub mod pages;
 pub mod queries;
 
