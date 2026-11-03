@@ -3303,6 +3303,20 @@ fn plural(n: i64, one: &str, many: &str) -> String {
     }
 }
 
+/// What they tried: the turn count with the dominant route, or the
+/// surface when the route is missing or an internal sentinel
+/// (`_unrouted` never reaches the headline).
+fn story_what(turns: i64, dominant_route: &str, surface: &str) -> String {
+    if dominant_route.is_empty() || dominant_route.starts_with('_') {
+        format!("{} on {surface}", plural(turns, "request", "requests"))
+    } else {
+        format!(
+            "{}, mostly {dominant_route}",
+            plural(turns, "request", "requests")
+        )
+    }
+}
+
 impl Ctx<'_> {
     /// The window's activity grouped into episodes, newest first,
     /// capped at 100. Stopped beats waiting beats watched: an active
@@ -3603,14 +3617,7 @@ impl Ctx<'_> {
             newest_observe.map(str::to_string)
         };
         let who = self.episode_who(scope, id, since_us)?;
-        let what = if dominant_route.is_empty() {
-            format!("{} on {surface}", plural(turns, "request", "requests"))
-        } else {
-            format!(
-                "{}, mostly {dominant_route}",
-                plural(turns, "request", "requests")
-            )
-        };
+        let what = story_what(turns, &dominant_route, surface);
         let action_word = stopped.as_ref().map(|s| match s.action.as_str() {
             "block" => "Blocked",
             "rate_limit" => "Rate limited",
@@ -4072,13 +4079,22 @@ impl Ctx<'_> {
     /// derived kind with its network context.
     fn episode_who(&self, scope: &str, id: &str, since_us: i64) -> Result<String, QueryError> {
         if scope == "cluster" {
-            let (clients, nets, signed): (i64, i64, i64) = self.conn().query_row(
-                "SELECT count(DISTINCT peer_key), count(DISTINCT net_hash), \
-                 max(principal != 'anon') FROM turns WHERE cluster_key = ?1 AND ts_us >= ?2",
+            let (actors, clients, nets, signed): (i64, i64, i64, i64) = self.conn().query_row(
+                "SELECT count(DISTINCT actor_id), count(DISTINCT peer_key), \
+                 count(DISTINCT net_hash), max(principal != 'anon') \
+                 FROM turns WHERE cluster_key = ?1 AND ts_us >= ?2",
                 params![id, since_us],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
-            let mut who = plural(clients, "client", "clients");
+            // Clients are actors, matching the actors chip; cookie-less
+            // turns fall back to the peer count, marked unidentified.
+            let mut who = if actors > 0 {
+                plural(actors, "client", "clients")
+            } else if clients == 1 {
+                "1 unidentified client".to_string()
+            } else {
+                format!("{} unidentified clients", fmt_n(clients))
+            };
             if nets > 0 {
                 who.push_str(&format!(" on {}", plural(nets, "network", "networks")));
             }
@@ -4208,6 +4224,7 @@ mod tests {
              ('s6', {t3}, {now}, 'p6', 'anon', 'GET', 'home', 200, \
              1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_plain', 'web', NULL); \
              UPDATE turns SET cluster_key = 'c_watch' WHERE session_key IN ('s4', 's5'); \
+             UPDATE turns SET net_hash = 'n1' WHERE session_key IN ('s4', 's5'); \
              INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) VALUES \
              ('session', 's1', 'rate_limit', 'enforce', 'portal-otp-burst', 1, {c1}, {e1}), \
              ('actor', 'a_stop2', 'block', 'enforce', 'venue-enumeration', 1, {c1}, {e1}), \
@@ -4301,8 +4318,10 @@ mod tests {
             watched.story.next,
             "Nothing yet. Windside is still watching."
         );
-        assert!(watched.story.who.contains("2 clients"));
-        assert!(watched.story.who.contains("none signed in"));
+        assert_eq!(
+            watched.story.who,
+            "2 unidentified clients on 1 network, none signed in"
+        );
         // No actor identity held: no actors chip, just requests and rule.
         assert_eq!(watched.chips.len(), 2);
         assert_eq!(watched.chips[0].label, "requests");
@@ -4336,6 +4355,16 @@ mod tests {
         assert_eq!(parse_window("30d"), Some(2_592_000));
         assert_eq!(parse_window("1h"), None);
         assert_eq!(window_label(86_400), "24 hours");
+    }
+
+    #[test]
+    fn story_what_hides_route_sentinels() {
+        assert_eq!(story_what(14, "_unrouted", "web"), "14 requests on web");
+        assert_eq!(story_what(1, "", "api"), "1 request on api");
+        assert_eq!(
+            story_what(3, "portal.login", "web"),
+            "3 requests, mostly portal.login"
+        );
     }
 
     #[test]

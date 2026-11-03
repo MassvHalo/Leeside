@@ -12,9 +12,11 @@ export function fmtClock(ts) {
 }
 
 // "08:00 to now", "Through the day", "HH:MM to HH:MM", or one
-// clock time when the whole span falls inside a minute.
+// clock time when the whole span falls inside a minute. Half the
+// window and up reads as the day; clock pairs past midnight would
+// otherwise run backwards.
 export function fmtSpan(start, end, nowS, windowS) {
-  if (end - start >= windowS * 0.8) return 'Through the day'
+  if (end - start >= windowS * 0.5) return 'Through the day'
   if (end - start < 60) return fmtClock(start)
   const tail = end >= nowS - 300 ? 'now' : fmtClock(end)
   return `${fmtClock(start)} to ${tail}`
