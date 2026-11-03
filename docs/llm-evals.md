@@ -34,18 +34,19 @@ Each claimed signal carries its own cited turns (at most 6 per signal, at most 5
 
 | Signal | Check on its own cited turns |
 | --- | --- |
+| attack_payload | at least one cited turn with a non-null `payload_hint` |
 | scanner_paths | at least 3 distinct paths and a 404 share above 0.5, or paths in the scanner wordlist |
 | high_404_rate | 404 share above 0.5 across the cited turns |
 | machine_cadence | window `iri_cv` below 0.2, or `turns_last_60s` at least 30 |
-| ua_inconsistent | a browser `ua_class` with `ua_chromium_no_ch` or a library JA4 class on the cited turns |
+| ua_inconsistent | a browser-family `ua_class` (chromium, firefox, safari, other_browser) with `ua_chromium_no_ch`, or a library JA4 class, on the cited turns |
 | credential_stuffing | at least 5 distinct rejected credentials in the window |
 | webhook_forgery | cited turns are `webhook` with `credential_status` rejected |
 | honeytoken_hit | a cited turn's route is in the honeytoken list |
 | rejected_actions | cited turns carry `app_outcome` ending in `:rejected` (fails closed until the outcomes round adds the field; see `docs/outcomes.md`) |
-| normal_browsing | browser `ua_class` on the cited turns, no flag rate above 0.2 across the window, `ratio_404` below 0.2, `turns_held` at least 10 |
+| normal_browsing | browser-family `ua_class` on the cited turns, no flag rate above 0.2 across the window, `ratio_404` below 0.2, `turns_held` at least 10 |
 | verified_partner | the actor holds a verified credential and `rejected_credentials` is 0 |
 | human_cadence | window `iri_cv` above 0.5 and `turns_last_60s` at most 30 |
-| client_consistent | browser `ua_class`, no `ua_chromium_no_ch`, no `library_ua_on_web`, JA4 class browser or null, on the cited turns |
+| client_consistent | UA family and JA4 class agree where known (browser with browser, library with library), none of `ua_chromium_no_ch`, `library_ua_on_web`, `browser_no_accept_language`, on the cited turns |
 | insufficient_data | `turns_held` below 10 |
 
 Checks are deterministic and cheap; they run before anything is written.

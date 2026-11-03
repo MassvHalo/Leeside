@@ -102,7 +102,7 @@ Envelope (user message):
   "turns": [
     {"t_ms": -2980, "method": "GET", "path": "/wp-login.php", "status": 404, "ua_class": "chromium",
      "flags": ["ua_chromium_no_ch", "browser_no_sec_fetch"], "credential_status": null,
-     "tag_status": "absent", "ja4_class": "unknown"},
+     "tag_status": "absent", "ja4_class": "unknown", "payload_hint": null},
     {"t_ms": -2690, "method": "GET", "path": "/.env", "status": 404, "...": "up to 30 turns"}
   ],
   "labels_so_far": [{"source": "rule_decision", "label": "malicious", "confidence": 0.5}],
@@ -125,7 +125,7 @@ Schema:
      "additionalProperties": false, "required": ["name", "turns"],
      "properties": {
        "name": {"type": "string", "enum": [
-         "scanner_paths", "high_404_rate", "machine_cadence", "ua_inconsistent",
+         "attack_payload", "scanner_paths", "high_404_rate", "machine_cadence", "ua_inconsistent",
          "credential_stuffing", "webhook_forgery", "honeytoken_hit", "normal_browsing",
          "verified_partner", "human_cadence", "client_consistent", "insufficient_data"]},
        "turns": {"type": "array", "maxItems": 6,
@@ -142,7 +142,7 @@ Expected `content`:
              {"name": "machine_cadence", "turns": []}]}
 ```
 
-Each signal carries its own cited turns (at most 6); there is no shared list. Every signal is checked against its own turns before anything lands, and each failure is dropped, with the whole failed list on the call row; the label stands only when a surviving signal sits on its side (the eight scanner/stuffing/forgery signals for `malicious`, the four browsing/partner/cadence/consistency signals for `benign`), else it lands as `unknown` with the reason kept.
+Each signal carries its own cited turns (at most 6); there is no shared list. Every signal is checked against its own turns before anything lands, and each failure is dropped, with the whole failed list on the call row; the label stands only when a surviving signal sits on its side (the nine payload/scanner/stuffing/forgery signals for `malicious`, the four browsing/partner/cadence/consistency signals for `benign`), else it lands as `unknown` with the reason kept. Each turn carries `payload_hint` (an attack class from the curated `data/payload-patterns.json` list over the pattern's first-sight samples and the path, or null); only the class travels to the model, never the raw values.
 
 No asset evidence exists in this capture model: static files are served by nginx in production (or artisan serve's static path in generators) and never reach PHP, so turns carry no asset loads either way and `asset_ratio` is a constant 0. It was removed from the label envelope and `no_assets` retired from the signal enum; `normal_browsing` now reads UA class, flag quiet, 404 share and depth instead.
 
