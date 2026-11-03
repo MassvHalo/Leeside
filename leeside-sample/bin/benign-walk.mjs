@@ -31,7 +31,9 @@ const think = () =>
         : 2000 + Math.random() * 3000;
 
 const browser = await engine.launch({ headless: true });
-const context = await browser.newContext();
+// A fixed locale on every engine: without it headless Chromium sends no
+// Accept-Language and every page view flags browser_no_accept_language.
+const context = await browser.newContext({ locale: 'en-US' });
 const page = await context.newPage();
 let assets = 0;
 let documents = 0;

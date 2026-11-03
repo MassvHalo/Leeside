@@ -91,9 +91,10 @@ gen_run() {
     warmup_last_turn_id=$(sqlite3 "$work/gen.sqlite" "select turn_id from turns order by rowid desc limit 1;")
     [ -n "$warmup_last_turn_id" ] || { echo "warmup turn has no turn_id" >&2; exit 1; }
 
-    # The stack is warm (the warmup hits are not generator traffic): the
-    # manifest interval starts here, at millisecond precision so the two
-    # warmup turns sharing start's second stay outside it.
+    # The stack is warm (the warmup hits are not generator traffic and
+    # are purged before the copy; the manifest carries an empty
+    # watermark): the manifest interval starts here, at millisecond
+    # precision.
     local start_ts start_ms start_iso end_ts end_ms end_iso
     start_ts=$(date +%s); start_ms=$(date +%s%3N); start_iso=$(date -u -d "@$start_ts" +%Y-%m-%dT%H:%M:%SZ)
     echo "== run $run_id: $kind on $base (store: fresh)"
@@ -165,7 +166,7 @@ json.dump({
     "start": "$start_iso", "start_ts": $start_ts, "start_ms": $start_ms,
     "end": "$end_iso", "end_ts": $end_ts, "end_ms": $end_ms,
     "source_address": "$GEN_SOURCE", "fresh_store": True,
-    "warmup_last_turn_id": "$warmup_last_turn_id",
+    "warmup_last_turn_id": "",
     "db": "gen.sqlite", "base_url": "$base",
     "turns": $turns, "actor_rows": $actor_rows, "cluster_rows": $cluster_rows,
     "sent": $sent, "sent_source": "$sent_source", "served": $served,
@@ -184,6 +185,21 @@ EOF
         sleep 0.1
     done
     sqlite3 "$work/gen.sqlite" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
+    # The library-UA warmup hits are not generator traffic and must leave
+    # no sampleable subjects: purge them and their derived rows before
+    # the copy. The manifest records an empty watermark, which
+    # label-import reads as "every turn is run traffic".
+    local mark purged
+    mark=$(sqlite3 "$work/gen.sqlite" "select rowid from turns where turn_id='$warmup_last_turn_id';")
+    [ -n "$mark" ] || { echo "warmup watermark turn missing; refusing to guess the purge" >&2; exit 1; }
+    purged=$(sqlite3 "$work/gen.sqlite" \
+        "delete from feature_vectors where turn_id in (select turn_id from turns where rowid <= $mark);" \
+        "delete from scores where turn_id in (select turn_id from turns where rowid <= $mark);" \
+        "delete from labels where (scope = 'actor' and scope_id in (select actor_id from turns where rowid <= $mark)) \
+         or (scope = 'cluster' and scope_id in (select cluster_key from turns where rowid <= $mark));" \
+        "delete from turns where rowid <= $mark;" \
+        "select changes();")
+    [ "$purged" = "2" ] || { echo "warmup purge removed $purged turns, want 2" >&2; exit 1; }
     cp "$work/gen.sqlite" "$work/leesided.log" "$work/php.log" "$runs_dir/"
     # The copy must hold the run: a stub copy (WAL left behind) fails here,
     # not pages later in label-import.
