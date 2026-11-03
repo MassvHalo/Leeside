@@ -3272,6 +3272,638 @@ impl Ctx<'_> {
     }
 }
 
+// ---------- episodes ----------
+
+/// The dashboard window, validated. The API rejects anything else.
+pub fn parse_window(s: &str) -> Option<i64> {
+    match s {
+        "24h" => Some(86_400),
+        "7d" => Some(604_800),
+        "30d" => Some(2_592_000),
+        _ => None,
+    }
+}
+
+/// The window in headline words. Call only with `parse_window` output.
+pub fn window_label(window_s: i64) -> &'static str {
+    match window_s {
+        86_400 => "24 hours",
+        604_800 => "7 days",
+        2_592_000 => "30 days",
+        _ => "24 hours",
+    }
+}
+
+const EPISODE_TITLES_JSON: &str = include_str!("../../data/episode-titles.json");
+
+struct Titles {
+    rules: std::collections::HashMap<String, String>,
+    signals: std::collections::HashMap<String, String>,
+    fallback: String,
+}
+
+fn episode_titles() -> &'static Titles {
+    static ONCE: std::sync::OnceLock<Titles> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let v: serde_json::Value = serde_json::from_str(EPISODE_TITLES_JSON).unwrap_or_default();
+        let map = |k: &str| {
+            v.get(k)
+                .and_then(|o| o.as_object())
+                .map(|o| {
+                    o.iter()
+                        .map(|(kk, vv)| (kk.clone(), vv.as_str().unwrap_or("").to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Titles {
+            rules: map("rules"),
+            signals: map("signals"),
+            fallback: v
+                .get("fallback")
+                .and_then(|s| s.as_str())
+                .unwrap_or("Unusual activity")
+                .to_string(),
+        }
+    })
+}
+
+/// The four-step story: who came, what they tried, what Leeside did,
+/// what's next. For a waiting episode `next` is the evidence line the
+/// design shows under the three decision buttons.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EpisodeStory {
+    pub who: String,
+    pub what: String,
+    pub did: String,
+    pub next: String,
+}
+
+/// One "look closer" chip. `href` is the path under the console
+/// prefix; the API layer prepends `LEESIDED_CONSOLE_PATH`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EpisodeChip {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    pub href: String,
+}
+
+/// One episode: a subject (actor or cluster), a time span, and what
+/// defined it. `explained_by` is set exactly when `summary` is the
+/// subject's latest LLM explanation rather than a template.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Episode {
+    pub id: String,
+    pub scope: String,
+    pub subject: String,
+    pub state: String,
+    pub title: String,
+    pub span_start: i64,
+    pub span_end: i64,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explained_by: Option<String>,
+    pub story: EpisodeStory,
+    pub chips: Vec<EpisodeChip>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    pub window_end_ts: Option<i64>,
+    pub score: Option<f64>,
+    pub threshold: Option<f64>,
+}
+
+/// The newest acting decision on the subject, if any.
+struct StoppedBy {
+    action: String,
+    rule: String,
+}
+
+/// The latest `llm_proposed` label with its call's model, if any.
+struct SubjectProposal {
+    label: String,
+    confidence: f64,
+    reason: String,
+    signals: Vec<String>,
+    cited: usize,
+    model: Option<String>,
+}
+
+fn fmt_n(n: i64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
+fn plural(n: i64, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{} {many}", fmt_n(n))
+    }
+}
+
+impl Ctx<'_> {
+    /// The window's activity grouped into episodes, newest first,
+    /// capped at 100. Stopped beats waiting beats watched: an active
+    /// (unexpired, enforce-mode) decision on the subject, else review
+    /// queue membership, else a window score, window feature row or
+    /// monitor/shadow rule observation.
+    pub fn episodes(
+        &self,
+        window_s: i64,
+        now_s: i64,
+        thresholds: &std::collections::HashMap<String, f64>,
+        windside_shadow: bool,
+    ) -> Result<Vec<Episode>, QueryError> {
+        let since_us = (now_s - window_s).max(0) * 1_000_000;
+        let queue = crate::review::review_rows(self.conn(), usize::MAX, thresholds).map_err(
+            |e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            },
+        )?;
+        let mut queued: std::collections::HashMap<(String, String), crate::review::ReviewRow> =
+            std::collections::HashMap::new();
+        for row in queue {
+            queued.insert((row.scope.clone(), row.scope_id.clone()), row);
+        }
+        let mut subjects: Vec<(String, String)> = Vec::new();
+        for (scope, col) in [("actor", "actor_id"), ("cluster", "cluster_key")] {
+            let mut stmt = self.conn().prepare(&format!(
+                "SELECT DISTINCT {col} FROM turns WHERE {col} IS NOT NULL AND ts_us >= ?1"
+            ))?;
+            let ids: Vec<String> = stmt
+                .query_map(params![since_us], |r| r.get(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for id in ids {
+                subjects.push((scope.to_string(), id));
+            }
+        }
+        let mut out = Vec::new();
+        for (scope, id) in &subjects {
+            if let Some(ep) = self.episode_for(
+                scope,
+                id,
+                since_us,
+                now_s,
+                thresholds,
+                &queued,
+                windside_shadow,
+            )? {
+                out.push(ep);
+            }
+        }
+        out.sort_by(|a: &Episode, b: &Episode| {
+            b.span_end
+                .cmp(&a.span_end)
+                .then_with(|| b.span_start.cmp(&a.span_start))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.truncate(100);
+        Ok(out)
+    }
+
+    /// The latest feature window, for the decision POST's freshness
+    /// check. Same lookup the inspector's label form uses.
+    fn episode_window(&self, scope: &str, id: &str) -> Result<Option<i64>, QueryError> {
+        self.conn()
+            .query_row(
+                "SELECT ts_us FROM feature_vectors WHERE scope = ?1 AND key = ?2 \
+                 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })
+    }
+
+    /// The newest unexpired enforce-mode decision touching the
+    /// subject: an actor-scope decision on an actor, or any decision
+    /// whose key appears on one of the subject's window turns.
+    fn stopped_by(
+        &self,
+        scope: &str,
+        id: &str,
+        since_us: i64,
+        now_s: i64,
+    ) -> Result<Option<StoppedBy>, QueryError> {
+        let col = if scope == "actor" {
+            "actor_id"
+        } else {
+            "cluster_key"
+        };
+        let own = if scope == "actor" {
+            "(scope = 'actor' AND key = ?2) OR "
+        } else {
+            ""
+        };
+        self.conn()
+            .query_row(
+                &format!(
+                    "SELECT action, rule FROM decisions \
+                     WHERE expires_at > ?1 AND mode = 'enforce' AND ({own}EXISTS ( \
+                       SELECT 1 FROM turns t WHERE t.{col} = ?2 AND t.ts_us >= ?3 AND ( \
+                         (decisions.scope = 'session' AND t.session_key = decisions.key) \
+                         OR (decisions.scope = 'peer' AND t.peer_key = decisions.key) \
+                         OR (decisions.scope = 'principal' AND t.principal = decisions.key) \
+                         OR (decisions.scope = 'credential' AND t.credential_hash = decisions.key)))) \
+                     ORDER BY created_at DESC LIMIT 1"
+                ),
+                params![now_s, id, since_us],
+                |r| {
+                    Ok(StoppedBy {
+                        action: r.get(0)?,
+                        rule: r.get(1)?,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })
+    }
+
+    fn latest_proposal(
+        &self,
+        scope: &str,
+        id: &str,
+    ) -> Result<Option<SubjectProposal>, QueryError> {
+        type ProposalCols = (String, f64, Option<String>, Option<String>, Option<String>);
+        let row: Option<ProposalCols> = self
+            .conn()
+            .query_row(
+                "SELECT label, confidence, note, signals, cited_turns FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+                 ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
+                params![scope, id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let Some((label, confidence, note, signals, cited)) = row else {
+            return Ok(None);
+        };
+        let note = note.unwrap_or_default();
+        let reason = crate::review::Proposal::display(&note);
+        let signals: Vec<String> = signals
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let cited: Vec<serde_json::Value> = cited
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let model = note
+            .rsplit_once(" [llm_call:")
+            .and_then(|(_, rest)| rest.strip_suffix(']'))
+            .and_then(|n| n.parse::<i64>().ok())
+            .and_then(|call| {
+                self.conn()
+                    .query_row(
+                        "SELECT model FROM llm_calls WHERE id = ?1",
+                        params![call],
+                        |r| r.get(0),
+                    )
+                    .ok()
+            });
+        Ok(Some(SubjectProposal {
+            label,
+            confidence,
+            reason,
+            signals,
+            cited: cited.len(),
+            model,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn episode_for(
+        &self,
+        scope: &str,
+        id: &str,
+        since_us: i64,
+        now_s: i64,
+        thresholds: &std::collections::HashMap<String, f64>,
+        queued: &std::collections::HashMap<(String, String), crate::review::ReviewRow>,
+        windside_shadow: bool,
+    ) -> Result<Option<Episode>, QueryError> {
+        let col = if scope == "actor" {
+            "actor_id"
+        } else {
+            "cluster_key"
+        };
+        let (turns, first_us, last_us): (i64, i64, i64) = self.conn().query_row(
+            &format!(
+                "SELECT count(*), min(ts_us), max(ts_us) FROM turns WHERE {col} = ?1 AND ts_us >= ?2"
+            ),
+            params![id, since_us],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if turns == 0 {
+            return Ok(None);
+        }
+        let dominant_route: String = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT route FROM turns WHERE {col} = ?1 AND ts_us >= ?2 \
+                     GROUP BY route ORDER BY count(*) DESC LIMIT 1"
+                ),
+                params![id, since_us],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let dominant_surface: Option<String> = self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT surface FROM turns WHERE {col} = ?1 AND ts_us >= ?2 \
+                     GROUP BY surface ORDER BY count(*) DESC LIMIT 1"
+                ),
+                params![id, since_us],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        let surface = dominant_surface.as_deref().unwrap_or("web");
+        let stopped = self.stopped_by(scope, id, since_us, now_s)?;
+        let queue_row = queued.get(&(scope.to_string(), id.to_string()));
+        let score: Option<(f64, Option<String>, i64)> = self
+            .conn()
+            .query_row(
+                "SELECT score, surface, ts_us FROM scores WHERE scope = ?1 AND scope_id = ?2 \
+                 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let (rules, observe) =
+            crate::review::subject_hits(self.conn(), scope, id, now_s).map_err(|e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            })?;
+        let has_features: bool = self.conn().query_row(
+            "SELECT 1 FROM feature_vectors WHERE scope = ?1 AND key = ?2 AND ts_us >= ?3 LIMIT 1",
+            params![scope, id, since_us],
+            |_| Ok(true),
+        ).or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            e => Err(QueryError::Sqlite(e)),
+        })?;
+        let scored_in_window = score.as_ref().is_some_and(|(_, _, ts)| *ts >= since_us);
+        let state = if stopped.is_some() {
+            "stopped"
+        } else if queue_row.is_some() {
+            "waiting"
+        } else if scored_in_window || has_features || !observe.is_empty() {
+            "watched"
+        } else {
+            return Ok(None);
+        };
+        let proposal = self.latest_proposal(scope, id)?;
+        let titles = episode_titles();
+        let newest_hit = rules
+            .iter()
+            .chain(observe.iter())
+            .max_by_key(|h| h.ts)
+            .map(|h| h.rule.as_str());
+        let newest_observe = observe.iter().max_by_key(|h| h.ts).map(|h| h.rule.as_str());
+        let title = if let Some(s) = &stopped {
+            titles.rules.get(&s.rule).cloned()
+        } else if state == "waiting" {
+            newest_hit
+                .and_then(|r| titles.rules.get(r).cloned())
+                .or_else(|| {
+                    proposal.as_ref().and_then(|p| {
+                        p.signals
+                            .iter()
+                            .filter_map(|s| titles.signals.get(s).cloned())
+                            .next()
+                    })
+                })
+        } else {
+            newest_observe.and_then(|r| titles.rules.get(r).cloned())
+        }
+        .unwrap_or_else(|| titles.fallback.replace("{surface}", surface));
+        let rule_chip = if let Some(s) = &stopped {
+            Some(s.rule.clone())
+        } else if state == "waiting" {
+            newest_hit.map(str::to_string)
+        } else {
+            newest_observe.map(str::to_string)
+        };
+        let who = self.episode_who(scope, id, since_us)?;
+        let what = if dominant_route.is_empty() {
+            format!("{} on {surface}", plural(turns, "request", "requests"))
+        } else {
+            format!(
+                "{}, mostly {dominant_route}",
+                plural(turns, "request", "requests")
+            )
+        };
+        let action_word = stopped.as_ref().map(|s| match s.action.as_str() {
+            "block" => "Blocked",
+            "rate_limit" => "Rate limited",
+            "challenge" => "Challenged",
+            a => a,
+        });
+        let did = match (&stopped, state) {
+            (Some(s), _) => match action_word {
+                Some(w) => format!("{w} by {}", s.rule),
+                None => format!("Stopped by {}", s.rule),
+            },
+            (None, "waiting") if windside_shadow => "Nothing yet. It only logged them.".to_string(),
+            (None, "waiting") => "Nothing yet. Waiting on a decision.".to_string(),
+            _ => "Watched. Nothing was stopped.".to_string(),
+        };
+        let next = match state {
+            "waiting" => {
+                let mut parts = Vec::new();
+                if let Some((s, _, _)) = &score {
+                    parts.push(format!("Windside score {s:.2}"));
+                }
+                if let Some(p) = &proposal {
+                    parts.push(format!(
+                        "proposed {} at {:.2}, cited {} turns",
+                        p.label, p.confidence, p.cited
+                    ));
+                }
+                if parts.is_empty() {
+                    "Not scored yet, no proposal yet".to_string()
+                } else {
+                    parts.join(", ")
+                }
+            }
+            "stopped" => {
+                let hold = stopped.as_ref().map(|s| match s.action.as_str() {
+                    "block" => "block",
+                    "rate_limit" => "rate limit",
+                    "challenge" => "challenge",
+                    a => a,
+                });
+                match hold {
+                    Some(h) => format!("Nothing. The {h} is still holding."),
+                    None => "Nothing. It is still holding.".to_string(),
+                }
+            }
+            _ => "Nothing yet. Windside is still watching.".to_string(),
+        };
+        let (summary, explained_by) = match &proposal {
+            Some(p) if !p.reason.trim().is_empty() && p.model.is_some() => {
+                (p.reason.clone(), p.model.clone())
+            }
+            _ => (format!("{what}. {did}."), None),
+        };
+        let episode_id = format!("ep_{scope}_{id}");
+        let mut chips = Vec::new();
+        if scope == "cluster" {
+            let actors: i64 = self.conn().query_row(
+                "SELECT count(DISTINCT actor_id) FROM turns WHERE cluster_key = ?1 AND ts_us >= ?2",
+                params![id, since_us],
+                |r| r.get(0),
+            )?;
+            if actors > 0 {
+                chips.push(EpisodeChip {
+                    label: "actors".to_string(),
+                    count: Some(actors),
+                    href: format!("/ui/actors?episode={episode_id}"),
+                });
+            }
+        } else {
+            chips.push(EpisodeChip {
+                label: "actor".to_string(),
+                count: None,
+                href: format!("/ui/actors/{id}"),
+            });
+        }
+        chips.push(EpisodeChip {
+            label: "requests".to_string(),
+            count: Some(turns),
+            href: format!("/ui/traffic?episode={episode_id}"),
+        });
+        if let Some(rule) = rule_chip {
+            chips.push(EpisodeChip {
+                label: format!("Rule {rule}"),
+                count: None,
+                href: format!("/ui/rules/{rule}"),
+            });
+        }
+        Ok(Some(Episode {
+            id: episode_id,
+            scope: scope.to_string(),
+            subject: id.to_string(),
+            state: state.to_string(),
+            title,
+            span_start: first_us / 1_000_000,
+            span_end: last_us / 1_000_000,
+            summary,
+            explained_by,
+            story: EpisodeStory {
+                who,
+                what,
+                did,
+                next,
+            },
+            chips,
+            why: queue_row.map(|r| r.why.as_str().to_string()),
+            window_end_ts: self.episode_window(scope, id)?,
+            score: score.as_ref().map(|(s, _, _)| *s),
+            threshold: score.as_ref().and_then(|(_, s, _)| {
+                s.as_deref()
+                    .and_then(|surface| thresholds.get(surface).copied())
+            }),
+        }))
+    }
+
+    /// Who came: the cluster's clients and networks, or the actor's
+    /// derived kind with its network context.
+    fn episode_who(&self, scope: &str, id: &str, since_us: i64) -> Result<String, QueryError> {
+        if scope == "cluster" {
+            let (clients, nets, signed): (i64, i64, i64) = self.conn().query_row(
+                "SELECT count(DISTINCT peer_key), count(DISTINCT net_hash), \
+                 max(principal != 'anon') FROM turns WHERE cluster_key = ?1 AND ts_us >= ?2",
+                params![id, since_us],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let mut who = plural(clients, "client", "clients");
+            if nets > 0 {
+                who.push_str(&format!(" on {}", plural(nets, "network", "networks")));
+            }
+            if signed == 0 {
+                who.push_str(", none signed in");
+            }
+            return Ok(who);
+        }
+        let bindings: Vec<String> = self
+            .conn()
+            .prepare("SELECT DISTINCT kind FROM actor_bindings WHERE actor_id = ?1")?
+            .query_map(params![id], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let verified: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT credential_kind FROM turns \
+                 WHERE actor_id = ?1 AND credential_status = 'verified' \
+                 AND credential_kind IS NOT NULL LIMIT 1",
+                params![id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let mut who = match kind_of(&bindings, verified.as_deref()).as_str() {
+            "browser only" => "one visitor with no login or key".to_string(),
+            k => format!("one {k}"),
+        };
+        let cluster: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT cluster_key FROM turns WHERE actor_id = ?1 AND ts_us >= ?2 \
+                 AND cluster_key IS NOT NULL ORDER BY ts_us DESC LIMIT 1",
+                params![id, since_us],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        if let Some(key) = cluster {
+            let others: i64 = self.conn().query_row(
+                "SELECT count(DISTINCT actor_id) FROM turns WHERE cluster_key = ?1 AND ts_us >= ?2",
+                params![key, since_us],
+                |r| r.get(0),
+            )?;
+            if others > 1 {
+                who.push_str(&format!(
+                    ", on a network with {}",
+                    plural(others - 1, "other", "others")
+                ));
+            }
+        }
+        Ok(who)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3300,6 +3932,168 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    fn episode_db(name: &str) -> (Connection, i64) {
+        let now: i64 = 1_800_000_000;
+        let us = |s: i64| s * 1_000_000;
+        let path = std::env::temp_dir().join(format!("leesided-q-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = Connection::open(&path).unwrap();
+        crate::store::migrate(&mut conn).unwrap();
+        // a_stop: three window turns on one session, stopped by a
+        // session-scope rate limit. a_stop2: stopped by an actor-scope
+        // block. a_wait: scored high with a proposal, queued. c_watch:
+        // cookie-less cluster turns with a shadow observation. a_plain:
+        // turns and nothing else (no episode). a_quiet: an old score,
+        // no window turns (no episode).
+        conn.execute_batch(&format!(
+            "INSERT INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id, surface, rules_matched) VALUES \
+             ('s1', {t1}, {now}, 'p1', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_stop', 'web', NULL), \
+             ('s1', {t2}, {now}, 'p1', 'anon', 'POST', 'portal.login', 429, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_stop', 'web', NULL), \
+             ('s1', {t3}, {now}, 'p1', 'anon', 'POST', 'portal.login', 429, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_stop', 'web', NULL), \
+             ('s2', {t3}, {now}, 'p2', 'anon', 'GET', 'venues.show', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_stop2', 'web', NULL), \
+             ('s3', {t2}, {now}, 'p3', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_wait', 'web', NULL), \
+             ('s3', {t3}, {now}, 'p3', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_wait', 'web', NULL), \
+             ('s4', {t2}, {now}, 'p4', 'anon', 'GET', 'x', 500, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, NULL, 'web', \
+             '[{{\"rule\":\"server-error-watch\",\"action\":\"watch\",\"mode\":\"shadow\"}}]'), \
+             ('s5', {t3}, {now}, 'p5', 'anon', 'GET', 'x', 500, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, NULL, 'web', NULL), \
+             ('s6', {t3}, {now}, 'p6', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_plain', 'web', NULL); \
+             UPDATE turns SET cluster_key = 'c_watch' WHERE session_key IN ('s4', 's5'); \
+             INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) VALUES \
+             ('session', 's1', 'rate_limit', 'enforce', 'portal-otp-burst', 1, {c1}, {e1}), \
+             ('actor', 'a_stop2', 'block', 'enforce', 'venue-enumeration', 1, {c1}, {e1}), \
+             ('session', 's9', 'block', 'shadow', 'http-404-scan', 1, {c1}, {e1}); \
+             INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+             ('actor', 'a_wait', 't9', 'web', {t3}, 0.9, 'm', '[]'), \
+             ('actor', 'a_quiet', 't0', 'web', {old}, 0.9, 'm', '[]'); \
+             INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
+             ('actor', 'a_wait', 't9', {t3}, 2, '[0.0]', 'web', 0); \
+             INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, signals, cited_turns, created_at) VALUES \
+             ('actor', 'a_wait', 'web', {t3}, 'malicious', 'llm_proposed', 0.91, \
+             'A bot kept guessing. [llm_call:1]', '[\"credential_stuffing\"]', '[1,2]', {c1}); \
+             INSERT INTO llm_calls (id, point, model, prompt_hash, json_mode, input_summary, request, created_at) VALUES \
+             (1, 'label', 'Muse Spark', 'h', 'prompt', '{{}}', '{{}}', {c1});",
+            t1 = us(now - 7200),
+            t2 = us(now - 3600),
+            t3 = us(now - 60),
+            old = us(now - 90000),
+            c1 = now - 50,
+            e1 = now + 1000,
+        ))
+        .unwrap();
+        (conn, now)
+    }
+
+    #[test]
+    fn episodes_group_states_titles_and_stories() {
+        let (conn, now) = episode_db("episodes");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let mut thresholds = std::collections::HashMap::new();
+        thresholds.insert("web".to_string(), 0.5);
+        let eps = ctx.episodes(86_400, now, &thresholds, true).unwrap();
+        assert_eq!(eps.len(), 4);
+        let by_id = |id: &str| eps.iter().find(|e| e.id == id).unwrap().clone();
+        // Newest first: every span ends at t3 except a_stop2 (t3 too);
+        // assert the order is non-increasing and stable.
+        let ends: Vec<i64> = eps.iter().map(|e| e.span_end).collect();
+        let mut sorted = ends.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(ends, sorted);
+
+        let stopped = by_id("ep_actor_a_stop");
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.title, "Someone guessed login codes");
+        assert_eq!(stopped.why, None);
+        assert_eq!(stopped.story.did, "Rate limited by portal-otp-burst");
+        assert_eq!(
+            stopped.story.next,
+            "Nothing. The rate limit is still holding."
+        );
+        assert_eq!(stopped.story.what, "3 requests, mostly portal.login");
+        assert!(stopped.summary.ends_with('.'));
+        assert!(stopped.summary.contains("3 requests"));
+        assert_eq!(stopped.explained_by, None);
+        assert_eq!(stopped.chips.len(), 3);
+        assert_eq!(stopped.chips[2].label, "Rule portal-otp-burst");
+        assert_eq!(stopped.chips[2].href, "/ui/rules/portal-otp-burst");
+
+        let blocked = by_id("ep_actor_a_stop2");
+        assert_eq!(blocked.state, "stopped");
+        assert_eq!(blocked.title, "Someone walked through venue ids");
+        assert_eq!(blocked.story.did, "Blocked by venue-enumeration");
+
+        let waiting = by_id("ep_actor_a_wait");
+        assert_eq!(waiting.state, "waiting");
+        assert_eq!(waiting.why.as_deref(), Some("above_threshold_no_rule"));
+        assert_eq!(waiting.title, "Someone stuffed stolen passwords");
+        assert_eq!(waiting.summary, "A bot kept guessing.");
+        assert_eq!(waiting.explained_by.as_deref(), Some("Muse Spark"));
+        assert_eq!(
+            waiting.story.next,
+            "Windside score 0.90, proposed malicious at 0.91, cited 2 turns"
+        );
+        assert_eq!(waiting.story.did, "Nothing yet. It only logged them.");
+        assert_eq!(waiting.score, Some(0.9));
+        assert_eq!(waiting.threshold, Some(0.5));
+        assert!(waiting.window_end_ts.is_some());
+        assert_eq!(waiting.chips[0].href, "/ui/actors/a_wait");
+        assert_eq!(waiting.chips[1].count, Some(2));
+
+        let watched = by_id("ep_cluster_c_watch");
+        assert_eq!(watched.state, "watched");
+        assert_eq!(watched.title, "Someone triggered server errors");
+        assert_eq!(watched.story.did, "Watched. Nothing was stopped.");
+        assert_eq!(
+            watched.story.next,
+            "Nothing yet. Windside is still watching."
+        );
+        assert!(watched.story.who.contains("2 clients"));
+        assert!(watched.story.who.contains("none signed in"));
+        // No actor identity held: no actors chip, just requests and rule.
+        assert_eq!(watched.chips.len(), 2);
+        assert_eq!(watched.chips[0].label, "requests");
+
+        // The shadow-mode decision on s9 stops nothing; the plain and
+        // quiet actors have no episodes.
+        assert!(!eps.iter().any(|e| e.subject == "a_plain"));
+        assert!(!eps.iter().any(|e| e.subject == "a_quiet"));
+    }
+
+    #[test]
+    fn episode_titles_cover_rules_signals_and_fallback() {
+        let t = episode_titles();
+        for rule in [
+            "portal-otp-burst",
+            "venue-enumeration",
+            "visit-straight-to-login",
+            "auth-burst-peer",
+            "http-404-scan",
+            "server-error-watch",
+            "credential-spray",
+        ] {
+            assert!(t.rules.contains_key(rule), "{rule} has a title");
+        }
+        for signal in crate::faithfulness::SIGNALS {
+            assert!(t.signals.contains_key(signal), "{signal} has a title");
+        }
+        assert!(t.fallback.contains("{surface}"));
+        assert_eq!(parse_window("24h"), Some(86_400));
+        assert_eq!(parse_window("7d"), Some(604_800));
+        assert_eq!(parse_window("30d"), Some(2_592_000));
+        assert_eq!(parse_window("1h"), None);
+        assert_eq!(window_label(86_400), "24 hours");
     }
 
     #[test]

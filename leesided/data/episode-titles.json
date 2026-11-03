@@ -1,0 +1,29 @@
+{
+  "_note": "Dashboard episode titles: one template per rule name and per proposal signal. The query falls back to `fallback` with {surface} filled in. Embedded via include_str, so a rebuild picks up edits.",
+  "rules": {
+    "portal-otp-burst": "Someone guessed login codes",
+    "venue-enumeration": "Someone walked through venue ids",
+    "visit-straight-to-login": "A bot posed as a browser",
+    "auth-burst-peer": "Someone guessed passwords",
+    "http-404-scan": "Someone scanned for weak spots",
+    "server-error-watch": "Someone triggered server errors",
+    "credential-spray": "Someone tried random API keys"
+  },
+  "signals": {
+    "attack_payload": "Someone sent an attack payload",
+    "scanner_paths": "Someone scanned for weak spots",
+    "high_404_rate": "Someone hit many missing pages",
+    "machine_cadence": "Requests came at machine pace",
+    "ua_inconsistent": "A client kept changing its name",
+    "credential_stuffing": "Someone stuffed stolen passwords",
+    "webhook_forgery": "Forged webhooks were refused",
+    "honeytoken_hit": "Crawlers touched a hidden trap",
+    "rejected_actions": "Requests kept getting refused",
+    "normal_browsing": "Normal browsing, flagged anyway",
+    "verified_partner": "A partner tripped a check",
+    "human_cadence": "Reads human, flagged anyway",
+    "client_consistent": "A consistent client, flagged anyway",
+    "insufficient_data": "Too little data to judge"
+  },
+  "fallback": "Unusual activity on {surface}"
+}

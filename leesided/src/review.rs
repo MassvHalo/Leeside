@@ -99,7 +99,8 @@ pub struct Proposal {
 
 impl Proposal {
     /// The note is `{reason} [llm_call:{id}]`; the review shows the reason.
-    fn display(reason_note: &str) -> String {
+    /// Shared with the dashboard episodes query.
+    pub(crate) fn display(reason_note: &str) -> String {
         reason_note
             .rsplit_once(" [llm_call:")
             .map(|(reason, _)| reason)
@@ -119,10 +120,10 @@ fn open_db(db: &Path) -> Result<Connection, ReviewError> {
 }
 
 /// A rule or observe hit on the subject: the rule name and when
-/// (unix seconds).
-struct Hit {
-    rule: String,
-    ts: i64,
+/// (unix seconds). Shared with the dashboard episodes query.
+pub(crate) struct Hit {
+    pub(crate) rule: String,
+    pub(crate) ts: i64,
 }
 
 fn acting(action: &str) -> bool {
@@ -133,7 +134,7 @@ fn acting(action: &str) -> bool {
 /// blocks), live sticky decisions, and the subject's recent turns'
 /// `rules_matched` (enforce-mode acting matches). Observe hits are
 /// matches in monitor or shadow mode. Turn scans cap at 64 rows.
-fn subject_hits(
+pub(crate) fn subject_hits(
     conn: &Connection,
     scope: &str,
     scope_id: &str,
