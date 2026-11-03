@@ -70,7 +70,7 @@ fn print_help(words: &[&str]) {
             "usage: leesided llm subjects [--scope actor|cluster] [--top <n>]"
         }
         ["llm", "drain", ..] => "usage: leesided llm drain (drains the queued jobs in LEESIDED_LLM_MODE)",
-        ["llm", "eval", ..] => "usage: leesided llm eval --point label|explain|classify|draft [--set <file>] [--prompt <file>] [--model <slug>] [--limit <n>] | llm eval --compare <hash> <hash>",
+        ["llm", "eval", ..] => "usage: leesided llm eval --point label|explain|classify|draft [--set <file>] [--prompt <file>] [--model <slug>] [--limit <n>] [--repeat <n>] | llm eval --compare <hash> <hash>",
         ["llm", "eval-build", ..] => "usage: leesided llm eval-build --point label|explain|classify|draft --out <file> [--kind <kind>] [--early] [--sample <n>] [--limit <n>]",
         ["llm", ..] => "usage: leesided llm show --point <point> --subject <scope>:<id> | llm send --point <point> --subject <scope>:<id> | llm subjects [--scope actor|cluster] [--top <n>] | llm drain",
         _ => FULL_USAGE,
@@ -599,6 +599,7 @@ fn run_llm_eval(args: &[&str]) {
     let mut prompt_file: Option<String> = None;
     let mut model: Option<String> = None;
     let mut limit: Option<usize> = None;
+    let mut repeat: usize = 1;
     let mut compare: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -613,6 +614,17 @@ fn run_llm_eval(args: &[&str]) {
                     eprintln!("leesided llm eval: --limit is a row count, not {v}");
                     std::process::exit(2);
                 }));
+            }
+            "--repeat" => {
+                let v = need_value(&mut it, "eval", "--repeat");
+                repeat = v.parse().unwrap_or_else(|_| {
+                    eprintln!("leesided llm eval: --repeat is a pass count, not {v}");
+                    std::process::exit(2);
+                });
+                if repeat < 1 {
+                    eprintln!("leesided llm eval: --repeat is a pass count, not {v}");
+                    std::process::exit(2);
+                }
             }
             "--compare" => {
                 for _ in 0..2 {
@@ -718,6 +730,7 @@ fn run_llm_eval(args: &[&str]) {
         json_mode: o.json_mode,
         effort,
         limit,
+        repeats: repeat,
     };
     match leesided::llm_eval::evaluate(&cfg.db, std::path::Path::new(&set), &point, &input) {
         Ok(summary) => summary.print(),

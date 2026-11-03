@@ -369,6 +369,7 @@ pub struct EvalInput<'a> {
     pub json_mode: JsonMode,
     pub effort: Option<String>,
     pub limit: Option<usize>,
+    pub repeats: usize,
 }
 
 #[derive(Debug, Default)]
@@ -381,8 +382,11 @@ pub struct EvalSummary {
     pub rows: usize,
     pub skipped: usize,
     pub errors: usize,
+    pub repeats: usize,
     pub agreement: Option<f64>,
     pub agreement_raw: Option<f64>,
+    pub agreement_spread: Option<f64>,
+    pub agreement_raw_spread: Option<f64>,
     pub groups: serde_json::Value,
     pub calibration: serde_json::Value,
     pub faithfulness_failures: usize,
@@ -403,12 +407,13 @@ impl EvalSummary {
             self.json_mode
         );
         println!(
-            "rows={} skipped={} errors={} agreement={} agreement_raw={} faithfulness_failures={} parse_failures={}",
+            "rows={} skipped={} errors={} repeats={} agreement={} agreement_raw={} faithfulness_failures={} parse_failures={}",
             self.rows,
             self.skipped,
             self.errors,
-            fmt_opt(self.agreement, 4),
-            fmt_opt(self.agreement_raw, 4),
+            self.repeats,
+            fmt_opt_pm(self.agreement, self.agreement_spread, 4),
+            fmt_opt_pm(self.agreement_raw, self.agreement_raw_spread, 4),
             self.faithfulness_failures,
             self.parse_failures,
         );
@@ -447,6 +452,29 @@ fn fmt_opt(v: Option<f64>, places: usize) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn fmt_opt_pm(v: Option<f64>, spread: Option<f64>, places: usize) -> String {
+    match (v, spread) {
+        (Some(x), Some(s)) => format!("{x:.places$}±{s:.places$}"),
+        _ => fmt_opt(v, places),
+    }
+}
+
+/// Mean and population spread of one metric across repeat passes;
+/// the spread is `None` on a single pass (unmeasured, not zero).
+fn mean_spread(xs: &[f64]) -> (Option<f64>, Option<f64>) {
+    if xs.is_empty() {
+        return (None, None);
+    }
+    let m = xs.iter().sum::<f64>() / xs.len() as f64;
+    let spread = if xs.len() > 1 {
+        let v = xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / xs.len() as f64;
+        Some(v.sqrt())
+    } else {
+        None
+    };
+    (Some(m), spread)
+}
+
 fn open_db(db: &Path) -> Result<Connection, LlmError> {
     if !db.exists() {
         return Err(LlmError::MissingDb(db.display().to_string()));
@@ -465,6 +493,8 @@ fn usd_per_mtok() -> Option<(f64, f64)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+type GroupCounts = HashMap<String, (usize, usize, usize)>;
+
 struct Acc {
     graded: usize,
     agree: usize,
@@ -478,14 +508,14 @@ struct Acc {
     latency_ms: i64,
     worst: Vec<serde_json::Value>,
     // label: (graded, agree, agree_raw) per group
-    kind_n: HashMap<String, (usize, usize, usize)>,
-    scope_n: HashMap<String, (usize, usize, usize)>,
+    kind_n: GroupCounts,
+    scope_n: GroupCounts,
     bins: [(usize, usize); 5],
     unknown: usize,
     signal_violations: usize,
     dropped: HashMap<String, usize>,
     // classify
-    cat: HashMap<String, (usize, usize, usize)>,
+    cat: GroupCounts,
     // explain
     length_violations: usize,
     // draft
@@ -546,8 +576,142 @@ pub fn evaluate(
         Some(n) => rows.into_iter().take(n).collect(),
         None => rows,
     };
+    // Repeat passes run the whole set under one prompt hash, one
+    // fresh accumulator per pass so per-pass rates stay separate.
+    let repeats = input.repeats.max(1);
+    let mut passes: Vec<Acc> = Vec::with_capacity(repeats);
+    for r in 0..repeats {
+        let mut acc = sweep(&conn, point, set, &rows, input)?;
+        if repeats > 1 {
+            for w in acc.worst.iter_mut() {
+                if let Some(o) = w.as_object_mut() {
+                    o.insert("repeat".to_string(), serde_json::json!(r + 1));
+                }
+            }
+        }
+        passes.push(acc);
+    }
+    let now = now_s();
+    let (groups, calibration) = report_groups(point, &passes);
+    let agree_rates: Vec<f64> = passes
+        .iter()
+        .filter_map(|a| rate(a.agree, a.graded))
+        .collect();
+    let raw_rates: Vec<f64> = passes
+        .iter()
+        .filter_map(|a| rate(a.agree_raw, a.graded))
+        .collect();
+    let (agreement, agreement_spread) = mean_spread(&agree_rates);
+    let (agreement_raw, agreement_raw_spread) = if point == "label" {
+        mean_spread(&raw_rates)
+    } else {
+        (None, None)
+    };
+    // Counts accumulate across passes; skips are identical every
+    // pass (nothing graded), so the first pass stands for all.
+    let tot = |f: fn(&Acc) -> usize| passes.iter().map(f).sum::<usize>();
+    let tot_i64 = |f: fn(&Acc) -> i64| passes.iter().map(f).sum::<i64>();
+    let skipped = passes[0].skipped;
+    let sent = repeats * (rows.len() - skipped);
+    let prompt_tokens = tot_i64(|a| a.prompt_tokens);
+    let completion_tokens = tot_i64(|a| a.completion_tokens);
+    let latency_ms = tot_i64(|a| a.latency_ms);
+    let tokens_per_row = if sent > 0 {
+        Some((prompt_tokens + completion_tokens) as f64 / sent as f64)
+    } else {
+        None
+    };
+    let latency_ms_per_row = if sent > 0 {
+        Some(latency_ms as f64 / sent as f64)
+    } else {
+        None
+    };
+    let cost_usd = usd_per_mtok().map(|(pi, po)| {
+        prompt_tokens as f64 / 1_000_000.0 * pi + completion_tokens as f64 / 1_000_000.0 * po
+    });
+    // Worst first: errors, then parse failures, then disagreements.
+    let mut worst: Vec<serde_json::Value> = passes
+        .iter()
+        .flat_map(|a| a.worst.iter().cloned())
+        .collect();
+    worst.sort_by_key(|w| {
+        let got = w.get("got").and_then(|v| v.as_str()).unwrap_or("");
+        if got.starts_with("error:") {
+            0
+        } else if got == "unparsed" {
+            1
+        } else {
+            2
+        }
+    });
+    worst.truncate(10);
+    let worst = serde_json::Value::Array(worst);
+    conn.execute(
+        "INSERT INTO llm_evals (created_at, point, prompt_hash, model, json_mode, rows, skipped, \
+         agreement, agreement_raw, groups, calibration, faithfulness_failures, parse_failures, \
+         tokens_per_row, latency_ms_per_row, cost_usd, worst, repeats, agreement_spread, \
+         agreement_raw_spread) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+         ?19, ?20)",
+        params![
+            now,
+            point,
+            input.prompt_hash,
+            input.model,
+            input.json_mode.as_str(),
+            rows.len() as i64,
+            skipped as i64,
+            agreement,
+            agreement_raw,
+            serde_json::to_string(&groups).unwrap_or_else(|_| "null".to_string()),
+            serde_json::to_string(&calibration).unwrap_or_else(|_| "null".to_string()),
+            tot(|a| a.faithfulness_failures) as i64,
+            tot(|a| a.parse_failures) as i64,
+            tokens_per_row,
+            latency_ms_per_row,
+            cost_usd,
+            serde_json::to_string(&worst).unwrap_or_else(|_| "[]".to_string()),
+            repeats as i64,
+            agreement_spread,
+            agreement_raw_spread,
+        ],
+    )?;
+    Ok(EvalSummary {
+        eval_id: conn.last_insert_rowid(),
+        point: point.to_string(),
+        model: input.model.clone(),
+        prompt_hash: input.prompt_hash.clone(),
+        json_mode: input.json_mode.as_str().to_string(),
+        rows: rows.len(),
+        skipped,
+        errors: tot(|a| a.errors),
+        repeats,
+        agreement,
+        agreement_raw,
+        agreement_spread,
+        agreement_raw_spread,
+        groups,
+        calibration,
+        faithfulness_failures: tot(|a| a.faithfulness_failures),
+        parse_failures: tot(|a| a.parse_failures),
+        tokens_per_row,
+        latency_ms_per_row,
+        cost_usd,
+        worst,
+    })
+}
+
+/// One sweep of the set: live calls, logged, graded into a fresh
+/// accumulator.
+fn sweep(
+    conn: &Connection,
+    point: &str,
+    set: &Path,
+    rows: &[(usize, serde_json::Value)],
+    input: &EvalInput,
+) -> Result<Acc, LlmError> {
     let mut acc = Acc::new();
-    for (n, v) in &rows {
+    for (n, v) in rows {
         if skippable(point, set, *n, v)? {
             acc.skipped += 1;
             continue;
@@ -555,7 +719,7 @@ pub fn evaluate(
         let envelope = envelope_for(point, set, *n, v)?;
         let now = now_s();
         budget_check(
-            &conn,
+            conn,
             point,
             now,
             input.exec.daily_calls,
@@ -579,7 +743,7 @@ pub fn evaluate(
         }
         let summary = serde_json::json!({"eval_row": n, "point": point}).to_string();
         let call_ids = log_exchanges(
-            &conn,
+            conn,
             point,
             &input.model,
             &input.prompt_hash,
@@ -590,7 +754,7 @@ pub fn evaluate(
         )?;
         let call_id = call_ids.last().copied().unwrap_or(0);
         grade(
-            &conn,
+            conn,
             point,
             set,
             *n,
@@ -602,93 +766,7 @@ pub fn evaluate(
             &mut acc,
         )?;
     }
-    let now = now_s();
-    let (groups, calibration) = report_groups(point, &acc);
-    let graded = acc.graded as f64;
-    let agreement = if acc.graded > 0 {
-        Some(acc.agree as f64 / graded)
-    } else {
-        None
-    };
-    let agreement_raw = if point == "label" && acc.graded > 0 {
-        Some(acc.agree_raw as f64 / graded)
-    } else {
-        None
-    };
-    let sent = rows.len() - acc.skipped;
-    let tokens_per_row = if sent > 0 {
-        Some((acc.prompt_tokens + acc.completion_tokens) as f64 / sent as f64)
-    } else {
-        None
-    };
-    let latency_ms_per_row = if sent > 0 {
-        Some(acc.latency_ms as f64 / sent as f64)
-    } else {
-        None
-    };
-    let cost_usd = usd_per_mtok().map(|(pi, po)| {
-        acc.prompt_tokens as f64 / 1_000_000.0 * pi
-            + acc.completion_tokens as f64 / 1_000_000.0 * po
-    });
-    // Worst first: errors, then parse failures, then disagreements.
-    let mut worst = std::mem::take(&mut acc.worst);
-    worst.sort_by_key(|w| {
-        let got = w.get("got").and_then(|v| v.as_str()).unwrap_or("");
-        if got.starts_with("error:") {
-            0
-        } else if got == "unparsed" {
-            1
-        } else {
-            2
-        }
-    });
-    worst.truncate(10);
-    let worst = serde_json::Value::Array(worst);
-    conn.execute(
-        "INSERT INTO llm_evals (created_at, point, prompt_hash, model, json_mode, rows, skipped, \
-         agreement, agreement_raw, groups, calibration, faithfulness_failures, parse_failures, \
-         tokens_per_row, latency_ms_per_row, cost_usd, worst) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-        params![
-            now,
-            point,
-            input.prompt_hash,
-            input.model,
-            input.json_mode.as_str(),
-            rows.len() as i64,
-            acc.skipped as i64,
-            agreement,
-            agreement_raw,
-            serde_json::to_string(&groups).unwrap_or_else(|_| "null".to_string()),
-            serde_json::to_string(&calibration).unwrap_or_else(|_| "null".to_string()),
-            acc.faithfulness_failures as i64,
-            acc.parse_failures as i64,
-            tokens_per_row,
-            latency_ms_per_row,
-            cost_usd,
-            serde_json::to_string(&worst).unwrap_or_else(|_| "[]".to_string()),
-        ],
-    )?;
-    Ok(EvalSummary {
-        eval_id: conn.last_insert_rowid(),
-        point: point.to_string(),
-        model: input.model.clone(),
-        prompt_hash: input.prompt_hash.clone(),
-        json_mode: input.json_mode.as_str().to_string(),
-        rows: rows.len(),
-        skipped: acc.skipped,
-        errors: acc.errors,
-        agreement,
-        agreement_raw,
-        groups,
-        calibration,
-        faithfulness_failures: acc.faithfulness_failures,
-        parse_failures: acc.parse_failures,
-        tokens_per_row,
-        latency_ms_per_row,
-        cost_usd,
-        worst,
-    })
+    Ok(acc)
 }
 
 /// Rows with nothing to grade against skip before any call goes
@@ -804,7 +882,27 @@ fn grade(
             let raw = p.label.clone();
             let claimed = p.signal_names();
             let failed = apply_faithfulness(envelope, &mut p, honeytoken_routes);
-            let accepted = |l: &str| l == expected || row.also_accept.iter().any(|a| a == l);
+            // A cold row with a decisive single-turn signal also
+            // accepts the kind's label: the model reading one
+            // rejected webhook as malicious is right, not guessing.
+            let decisive = if expected == "unknown" {
+                row.kind.as_deref().and_then(|k| {
+                    let lab = if k.starts_with("attack") {
+                        "malicious"
+                    } else if k.starts_with("benign") {
+                        "benign"
+                    } else {
+                        return None;
+                    };
+                    let honey: HashSet<String> = honeytoken_routes.iter().cloned().collect();
+                    crate::faithfulness::decisive_signal(envelope, &honey).then_some(lab)
+                })
+            } else {
+                None
+            };
+            let accepted = |l: &str| {
+                l == expected || row.also_accept.iter().any(|a| a == l) || decisive == Some(l)
+            };
             let agree_raw = accepted(&raw);
             let agree = accepted(&p.label);
             acc.graded += 1;
@@ -816,8 +914,14 @@ fn grade(
                     p.confidence,
                     p.signal_names(),
                 );
-                if !row.also_accept.is_empty() {
-                    detail.push_str(&format!(" accepted={:?}", row.also_accept));
+                if !row.also_accept.is_empty() || decisive.is_some() {
+                    let mut list = row.also_accept.clone();
+                    if let Some(d) = decisive {
+                        if !list.iter().any(|a| a == d) {
+                            list.push(d.to_string());
+                        }
+                    }
+                    detail.push_str(&format!(" accepted={list:?}"));
                 }
                 acc.push_worst(n, expected, &p.label, detail);
             }
@@ -1005,29 +1109,67 @@ fn grade(
     }
 }
 
-fn report_groups(point: &str, acc: &Acc) -> (serde_json::Value, serde_json::Value) {
+fn report_groups(point: &str, passes: &[Acc]) -> (serde_json::Value, serde_json::Value) {
+    // Counts accumulate across passes; the label tables report mean
+    // rates with spreads instead.
+    let tot = |f: fn(&Acc) -> usize| passes.iter().map(f).sum::<usize>();
+    let mut bins = [(0usize, 0usize); 5];
+    for a in passes {
+        for (i, (n, c)) in a.bins.iter().enumerate() {
+            bins[i].0 += n;
+            bins[i].1 += c;
+        }
+    }
+    let mut dropped: HashMap<String, usize> = HashMap::new();
+    for a in passes {
+        for (k, v) in &a.dropped {
+            *dropped.entry(k.clone()).or_insert(0) += v;
+        }
+    }
     match point {
         "label" => {
-            let tab = |m: &HashMap<String, (usize, usize, usize)>| {
-                m.iter()
-                    .map(|(k, (n, a, r))| {
+            let tab = |f: fn(&Acc) -> &GroupCounts| {
+                let mut keys: std::collections::BTreeSet<String> = Default::default();
+                for a in passes {
+                    keys.extend(f(a).keys().cloned());
+                }
+                keys.into_iter()
+                    .map(|k| {
+                        let n = passes
+                            .iter()
+                            .filter_map(|a| f(a).get(&k))
+                            .map(|(n, _, _)| *n)
+                            .max()
+                            .unwrap_or(0);
+                        let rs: Vec<f64> = passes
+                            .iter()
+                            .filter_map(|a| f(a).get(&k).and_then(|(n, g, _)| rate(*g, *n)))
+                            .collect();
+                        let rrs: Vec<f64> = passes
+                            .iter()
+                            .filter_map(|a| f(a).get(&k).and_then(|(n, _, r)| rate(*r, *n)))
+                            .collect();
+                        let (agree, spread) = mean_spread(&rs);
+                        let (agree_raw, spread_raw) = mean_spread(&rrs);
                         (
-                            k.clone(),
-                            serde_json::json!({"n": n, "agree": a, "agree_raw": r}),
+                            k,
+                            serde_json::json!({
+                                "n": n, "agree": agree, "agree_raw": agree_raw,
+                                "spread": spread, "spread_raw": spread_raw,
+                            }),
                         )
                     })
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             };
-            let kind = tab(&acc.kind_n);
-            let scope = tab(&acc.scope_n);
+            let kind = tab(|a| &a.kind_n);
+            let scope = tab(|a| &a.scope_n);
             let groups = serde_json::json!({
                 "kind": kind, "scope": scope,
-                "unknown_rate": rate(acc.unknown, acc.graded),
-                "signal_violations": acc.signal_violations,
-                "dropped_signals": acc.dropped,
+                "unknown_rate": rate(tot(|a| a.unknown), tot(|a| a.graded)),
+                "signal_violations": tot(|a| a.signal_violations),
+                "dropped_signals": dropped,
             });
-            let bins: Vec<serde_json::Value> = acc
-                .bins
+            let bins: Vec<serde_json::Value> = bins
                 .iter()
                 .enumerate()
                 .map(|(i, (n, c))| {
@@ -1040,9 +1182,18 @@ fn report_groups(point: &str, acc: &Acc) -> (serde_json::Value, serde_json::Valu
             (groups, serde_json::Value::Array(bins))
         }
         "classify" => {
-            let mut cats = serde_json::Map::new();
-            for (c, (tp, fp, f)) in &acc.cat {
-                cats.insert(
+            let mut cats: GroupCounts = HashMap::new();
+            for a in passes {
+                for (c, (tp, fp, f)) in &a.cat {
+                    let e = cats.entry(c.clone()).or_insert((0, 0, 0));
+                    e.0 += tp;
+                    e.1 += fp;
+                    e.2 += f;
+                }
+            }
+            let mut out = serde_json::Map::new();
+            for (c, (tp, fp, f)) in &cats {
+                out.insert(
                     c.clone(),
                     serde_json::json!({
                         "precision": pr(*tp, *fp), "recall": pr(*tp, *f),
@@ -1051,17 +1202,18 @@ fn report_groups(point: &str, acc: &Acc) -> (serde_json::Value, serde_json::Valu
                 );
             }
             (
-                serde_json::json!({"categories": cats}),
+                serde_json::json!({"categories": out}),
                 serde_json::Value::Null,
             )
         }
         "explain" => (
-            serde_json::json!({"length_violations": acc.length_violations}),
+            serde_json::json!({"length_violations": tot(|a| a.length_violations)}),
             serde_json::Value::Null,
         ),
         "draft" => (
             serde_json::json!({
-                "dry_run_rows": acc.dry_rows, "dry_run_matches": acc.dry_matches,
+                "dry_run_rows": tot(|a| a.dry_rows),
+                "dry_run_matches": tot(|a| a.dry_matches),
             }),
             serde_json::Value::Null,
         ),
@@ -1095,8 +1247,11 @@ pub struct EvalRowView {
     pub model: String,
     pub json_mode: String,
     pub rows: i64,
+    pub repeats: i64,
     pub agreement: Option<f64>,
     pub agreement_raw: Option<f64>,
+    pub agreement_spread: Option<f64>,
+    pub agreement_raw_spread: Option<f64>,
     pub faithfulness_failures: i64,
     pub parse_failures: i64,
     pub tokens_per_row: Option<f64>,
@@ -1107,8 +1262,9 @@ pub struct EvalRowView {
 pub fn latest_for_hash(db: &Path, hash: &str) -> Result<Option<EvalRowView>, LlmError> {
     let conn = open_db(db)?;
     let mut stmt = conn.prepare(
-        "SELECT id, created_at, point, prompt_hash, model, json_mode, rows, agreement, agreement_raw, \
-         faithfulness_failures, parse_failures, tokens_per_row, latency_ms_per_row, cost_usd \
+        "SELECT id, created_at, point, prompt_hash, model, json_mode, rows, repeats, agreement, \
+         agreement_raw, agreement_spread, agreement_raw_spread, faithfulness_failures, \
+         parse_failures, tokens_per_row, latency_ms_per_row, cost_usd \
          FROM llm_evals WHERE prompt_hash LIKE ?1 || '%' ORDER BY id DESC LIMIT 1",
     )?;
     let mut rows = stmt.query_map(params![hash], |r| {
@@ -1120,13 +1276,16 @@ pub fn latest_for_hash(db: &Path, hash: &str) -> Result<Option<EvalRowView>, Llm
             model: r.get(4)?,
             json_mode: r.get(5)?,
             rows: r.get(6)?,
-            agreement: r.get(7)?,
-            agreement_raw: r.get(8)?,
-            faithfulness_failures: r.get(9)?,
-            parse_failures: r.get(10)?,
-            tokens_per_row: r.get(11)?,
-            latency_ms_per_row: r.get(12)?,
-            cost_usd: r.get(13)?,
+            repeats: r.get(7)?,
+            agreement: r.get(8)?,
+            agreement_raw: r.get(9)?,
+            agreement_spread: r.get(10)?,
+            agreement_raw_spread: r.get(11)?,
+            faithfulness_failures: r.get(12)?,
+            parse_failures: r.get(13)?,
+            tokens_per_row: r.get(14)?,
+            latency_ms_per_row: r.get(15)?,
+            cost_usd: r.get(16)?,
         })
     })?;
     Ok(rows.next().transpose()?)
@@ -1165,15 +1324,16 @@ pub fn compare_text(a: &EvalRowView, b: &EvalRowView) -> String {
         ("model", a.model.clone(), b.model.clone()),
         ("json_mode", a.json_mode.clone(), b.json_mode.clone()),
         ("rows", a.rows.to_string(), b.rows.to_string()),
+        ("repeats", a.repeats.to_string(), b.repeats.to_string()),
         (
             "agreement",
-            fmt_opt(a.agreement, 4),
-            fmt_opt(b.agreement, 4),
+            fmt_opt_pm(a.agreement, a.agreement_spread, 4),
+            fmt_opt_pm(b.agreement, b.agreement_spread, 4),
         ),
         (
             "agreement_raw",
-            fmt_opt(a.agreement_raw, 4),
-            fmt_opt(b.agreement_raw, 4),
+            fmt_opt_pm(a.agreement_raw, a.agreement_raw_spread, 4),
+            fmt_opt_pm(b.agreement_raw, b.agreement_raw_spread, 4),
         ),
         (
             "faithfulness",
@@ -1751,10 +1911,13 @@ mod tests {
         let quiet_turns = vec![turn("/", 200)];
         let mut verified = turn("api.ping", 200);
         verified["credential_status"] = serde_json::json!("verified");
+        let mut forged = turn("webhooks.demo", 401);
+        forged["surface"] = serde_json::json!("webhook");
+        forged["credential_status"] = serde_json::json!("rejected");
         std::fs::write(
             &set,
             format!(
-                "{}\n{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n{}\n",
                 label_row(
                     "attack-ffuf",
                     "actor",
@@ -1787,6 +1950,15 @@ mod tests {
                     Some(vec!["insufficient_data"]),
                     vec!["benign"],
                 ),
+                label_row_full(
+                    "attack-forgery",
+                    "actor",
+                    Some("unknown"),
+                    vec![forged],
+                    serde_json::json!({"turns_held": 1.0, "iri_cv": 0.0, "ratio_404": 0.0}),
+                    None,
+                    Vec::new(),
+                ),
             ),
         )
         .unwrap();
@@ -1800,11 +1972,15 @@ mod tests {
         // Cold but verified-clean: benign is accepted too, and the
         // outside-list claim is a count, not a worst row.
         let warm = r#"{"label":"benign","confidence":0.8,"reason":"verified.","signals":[{"name":"verified_partner","turns":[0]}]}"#;
+        // Cold with a decisive single-turn signal: the kind's label
+        // is accepted too.
+        let forged_resp = r#"{"label":"malicious","confidence":0.85,"reason":"rejected webhook.","signals":[{"name":"webhook_forgery","turns":[0]}]}"#;
         let (url, seen) = mock_server(vec![
             (200, completion(hit)),
             (200, completion(thin)),
             (200, completion(calm)),
             (200, completion(warm)),
+            (200, completion(forged_resp)),
         ]);
         let exec = exec_for(&url);
         let input = EvalInput {
@@ -1815,23 +1991,36 @@ mod tests {
             json_mode: JsonMode::Prompt,
             effort: None,
             limit: None,
+            repeats: 1,
         };
         let summary = evaluate(&db, &set, "label", &input).unwrap();
-        assert_eq!(summary.rows, 4);
+        assert_eq!(summary.rows, 5);
         assert_eq!(summary.skipped, 0);
         assert_eq!(summary.errors, 0);
-        assert_eq!(summary.agreement, Some(0.75));
+        assert_eq!(summary.repeats, 1);
+        assert_eq!(summary.agreement, Some(0.8));
         assert_eq!(summary.agreement_raw, Some(1.0));
+        assert_eq!(summary.agreement_spread, None);
+        assert_eq!(summary.agreement_raw_spread, None);
         assert_eq!(summary.parse_failures, 0);
         assert_eq!(summary.faithfulness_failures, 2);
-        assert_eq!(seen.lock().unwrap().len(), 4);
-        assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree"], 1);
-        assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree_raw"], 2);
-        assert_eq!(summary.groups["kind"]["benign-api"]["agree"], 1);
-        assert_eq!(summary.groups["scope"]["actor"]["n"], 3);
-        assert_eq!(summary.groups["scope"]["actor"]["agree"], 3);
-        assert_eq!(summary.groups["scope"]["cluster"]["agree"], 0);
-        assert_eq!(summary.groups["scope"]["cluster"]["agree_raw"], 1);
+        assert_eq!(seen.lock().unwrap().len(), 5);
+        let rate = |g: &serde_json::Value, k: &str| g[k]["agree"].as_f64();
+        assert_eq!(rate(&summary.groups["kind"], "attack-ffuf"), Some(0.5));
+        assert_eq!(
+            summary.groups["kind"]["attack-ffuf"]["agree_raw"].as_f64(),
+            Some(1.0)
+        );
+        assert!(summary.groups["kind"]["attack-ffuf"]["spread"].is_null());
+        assert_eq!(rate(&summary.groups["kind"], "benign-api"), Some(1.0));
+        assert_eq!(rate(&summary.groups["kind"], "attack-forgery"), Some(1.0));
+        assert_eq!(summary.groups["scope"]["actor"]["n"], 4);
+        assert_eq!(rate(&summary.groups["scope"], "actor"), Some(1.0));
+        assert_eq!(rate(&summary.groups["scope"], "cluster"), Some(0.0));
+        assert_eq!(
+            summary.groups["scope"]["cluster"]["agree_raw"].as_f64(),
+            Some(1.0)
+        );
         assert_eq!(summary.groups["dropped_signals"]["scanner_paths"], 1);
         assert_eq!(summary.groups["dropped_signals"]["human_cadence"], 1);
         assert_eq!(summary.groups["signal_violations"], 2);
@@ -1849,18 +2038,18 @@ mod tests {
             .unwrap()
             .contains("scanner_paths"));
         let conn = Connection::open(&db).unwrap();
-        let stored: (String, f64, f64, i64, i64) = conn
+        let stored: (String, f64, f64, i64, i64, i64, Option<f64>) = conn
             .query_row(
-                "SELECT point, agreement, agreement_raw, faithfulness_failures, parse_failures FROM llm_evals",
+                "SELECT point, agreement, agreement_raw, faithfulness_failures, parse_failures, repeats, agreement_spread FROM llm_evals",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
             .unwrap();
-        assert_eq!(stored, ("label".to_string(), 0.75, 1.0, 2, 0));
+        assert_eq!(stored, ("label".to_string(), 0.8, 1.0, 2, 0, 1, None));
         let calls: i64 = conn
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(calls, 4, "dry-send logs the calls");
+        assert_eq!(calls, 5, "dry-send logs the calls");
         let failed: i64 = conn
             .query_row(
                 "SELECT count(*) FROM llm_calls WHERE faithfulness_failed IS NOT NULL",
@@ -1906,6 +2095,7 @@ mod tests {
             json_mode: JsonMode::Prompt,
             effort: None,
             limit: None,
+            repeats: 1,
         };
         let summary = evaluate(&db, &set, "label", &input).unwrap();
         assert_eq!(summary.rows, 1);
@@ -1917,6 +2107,86 @@ mod tests {
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
             .unwrap();
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn eval_repeat_reports_mean_and_spread() {
+        let set = tmp_path("repeat.jsonl");
+        let db = tmp_path("repeat.sqlite");
+        let _ = std::fs::remove_file(&db);
+        std::fs::write(&db, b"").unwrap();
+        std::fs::write(
+            &set,
+            format!(
+                "{}\n",
+                label_row(
+                    "attack-ffuf",
+                    "actor",
+                    Some("malicious"),
+                    vec![turn("/a", 404), turn("/b", 404), turn("/c", 404)],
+                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "ratio_404": 1.0}),
+                ),
+            ),
+        )
+        .unwrap();
+        let hit = r#"{"label":"malicious","confidence":0.9,"reason":"404 sweep.","signals":[{"name":"high_404_rate","turns":[0,1,2]}]}"#;
+        let miss = r#"{"label":"benign","confidence":0.7,"reason":"quiet.","signals":[]}"#;
+        let (url, seen) = mock_server(vec![(200, completion(hit)), (200, completion(miss))]);
+        let exec = exec_for(&url);
+        let input = EvalInput {
+            exec: &exec,
+            system: None,
+            prompt_hash: "h".to_string(),
+            model: "m".to_string(),
+            json_mode: JsonMode::Prompt,
+            effort: None,
+            limit: None,
+            repeats: 2,
+        };
+        let summary = evaluate(&db, &set, "label", &input).unwrap();
+        assert_eq!(summary.rows, 1);
+        assert_eq!(summary.skipped, 0);
+        assert_eq!(summary.errors, 0);
+        assert_eq!(summary.repeats, 2);
+        assert_eq!(summary.agreement, Some(0.5));
+        assert_eq!(summary.agreement_spread, Some(0.5));
+        assert_eq!(summary.agreement_raw, Some(0.5));
+        assert_eq!(summary.agreement_raw_spread, Some(0.5));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(summary.groups["kind"]["attack-ffuf"]["n"], 1);
+        assert_eq!(
+            summary.groups["kind"]["attack-ffuf"]["agree"].as_f64(),
+            Some(0.5)
+        );
+        assert_eq!(
+            summary.groups["kind"]["attack-ffuf"]["spread"].as_f64(),
+            Some(0.5)
+        );
+        assert_eq!(
+            summary.groups["kind"]["attack-ffuf"]["spread_raw"].as_f64(),
+            Some(0.5)
+        );
+        // Calibration accumulates both passes.
+        let bins = summary.calibration.as_array().unwrap();
+        let total: i64 = bins.iter().map(|b| b["n"].as_i64().unwrap_or(0)).sum();
+        assert_eq!(total, 2);
+        let worst = summary.worst.as_array().unwrap();
+        assert_eq!(worst.len(), 1);
+        assert_eq!(worst[0]["row"], 1);
+        assert_eq!(worst[0]["repeat"], 2);
+        let conn = Connection::open(&db).unwrap();
+        let stored: (i64, f64, f64, f64, f64) = conn
+            .query_row(
+                "SELECT repeats, agreement, agreement_raw, agreement_spread, agreement_raw_spread FROM llm_evals",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (2, 0.5, 0.5, 0.5, 0.5));
+        let calls: i64 = conn
+            .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(calls, 2, "each pass logs its own calls");
     }
 
     #[test]

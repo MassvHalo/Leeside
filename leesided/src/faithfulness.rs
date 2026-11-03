@@ -346,6 +346,36 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
     failed
 }
 
+/// Signals decisive from a single turn: a cold window showing one
+/// of these accepts the kind's label at grade time
+/// (docs/llm-evals.md section 1). Each check runs exactly as the
+/// faithfulness check runs it, on one turn at a time.
+pub const DECISIVE_SIGNALS: [&str; 3] = ["webhook_forgery", "honeytoken_hit", "attack_payload"];
+
+pub fn decisive_signal(envelope: &Value, honeytoken_routes: &HashSet<String>) -> bool {
+    // The scanner set is empty here: none of the three decisive
+    // checks consults it.
+    let empty = HashSet::new();
+    let aux = Aux {
+        honeytoken_routes,
+        scanner_paths: &empty,
+    };
+    let n = turns(envelope).len();
+    DECISIVE_SIGNALS.iter().any(|name| {
+        (0..n).any(|i| {
+            check_proposal(
+                envelope,
+                &[CitedSignal {
+                    name: name.to_string(),
+                    turns: vec![i],
+                }],
+                &aux,
+            )
+            .is_empty()
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +423,34 @@ mod tests {
             "ja4_class": "unknown", "surface": "web",
             "is_asset": 0, "cred": null,
         })
+    }
+
+    #[test]
+    fn decisive_signal_fires_on_a_single_decisive_turn() {
+        let honey = HashSet::from(["admin.backup".to_string()]);
+        let mut forged = turn("webhooks.demo", 401);
+        forged["surface"] = json!("webhook");
+        forged["credential_status"] = json!("rejected");
+        assert!(decisive_signal(&envelope(vec![forged], json!({})), &honey));
+        assert!(decisive_signal(
+            &envelope(vec![turn("admin.backup", 200)], json!({})),
+            &honey
+        ));
+        let mut hinted = turn("/search", 200);
+        hinted["payload_hint"] = json!("sqli");
+        assert!(decisive_signal(&envelope(vec![hinted], json!({})), &honey));
+        // One clean turn among noise is not decisive.
+        assert!(!decisive_signal(
+            &envelope(vec![turn("/", 200), turn("/a", 404)], json!({})),
+            &honey
+        ));
+        // A rejected turn on a non-honeytoken route is not decisive.
+        let mut rejected = turn("portal.login", 401);
+        rejected["credential_status"] = json!("rejected");
+        assert!(!decisive_signal(
+            &envelope(vec![rejected], json!({})),
+            &honey
+        ));
     }
 
     fn envelope(turns: Vec<Value>, window: Value) -> Value {
