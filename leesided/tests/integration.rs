@@ -722,6 +722,302 @@ async fn api_v1_decision_writes_operator_label() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_v1_review_shapes_and_roles() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    // No session: 401 JSON on every A-2 route.
+    for (method, path) in [
+        ("GET", "/windside/api/v1/review?window=24h"),
+        ("GET", "/windside/api/v1/review/actor/a1"),
+        ("GET", "/windside/api/v1/actors/a1"),
+        ("GET", "/windside/api/v1/actors/a1/turns"),
+        ("POST", "/windside/api/v1/review/actor/a1/decision"),
+        ("POST", "/windside/api/v1/actors/a1/block"),
+    ] {
+        let (st, v) = h.ui_json(method, path, None, None).await;
+        assert_eq!((method, path, st), (method, path, 401));
+        assert_eq!(v["error"], "login required");
+    }
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    // Empty store shapes.
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/review", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["total"], 0);
+    assert_eq!(v["agree"], 0);
+    assert_eq!(v["disagree"], 0);
+    assert_eq!(v["items"], Value::Array(vec![]));
+    assert_eq!(v["decided"]["total"], 0);
+    assert_eq!(v["role"], "admin");
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/review?window=7d",
+            Some(&viewer),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["role"], "viewer");
+    // Unknown subjects and scopes 404.
+    for path in [
+        "/windside/api/v1/review/actor/missing",
+        "/windside/api/v1/review/cluster/missing",
+        "/windside/api/v1/review/peer/x",
+        "/windside/api/v1/actors/missing",
+        "/windside/api/v1/actors/missing/turns",
+    ] {
+        let (st, _) = h.ui_json("GET", path, Some(&admin), None).await;
+        assert_eq!((path, st), (path, 404));
+    }
+    // A bad status filter is 400, before id resolution.
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/actors/missing/turns?status=bogus",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400);
+    assert_eq!(v["error"], "status must be a code or an Nxx class");
+    // Viewers read; both mutations are admin-only.
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            "/windside/api/v1/review/actor/a1/decision",
+            Some(&viewer),
+            Some(&json!({"decision": "fine", "window_end_ts": 1})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            "/windside/api/v1/actors/a1/block",
+            Some(&viewer),
+            Some(&json!({"action": "block"})),
+        )
+        .await;
+    assert_eq!(st, 403);
+    // Bad bodies are 422.
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            "/windside/api/v1/review/actor/a1/decision",
+            Some(&admin),
+            Some(&json!({"decision": "nuke", "window_end_ts": 1})),
+        )
+        .await;
+    assert_eq!(st, 422);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            "/windside/api/v1/actors/a1/block",
+            Some(&admin),
+            Some(&json!({})),
+        )
+        .await;
+    assert_eq!(st, 422);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            "/windside/api/v1/actors/a1/block",
+            Some(&admin),
+            Some(&json!({"action": "suspend"})),
+        )
+        .await;
+    assert_eq!(st, 422);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_v1_review_decide_and_block() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    // A 16-hex actor and a cluster, each scored with one window.
+    let now = leesided::store::now_s();
+    let ts_us = now * 1_000_000;
+    let db = h.dir.join("leesided.sqlite");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO actors (id, opened_us, last_us, turns) VALUES ('abcdef0123456789', 0, {ts_us}, 1); \
+             INSERT INTO turns (turn_id, session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id, cluster_key, surface) VALUES \
+             ('t1', 's1', {ts_us}, {now}, 'p1', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'abcdef0123456789', 'c9', 'web'), \
+             ('t2', 's2', {ts_us}, {now}, 'p2', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, NULL, 'c9', 'web'); \
+             INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
+             ('actor', 'abcdef0123456789', 't1', {ts_us}, 2, '[0.0]', 'web', 0), \
+             ('cluster', 'c9', 't2', {ts_us}, 2, '[0.0]', 'web', 0); \
+             INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+             ('actor', 'abcdef0123456789', 't1', 'web', {ts_us}, 0.9, '0.1.0', '[]'), \
+             ('cluster', 'c9', 't2', 'web', {ts_us}, 0.9, '0.1.0', '[]');",
+        ))
+        .unwrap();
+    // Both queue in the top tier; the item and actor pages read.
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/review", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["total"], 2);
+    assert_eq!(v["disagree"], 2);
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/review/actor/abcdef0123456789",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["model"]["score"], 0.9);
+    assert_eq!(v["why"], "above_threshold_no_rule");
+    assert_eq!(v["window"]["window_end_ts"], ts_us);
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/actors/abcdef0123456789",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert!(
+        v["headline"]
+            .as_str()
+            .unwrap()
+            .contains("waiting for a decision"),
+        "{v}"
+    );
+    assert_eq!(v["turn_total"], 1);
+    let (st, v) = h
+        .ui_json(
+            "GET",
+            "/windside/api/v1/actors/abcdef0123456789/turns?status=2xx",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["total"], 1);
+    // Attack writes the label and the block together.
+    let decide = |scope: &str, id: &str| format!("/windside/api/v1/review/{scope}/{id}/decision");
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("actor", "abcdef0123456789"),
+            Some(&admin),
+            Some(&json!({"decision": "attack", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "malicious");
+    assert_eq!(v["blocked"], true);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let row: (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT label, source, note FROM labels \
+             WHERE scope = 'actor' AND scope_id = 'abcdef0123456789' AND source = 'operator'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "malicious".to_string(),
+            "operator".to_string(),
+            Some("review".to_string())
+        )
+    );
+    let block: (String, String, String) = conn
+        .query_row(
+            "SELECT action, mode, rule FROM decisions WHERE scope = 'actor' AND key = 'abcdef0123456789'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(block.0, "block");
+    assert_eq!(block.2, "operator");
+    // Unsure writes the label alone; stale windows conflict.
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("actor", "abcdef0123456789"),
+            Some(&admin),
+            Some(&json!({"decision": "unsure", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "unknown");
+    assert_eq!(v["blocked"], false);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            &decide("actor", "abcdef0123456789"),
+            Some(&admin),
+            Some(&json!({"decision": "fine", "window_end_ts": ts_us - 1})),
+        )
+        .await;
+    assert_eq!(st, 409);
+    // Clusters take the label only: blocks are actor-scope.
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            &decide("cluster", "c9"),
+            Some(&admin),
+            Some(&json!({"decision": "attack", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "malicious");
+    assert_eq!(v["blocked"], false);
+    // Unblock lifts the live block and writes benign; a second lift 404s.
+    let block_path = "/windside/api/v1/actors/abcdef0123456789/block";
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            block_path,
+            Some(&admin),
+            Some(&json!({"action": "unblock"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "benign");
+    assert_eq!(v["blocked"], false);
+    let (st, _) = h
+        .ui_json(
+            "POST",
+            block_path,
+            Some(&admin),
+            Some(&json!({"action": "unblock"})),
+        )
+        .await;
+    assert_eq!(st, 404);
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            block_path,
+            Some(&admin),
+            Some(&json!({"action": "block"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["blocked"], true);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_dist_served_from_console_dir() {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));

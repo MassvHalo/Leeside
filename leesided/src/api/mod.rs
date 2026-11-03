@@ -103,6 +103,30 @@ pub fn router(engine: Arc<Engine>) -> Router {
             &u("/api/v1/episodes/{id}/decision"),
             post(crate::console::api::api_decide),
         )
+        .route(
+            &u("/api/v1/review"),
+            get(crate::console::api::api_review_queue),
+        )
+        .route(
+            &u("/api/v1/review/{scope}/{id}"),
+            get(crate::console::api::api_review_item),
+        )
+        .route(
+            &u("/api/v1/review/{scope}/{id}/decision"),
+            post(crate::console::api::api_review_decide),
+        )
+        .route(
+            &u("/api/v1/actors/{id}"),
+            get(crate::console::api::api_actor),
+        )
+        .route(
+            &u("/api/v1/actors/{id}/turns"),
+            get(crate::console::api::api_actor_turns),
+        )
+        .route(
+            &u("/api/v1/actors/{id}/block"),
+            post(crate::console::api::api_actor_block),
+        )
         .route_layer(middleware::from_fn(move |req: Request, next: Next| {
             let prefix = allow_prefix.clone();
             let trusted = allow_trusted;

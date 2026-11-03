@@ -4157,6 +4157,1150 @@ impl Ctx<'_> {
     }
 }
 
+// ---------- Round A-2: review + actor phrases ----------
+
+/// Plain words for every stored flag name: the ten the package
+/// computes (`Flags.php`), the two leesided adds at ingest, and the
+/// `ua_inconsistent` signal name defensively, in case it ever lands
+/// on a turn. Unmapped names fall back to the raw name: a flag is a
+/// bare name with no value to show.
+pub fn flag_phrase(name: &str) -> String {
+    match name {
+        "ua_chromium_no_ch" => "says Chrome, sends no client hints",
+        "browser_no_sec_fetch" => "browser sends no fetch metadata",
+        "browser_no_accept_language" => "browser sends no language",
+        "html_get_no_html_accept" => "page fetch won't take HTML",
+        "library_ua_on_web" => "script UA on a web page",
+        "cookies_on_api" => "cookies on an API call",
+        "bearer_with_sec_fetch" => "API key with browser headers",
+        "tag_bad_mac" => "tag signature invalid",
+        "proxy_header_untrusted" => "proxy headers untrusted",
+        "unrouted" => "no route matched",
+        "ua_vs_ja4_mismatch" => "user agent and TLS disagree",
+        "ua_changes" => "user agent changed mid-window",
+        "ua_inconsistent" => "client inconsistent",
+        _ => name,
+    }
+    .to_string()
+}
+
+/// Plain words for every label signal name (the schema enum in
+/// `llm.rs` plus the cold-start `insufficient_data`). Unmapped names
+/// fall back to the raw name.
+pub fn signal_phrase(name: &str) -> String {
+    match name {
+        "attack_payload" => "attack payload",
+        "scanner_paths" => "scanner paths",
+        "high_404_rate" => "mostly missing pages",
+        "machine_cadence" => "machine cadence",
+        "ua_inconsistent" => "client inconsistent",
+        "credential_stuffing" => "credential stuffing",
+        "webhook_forgery" => "webhook forgery",
+        "honeytoken_hit" => "hidden trap touched",
+        "normal_browsing" => "normal browsing",
+        "verified_partner" => "verified partner",
+        "human_cadence" => "human cadence",
+        "client_consistent" => "client consistent",
+        "insufficient_data" => "too few requests",
+        _ => name,
+    }
+    .to_string()
+}
+
+/// Plain words for every v2 model feature name, in the manifest's
+/// order. `None` for anything unmapped: the caller falls back to
+/// "name value".
+pub fn feature_phrase(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "turns_total" => "requests in the window",
+        "turns_held" => "requests held",
+        "age_s" => "window age",
+        "idle_s" => "time idle",
+        "turns_last_60s" => "requests in the last minute",
+        "turns_last_600s" => "requests in ten minutes",
+        "gap_mean_ms" => "mean gap between requests",
+        "gap_cv" => "gap variation",
+        "ratio_4xx" => "4xx share",
+        "ratio_5xx" => "5xx share",
+        "ratio_404" => "404 share",
+        "ratio_422" => "422 share",
+        "count_not_found_exc" => "missing pages",
+        "login_failed_total" => "failed logins",
+        "login_ok_total" => "successful logins",
+        "distinct_routes" => "distinct routes",
+        "distinct_routes_ratio" => "route variety",
+        "distinct_bound_ids" => "distinct ids touched",
+        "unrouted_ratio" => "unrouted share",
+        "distinct_req_shapes" => "distinct request shapes",
+        "bytes_out_mean" => "mean response size",
+        "bytes_out_max" => "largest response",
+        "latency_mean_ms" => "mean latency",
+        "latency_max_ms" => "slowest request",
+        "verb_post_ratio" => "POST share",
+        "repeat_route_ratio" => "repeat-route share",
+        "ua_changes" => "user-agent changes",
+        "peer_turns_600s" => "network requests in ten minutes",
+        "peer_ratio_4xx" => "network 4xx share",
+        "is_anon" => "no login or key",
+        "cluster_actors_net" => "actors sharing the network",
+        "shape_cluster_size" => "lookalike clients",
+        "tag_dropped" => "tag issued then dropped",
+        "credential_moved" => "credential on two networks",
+        "surface_web" => "web surface",
+        "surface_api" => "API surface",
+        "surface_webhook" => "webhook surface",
+        "surface_honeypot" => "honeypot surface",
+        _ => return None,
+    })
+}
+
+/// One top-3 contributor as the model cell shows it: the phrase and
+/// the gain, or "name value" for anything unmapped.
+pub fn feature_display(name: &str, value: f64) -> String {
+    match feature_phrase(name) {
+        Some(p) => format!("{p} {value:.2}"),
+        None => format!("{name} {value:.2}"),
+    }
+}
+
+/// The actor page headline from a template (Round A-2): the kind
+/// phrase, the first-seen day, and the decision state. No LLM call.
+pub fn headline(kind: &str, first_seen_us: i64, state: &str) -> String {
+    let day = chrono_date(first_seen_us / 1_000_000);
+    let tail = match state {
+        "stopped" => "currently blocked",
+        "waiting" => "waiting for a decision",
+        _ => "under watch",
+    };
+    format!("A {kind} first seen {day}, {tail}")
+}
+
+/// A unix timestamp as `3 Nov 2026`, UTC. The dashboard formats its
+/// own clocks; the headline needs just the day.
+fn chrono_date(ts_s: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = ts_s.div_euclid(86_400);
+    // Howard Hinnant's civil-from-days, for the headline only.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{} {} {}", d, MONTHS[(m - 1) as usize], y)
+}
+
+// ---------- Round A-2: review + actor JSON ----------
+
+/// One claimed signal from a label call's parsed completion, with
+/// its cited envelope indices resolved to turn rowids.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CitedSignal {
+    name: String,
+    #[serde(default)]
+    turns: Vec<usize>,
+    #[serde(skip)]
+    rowids: Vec<i64>,
+}
+
+/// The route name when a route matched, else the folded path: the
+/// same rule the label envelope shows the model (llm.md 8.1), so the
+/// evidence table reads like the proposal's citations.
+fn route_display(route: &str, pattern: Option<&str>) -> String {
+    if route == "_unrouted" {
+        pattern.unwrap_or(route).to_string()
+    } else {
+        route.to_string()
+    }
+}
+
+/// One turn's verdict from its `rules_matched` entries: the first
+/// enforce-mode acting match blocks, else the first monitor/shadow
+/// match observes, else the turn passed with no rule fired. An
+/// operator block reads "blocked by your decision", never a rule name.
+fn turn_verdict(matched: Option<&str>) -> (Vec<serde_json::Value>, String, String) {
+    let entries: Vec<serde_json::Value> = matched
+        .and_then(|m| serde_json::from_str(m).ok())
+        .unwrap_or_default();
+    let mut rules = Vec::new();
+    let mut blocked: Option<String> = None;
+    let mut watched: Option<String> = None;
+    for e in &entries {
+        let rule = e.get("rule").and_then(|v| v.as_str()).unwrap_or("?");
+        let action = e.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let mode = e.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+        rules.push(serde_json::json!({"rule": rule, "action": action, "mode": mode}));
+        if mode == "enforce" && crate::review::acting(action) && blocked.is_none() {
+            blocked = Some(rule.to_string());
+        } else if (mode == "monitor" || mode == "shadow") && watched.is_none() {
+            watched = Some(rule.to_string());
+        }
+    }
+    if let Some(rule) = blocked {
+        let note = if rule == "operator" {
+            "blocked by your decision".to_string()
+        } else {
+            format!("blocked by {rule}")
+        };
+        (rules, "blocked".to_string(), note)
+    } else if let Some(rule) = watched {
+        (rules, "observed".to_string(), format!("watched by {rule}"))
+    } else {
+        (rules, "allowed".to_string(), "no rule fired".to_string())
+    }
+}
+
+impl<'a> Ctx<'a> {
+    /// The A-2 subject state, reading exactly as the A-1 episodes
+    /// do: stopped is an active enforce decision (`stopped_by`),
+    /// waiting is scored and undecided (the review queue's own
+    /// rule), everything else is watched.
+    pub fn subject_state(
+        &self,
+        scope: &str,
+        id: &str,
+        since_us: i64,
+        now_s: i64,
+    ) -> Result<String, QueryError> {
+        if self.stopped_by(scope, id, since_us, now_s)?.is_some() {
+            return Ok("stopped".to_string());
+        }
+        let scored: bool = self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM scores WHERE scope = ?1 AND scope_id = ?2 LIMIT 1",
+                params![scope, id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|_| true)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        if !scored {
+            return Ok("watched".to_string());
+        }
+        let label_ts = |source: &str| -> Result<i64, QueryError> {
+            self.conn()
+                .query_row(
+                    "SELECT created_at FROM labels \
+                     WHERE scope = ?1 AND scope_id = ?2 AND source = ?3 \
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                    params![scope, id, source],
+                    |r| r.get(0),
+                )
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(0),
+                    e => Err(QueryError::Sqlite(e)),
+                })
+        };
+        let operator_ts = label_ts("operator")?;
+        let proposal_ts = label_ts("llm_proposed")?;
+        let (rule_hits, observe_hits) = crate::review::subject_hits(self.conn(), scope, id, now_s)
+            .map_err(|e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            })?;
+        let last_hit = rule_hits
+            .iter()
+            .chain(observe_hits.iter())
+            .map(|h| h.ts)
+            .max()
+            .unwrap_or(0);
+        if operator_ts > 0 && operator_ts >= proposal_ts.max(last_hit) {
+            return Ok("watched".to_string());
+        }
+        Ok("waiting".to_string())
+    }
+
+    /// The Review page's two tabs in one round trip: the queue in the
+    /// CLI's order (capped at 100 rows, counts over the uncapped
+    /// 1000) with its agree/disagree split, and the Decided tab over
+    /// the window.
+    pub fn review_queue_json(
+        &self,
+        thresholds: &std::collections::HashMap<String, f64>,
+        since_s: i64,
+    ) -> Result<serde_json::Value, QueryError> {
+        let rows =
+            crate::review::review_rows(self.conn(), 1000, thresholds).map_err(|e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            })?;
+        let disagree = rows.iter().filter(|r| r.why.disagree()).count();
+        let items: Vec<serde_json::Value> = rows
+            .iter()
+            .take(100)
+            .map(|r| {
+                serde_json::json!({
+                    "scope": r.scope,
+                    "id": r.scope_id,
+                    "score": r.score,
+                    "threshold": r.threshold,
+                    "why": r.why.as_str(),
+                    "why_phrase": r.why.phrase(),
+                    "disagree": r.why.disagree(),
+                    "proposal": r.proposal.as_ref().map(|p| serde_json::json!({
+                        "label": p.label,
+                        "confidence": p.confidence,
+                    })),
+                })
+            })
+            .collect();
+        let decided = crate::review::decided_list(self.conn(), since_s).map_err(|e| match e {
+            crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+            e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+        })?;
+        let agreed = decided.iter().filter(|d| d.agreed).count();
+        let decided_items: Vec<serde_json::Value> = decided
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "scope": d.scope,
+                    "id": d.scope_id,
+                    "operator": d.operator_label,
+                    "proposal": d.proposal,
+                    "agreed": d.agreed,
+                    "at": d.operator_ts,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "total": rows.len(),
+            "agree": rows.len() - disagree,
+            "disagree": disagree,
+            "items": items,
+            "decided": {
+                "total": decided.len(),
+                "agreed": agreed,
+                "items": decided_items,
+            },
+        }))
+    }
+
+    /// The proposal's signals with their cited turns resolved to turn
+    /// rows. The stored proposal keeps signal names only; the
+    /// per-signal turns come from the call's parsed completion
+    /// (written before faithfulness drops failures), and the envelope
+    /// indices resolve by re-running the envelope's own turn query:
+    /// the last 30 at or before the window's turn, oldest first.
+    /// Failed names come from the call's `faithfulness_failed` list.
+    /// All read-only re-derivation; out-of-range indices drop.
+    fn cited_signals(
+        &self,
+        scope: &str,
+        id: &str,
+    ) -> Result<(Vec<CitedSignal>, Vec<String>), QueryError> {
+        let prop: Option<(i64, Option<String>, Option<String>)> = self
+            .conn()
+            .query_row(
+                "SELECT window_end_ts, note, signals FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+                 ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
+                params![scope, id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let Some((window_end_ts, note, surviving)) = prop else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let surviving: Vec<String> = surviving
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let call_id = call_id_of(&note);
+        let (claimed, failed): (Vec<CitedSignal>, Vec<String>) = match call_id {
+            Some(call) => {
+                let parsed: Option<String> = self
+                    .conn()
+                    .query_row(
+                        "SELECT parsed FROM llm_calls WHERE id = ?1",
+                        params![call],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                let failed: Vec<String> = self
+                    .conn()
+                    .query_row(
+                        "SELECT faithfulness_failed FROM llm_calls WHERE id = ?1",
+                        params![call],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let claimed: Vec<CitedSignal> = parsed
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+                    .and_then(|v| serde_json::from_value(v.get("signals")?.clone()).ok())
+                    .unwrap_or_default();
+                (claimed, failed)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        // No parsed completion (old rows, dry runs): the surviving
+        // names stand alone, all passed, with no cited turns.
+        if claimed.is_empty() && !surviving.is_empty() {
+            return Ok((
+                surviving
+                    .into_iter()
+                    .map(|name| CitedSignal {
+                        name,
+                        turns: Vec::new(),
+                        rowids: Vec::new(),
+                    })
+                    .collect(),
+                failed,
+            ));
+        }
+        let col = if scope == "actor" {
+            "actor_id"
+        } else {
+            "cluster_key"
+        };
+        let anchor: Option<i64> = self
+            .conn()
+            .query_row(
+                "SELECT t.rowid FROM feature_vectors fv \
+                 JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
+                 WHERE fv.scope = ?1 AND fv.key = ?2 AND fv.version = ?3 AND fv.ts_us = ?4 \
+                 ORDER BY t.rowid DESC LIMIT 1",
+                params![scope, id, crate::rules::features::VERSION, window_end_ts],
+                |r| r.get(0),
+            )
+            .ok();
+        let mut order: Vec<i64> = match anchor {
+            Some(a) => self
+                .conn()
+                .prepare(&format!(
+                    "SELECT rowid FROM turns WHERE {col} = ?1 AND rowid <= ?2 \
+                     ORDER BY rowid DESC LIMIT {}",
+                    crate::llm::ENVELOPE_TURNS
+                ))?
+                .query_map(params![id, a], |r| r.get(0))?
+                .filter_map(|r| r.ok())
+                .collect(),
+            None => Vec::new(),
+        };
+        order.reverse();
+        let mut out = claimed;
+        for s in &mut out {
+            s.rowids = s
+                .turns
+                .iter()
+                .filter_map(|i| order.get(*i).copied())
+                .collect();
+        }
+        Ok((out, failed))
+    }
+
+    /// One turn row for the evidence and actor tables, with its flags
+    /// phrased, its verdict derived, and its cited signals attached.
+    #[allow(clippy::too_many_arguments)]
+    fn turn_json(
+        &self,
+        rowid: i64,
+        turn_id: Option<String>,
+        ts_us: i64,
+        verb: &str,
+        route: &str,
+        pattern: Option<&str>,
+        status: i64,
+        flags: Option<&str>,
+        matched: Option<&str>,
+        signals: &[String],
+    ) -> serde_json::Value {
+        let names: Vec<String> = flags
+            .and_then(|f| serde_json::from_str(f).ok())
+            .unwrap_or_default();
+        let flag_list: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "phrase": flag_phrase(n)}))
+            .collect();
+        let (rules, verdict, note) = turn_verdict(matched);
+        serde_json::json!({
+            "row": rowid,
+            "trace": turn_id,
+            "at": ts_us,
+            "method": verb,
+            "route": route_display(route, pattern),
+            "status": status,
+            "flags": flag_list,
+            "verdict": verdict,
+            "note": note,
+            "rules": rules,
+            "cited": !signals.is_empty(),
+            "signals": signals,
+        })
+    }
+
+    /// The newest turns of a subject, newest first, with flag, status
+    /// (exact code or `Nxx` class) and route filters. `cited` maps
+    /// turn rowids to the signal names that cite them. Returns the
+    /// rows and the filtered total.
+    #[allow(clippy::too_many_arguments)]
+    fn subject_turns(
+        &self,
+        scope: &str,
+        id: &str,
+        limit: i64,
+        flag: Option<&str>,
+        status: Option<&str>,
+        route: Option<&str>,
+        cited: &std::collections::HashMap<i64, Vec<String>>,
+    ) -> Result<(Vec<serde_json::Value>, i64), QueryError> {
+        let col = if scope == "actor" {
+            "actor_id"
+        } else {
+            "cluster_key"
+        };
+        let mut pred = format!("{col} = ?1");
+        let mut args: Vec<String> = vec![id.to_string()];
+        if let Some(f) = flag {
+            pred.push_str(" AND flags LIKE '%' || ? || '%'");
+            args.push(format!("\"{f}\""));
+        }
+        if let Some(s) = status {
+            if s.len() == 3 && s.ends_with("xx") && s.as_bytes()[0].is_ascii_digit() {
+                let base = (s.as_bytes()[0] - b'0') as i64 * 100;
+                pred.push_str(" AND status >= ? AND status < ?");
+                args.push(base.to_string());
+                args.push((base + 100).to_string());
+            } else if s.bytes().all(|b| b.is_ascii_digit()) && !s.is_empty() {
+                pred.push_str(" AND status = ?");
+                args.push(s.to_string());
+            } else {
+                return Ok((Vec::new(), 0));
+            }
+        }
+        if let Some(r) = route {
+            pred.push_str(" AND (route = ? OR path_pattern = ?)");
+            args.push(r.to_string());
+            args.push(r.to_string());
+        }
+        let total: i64 = self.conn().query_row(
+            &format!("SELECT count(*) FROM turns WHERE {pred}"),
+            rusqlite::params_from_iter(args.iter()),
+            |r| r.get(0),
+        )?;
+        let clamped = limit.clamp(1, 100);
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT rowid, turn_id, ts_us, verb, route, path_pattern, status, flags, rules_matched \
+             FROM turns WHERE {pred} ORDER BY rowid DESC LIMIT {clamped}"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (rowid, turn_id, ts_us, verb, route, pattern, status, flags, matched) = r?;
+            let empty = Vec::new();
+            let signals = cited.get(&rowid).unwrap_or(&empty);
+            out.push(self.turn_json(
+                rowid,
+                turn_id,
+                ts_us,
+                &verb,
+                &route,
+                pattern.as_deref(),
+                status,
+                flags.as_deref(),
+                matched.as_deref(),
+                signals,
+            ));
+        }
+        Ok((out, total))
+    }
+
+    /// One review item: the model verdict with its top contributors,
+    /// the proposal with its cited signals, the evidence table, the
+    /// decision state, and the queue neighbours. `since_us` bounds
+    /// the stopped check's turn-mediated decisions; pass 0 for all
+    /// time. Unknown scope 404s like an unknown subject.
+    pub fn review_item_json(
+        &self,
+        scope: &str,
+        id: &str,
+        thresholds: &std::collections::HashMap<String, f64>,
+        now_s: i64,
+    ) -> Result<serde_json::Value, QueryError> {
+        if scope != "actor" && scope != "cluster" {
+            return Err(QueryError::NoCluster(id.to_string()));
+        }
+        let canonical = if scope == "actor" {
+            self.actor_ids(id)?[0].clone()
+        } else {
+            let exists: bool = self
+                .conn()
+                .query_row(
+                    "SELECT 1 FROM turns WHERE cluster_key = ?1 LIMIT 1",
+                    params![id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|_| true)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(false),
+                    e => Err(QueryError::Sqlite(e)),
+                })?;
+            if !exists {
+                return Err(QueryError::NoCluster(id.to_string()));
+            }
+            id.to_string()
+        };
+        let score: Option<(f64, Option<String>, String, String)> = self
+            .conn()
+            .query_row(
+                "SELECT score, surface, model_version, top3 FROM scores \
+                 WHERE scope = ?1 AND scope_id = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, canonical],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let Some((value, surface, model_version, top3)) = score else {
+            let err = if scope == "actor" {
+                QueryError::NoActor(format!("{canonical} has no score"))
+            } else {
+                QueryError::NoCluster(format!("{canonical} has no score"))
+            };
+            return Err(err);
+        };
+        let threshold = surface
+            .as_deref()
+            .and_then(|s| thresholds.get(s).copied())
+            .unwrap_or(0.5);
+        let top: Vec<serde_json::Value> = top3_of(&top3)
+            .into_iter()
+            .map(|(name, gain)| {
+                serde_json::json!({
+                    "name": name,
+                    "display": feature_display(&name, gain),
+                    "value": gain,
+                })
+            })
+            .collect();
+        let rows =
+            crate::review::review_rows(self.conn(), 1000, thresholds).map_err(|e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            })?;
+        let pos = rows
+            .iter()
+            .position(|r| r.scope == scope && r.scope_id == canonical);
+        let (why, why_phrase, disagree, rule_hits) = match pos {
+            Some(i) => {
+                let r = &rows[i];
+                (
+                    Some(r.why.as_str()),
+                    Some(r.why.phrase()),
+                    r.why.disagree(),
+                    r.rule_hits.clone(),
+                )
+            }
+            None => (None, None, false, Vec::new()),
+        };
+        let neighbour = |i: usize| {
+            rows.get(i)
+                .map(|r| serde_json::json!({"scope": r.scope, "id": r.scope_id}))
+        };
+        let (prev, next) = match pos {
+            Some(0) => (None, neighbour(1)),
+            Some(i) => (neighbour(i - 1), neighbour(i + 1)),
+            None => (None, None),
+        };
+        let window: Option<(i64, Option<String>)> = self
+            .conn()
+            .query_row(
+                "SELECT ts_us, surface FROM feature_vectors \
+                 WHERE scope = ?1 AND key = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, canonical],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let proposal: Option<(String, f64, String, Option<String>)> = self
+            .conn()
+            .query_row(
+                "SELECT label, confidence, note FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' \
+                 ORDER BY window_end_ts DESC, created_at DESC, id DESC LIMIT 1",
+                params![scope, canonical],
+                |r| {
+                    let note: Option<String> = r.get(2)?;
+                    Ok((r.get(0)?, r.get(1)?, note))
+                },
+            )
+            .map(|(label, confidence, note)| {
+                let reason = note
+                    .as_deref()
+                    .map(crate::review::Proposal::display)
+                    .unwrap_or_default();
+                let model = call_id_of(&note).and_then(|call| {
+                    self.conn()
+                        .query_row(
+                            "SELECT model FROM llm_calls WHERE id = ?1",
+                            params![call],
+                            |r| r.get(0),
+                        )
+                        .ok()
+                });
+                (label, confidence, reason, model)
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let (signals, failed) = self.cited_signals(scope, &canonical)?;
+        let mut mini_stmt = self.conn().prepare(
+            "SELECT rowid, turn_id, ts_us, verb, route, path_pattern, status \
+             FROM turns WHERE rowid = ?1",
+        )?;
+        let mut cited_union: Vec<i64> = signals.iter().flat_map(|s| s.rowids.clone()).collect();
+        cited_union.sort_unstable();
+        cited_union.dedup();
+        let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for s in &signals {
+            for rowid in &s.rowids {
+                cited_by.entry(*rowid).or_default().push(s.name.clone());
+            }
+        }
+        let mini = |rowid: i64, stmt: &mut rusqlite::Statement| -> Option<serde_json::Value> {
+            stmt.query_row(params![rowid], |r| {
+                let route: String = r.get(4)?;
+                let pattern: Option<String> = r.get(5)?;
+                Ok(serde_json::json!({
+                    "row": r.get::<_, i64>(0)?,
+                    "trace": r.get::<_, Option<String>>(1)?,
+                    "at": r.get::<_, i64>(2)?,
+                    "method": r.get::<_, String>(3)?,
+                    "route": route_display(&route, pattern.as_deref()),
+                    "status": r.get::<_, i64>(6)?,
+                }))
+            })
+            .ok()
+        };
+        let signal_list: Vec<serde_json::Value> = signals
+            .iter()
+            .map(|s| {
+                let passed = !failed.contains(&s.name);
+                let turns: Vec<serde_json::Value> = s
+                    .rowids
+                    .iter()
+                    .filter_map(|rowid| mini(*rowid, &mut mini_stmt))
+                    .collect();
+                serde_json::json!({
+                    "name": s.name,
+                    "phrase": signal_phrase(&s.name),
+                    "side": crate::faithfulness::side(&s.name),
+                    "passed": passed,
+                    "failed_reason": if passed { None } else { Some("did not survive the evidence check") },
+                    "turns": turns,
+                })
+            })
+            .collect();
+        let cited_turns: Vec<serde_json::Value> = cited_union
+            .iter()
+            .filter_map(|rowid| mini(*rowid, &mut mini_stmt))
+            .collect();
+        drop(mini_stmt);
+        let (turns, turn_total) =
+            self.subject_turns(scope, &canonical, 20, None, None, None, &cited_by)?;
+        let cluster_size: i64 = if scope == "actor" {
+            let key: Option<String> = self
+                .conn()
+                .query_row(
+                    "SELECT cluster_key FROM turns \
+                     WHERE actor_id = ?1 AND cluster_key IS NOT NULL \
+                     ORDER BY rowid DESC LIMIT 1",
+                    params![canonical],
+                    |r| r.get(0),
+                )
+                .ok();
+            match key {
+                Some(k) => self.conn().query_row(
+                    "SELECT count(DISTINCT actor_id) FROM turns WHERE cluster_key = ?1",
+                    params![k],
+                    |r| r.get(0),
+                )?,
+                None => 0,
+            }
+        } else {
+            self.conn().query_row(
+                "SELECT count(DISTINCT actor_id) FROM turns WHERE cluster_key = ?1",
+                params![canonical],
+                |r| r.get(0),
+            )?
+        };
+        let operator: Option<(String, i64)> = self
+            .conn()
+            .query_row(
+                "SELECT label, created_at FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'operator' \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![scope, canonical],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        let state = self.subject_state(scope, &canonical, 0, now_s)?;
+        let agreed = match (&proposal, &operator) {
+            (Some((label, _, _, _)), Some((op, _))) => Some(label == op),
+            _ => None,
+        };
+        let kind = if scope == "actor" {
+            self.actor_row(&canonical, now_s)
+                .map(|r| r.kind)
+                .unwrap_or_else(|_| "actor".to_string())
+        } else {
+            "cluster".to_string()
+        };
+        Ok(serde_json::json!({
+            "scope": scope,
+            "id": canonical,
+            "kind": kind,
+            "state": state,
+            "queue": {
+                "total": rows.len(),
+                "position": pos.map(|i| i + 1),
+                "prev": prev,
+                "next": next,
+            },
+            "why": why,
+            "why_phrase": why_phrase,
+            "disagree": disagree,
+            "model": {
+                "score": value,
+                "threshold": threshold,
+                "verdict": if value >= threshold { "hostile" } else { "benign" },
+                "by": format!("Windside {model_version}"),
+                "top": top,
+                "rules_fired": {
+                    "count": rule_hits.len(),
+                    "names": rule_hits,
+                },
+            },
+            "proposal": proposal.map(|(label, confidence, reason, model)| serde_json::json!({
+                "label": label,
+                "confidence": confidence,
+                "reason": reason,
+                "model": model,
+            })),
+            "signals": signal_list,
+            "evidence": {
+                "turns": turns,
+                "total": turn_total,
+                "cited": cited_turns,
+                "cluster_size": cluster_size,
+            },
+            "decision": {
+                "operator": operator.as_ref().map(|(label, _)| label),
+                "decided_at": operator.as_ref().map(|(_, at)| at),
+                "agreed": agreed,
+            },
+            "window": {
+                "window_end_ts": window.as_ref().map(|(ts, _)| *ts),
+                "surface": window.as_ref().and_then(|(_, s)| s.clone()),
+            },
+        }))
+    }
+
+    /// One actor page: the headline, client and activity rows, the
+    /// score block with its explanation, labels, the proposal with
+    /// its cited signals, decisions, same-cluster actors with their
+    /// states, and the newest turns. `classes` classifies the newest
+    /// JA4 for the client row.
+    pub fn actor_json(
+        &self,
+        id: &str,
+        thresholds: &std::collections::HashMap<String, f64>,
+        classes: &crate::tap::classes::Ja4Classes,
+        now_s: i64,
+    ) -> Result<serde_json::Value, QueryError> {
+        let d = self.actor_detail(id, 0, now_s, thresholds)?;
+        let canonical = d.head.id.clone();
+        let state = self.subject_state("actor", &canonical, 0, now_s)?;
+        let threshold = d
+            .row
+            .score_surface
+            .as_deref()
+            .and_then(|s| thresholds.get(s).copied())
+            .unwrap_or(0.5);
+        let score = d.scores.latest.as_ref().map(|s| {
+            serde_json::json!({
+                "value": s.score,
+                "threshold": threshold,
+                "verdict": if s.score >= threshold { "hostile" } else { "benign" },
+                "by": format!("Windside {}", s.model_version),
+                "at": s.ts_us,
+                "top": s.top3.iter().map(|(name, gain)| serde_json::json!({
+                    "name": name,
+                    "display": feature_display(name, *gain),
+                    "value": gain,
+                })).collect::<Vec<_>>(),
+            })
+        });
+        let history: Vec<serde_json::Value> = d
+            .scores
+            .history
+            .iter()
+            .map(|(ts, p)| serde_json::json!({"at": ts, "score": p}))
+            .collect();
+        let bindings: Vec<serde_json::Value> = d
+            .bindings
+            .iter()
+            .map(|b| {
+                serde_json::json!({
+                    "kind": b.kind,
+                    "first_seen": b.first_seen,
+                    "last_seen": b.last_seen,
+                    "returned": b.returned,
+                    "provisional": b.provisional,
+                })
+            })
+            .collect();
+        let ja4_class = d.client.ja4.as_deref().map(|j| match classes.classify(j) {
+            crate::tap::classes::Class::Browser => "browser",
+            crate::tap::classes::Class::Library => "library",
+            crate::tap::classes::Class::Unknown => "unknown",
+        });
+        let ja4_hostile = ja4_class == Some("library")
+            && crate::tap::classes::is_browser_ua(d.client.ua_class.as_deref());
+        let flags: Vec<serde_json::Value> = d
+            .client
+            .flag_rates
+            .iter()
+            .map(|(name, rate)| {
+                serde_json::json!({"name": name, "phrase": flag_phrase(name), "rate": rate})
+            })
+            .collect();
+        let labels: Vec<serde_json::Value> = d
+            .labels
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "source": l.source,
+                    "label": l.label,
+                    "confidence": l.confidence,
+                    "at": l.created_at,
+                })
+            })
+            .collect();
+        let proposal = d.proposal.as_ref().map(|p| {
+            let model: Option<String> = p.call_id.and_then(|call| {
+                self.conn()
+                    .query_row(
+                        "SELECT model FROM llm_calls WHERE id = ?1",
+                        params![call],
+                        |r| r.get(0),
+                    )
+                    .ok()
+            });
+            serde_json::json!({
+                "label": p.label.label,
+                "confidence": p.label.confidence,
+                "reason": p.reason,
+                "model": model,
+            })
+        });
+        let (signals, failed) = self.cited_signals("actor", &canonical)?;
+        let signal_list: Vec<serde_json::Value> = signals
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "phrase": signal_phrase(&s.name),
+                    "side": crate::faithfulness::side(&s.name),
+                    "passed": !failed.contains(&s.name),
+                    "cited": s.rowids.len(),
+                })
+            })
+            .collect();
+        let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for s in &signals {
+            for rowid in &s.rowids {
+                cited_by.entry(*rowid).or_default().push(s.name.clone());
+            }
+        }
+        let decisions: Vec<serde_json::Value> = d
+            .decisions
+            .iter()
+            .map(|x| {
+                serde_json::json!({
+                    "action": x.action,
+                    "mode": x.mode,
+                    "rule": x.rule,
+                    "created": x.created_at,
+                    "expires": x.expires_at,
+                    "active": x.expires_at > now_s,
+                })
+            })
+            .collect();
+        let blocked = d
+            .decisions
+            .iter()
+            .any(|x| x.action == "block" && x.mode == "enforce" && x.expires_at > now_s);
+        let mut similar = Vec::with_capacity(d.similar.len());
+        for s in &d.similar {
+            let st = self.subject_state("actor", &s.id, 0, now_s)?;
+            similar.push(serde_json::json!({
+                "id": s.id,
+                "kind": s.kind,
+                "score": s.score,
+                "turns": s.turns,
+                "last": s.last_us,
+                "state": st,
+            }));
+        }
+        let (turns, turn_total) =
+            self.subject_turns("actor", &canonical, 20, None, None, None, &cited_by)?;
+        Ok(serde_json::json!({
+            "id": canonical,
+            "kind": d.row.kind,
+            "state": state,
+            "headline": headline(&d.row.kind, d.head.opened_us, &state),
+            "opened": d.head.opened_us,
+            "last": d.head.last_us,
+            "turns_held": d.head.turns,
+            "merged_from": d.merged_from,
+            "bindings": bindings,
+            "client": {
+                "ua_class": d.client.ua_class,
+                "ja4": d.client.ja4,
+                "ja4t": d.client.ja4t,
+                "ja4_class": ja4_class,
+                "ja4_hostile": ja4_hostile,
+                "shape_prefix": d.client.shape_prefix,
+                "shape_count": d.client.shape_count,
+                "turns_sampled": d.client.turns_sampled,
+                "flags": flags,
+            },
+            "activity": {
+                "turns": d.activity.turns,
+                "active_s": d.activity.active_s,
+                "assets": d.activity.assets,
+                "ok_2xx": d.activity.ok_2xx,
+                "redirects": d.activity.redirects,
+                "not_found": d.activity.not_found,
+                "denied": d.activity.denied,
+                "limited": d.activity.limited,
+                "errors_5xx": d.activity.errors_5xx,
+                "iri_median_ms": d.activity.iri_median_ms,
+                "iri_cv": d.activity.iri_cv,
+                "distinct_routes": d.activity.distinct_routes,
+            },
+            "score": score,
+            "score_history": history,
+            "score_note": d.scores.explanation,
+            "scored_rows": d.scores.scored_rows,
+            "explanation": d.explanation.as_ref().map(|e| serde_json::json!({
+                "text": e.text,
+                "turn_id": e.turn_id,
+                "at": e.ts_us,
+                "score": e.score,
+            })),
+            "labels": labels,
+            "proposal": proposal,
+            "signals": signal_list,
+            "decisions": decisions,
+            "blocked": blocked,
+            "cluster": d.row.cluster,
+            "cluster_actors": d.cluster_actors,
+            "similar": similar,
+            "turns": turns,
+            "turn_total": turn_total,
+            "window": {
+                "window_end_ts": d.window_end_ts,
+                "surface": d.window_surface,
+            },
+        }))
+    }
+
+    /// The subject's latest feature window, for labels that carry
+    /// the current window without a freshness check (block/unblock).
+    pub fn latest_window(
+        &self,
+        scope: &str,
+        id: &str,
+    ) -> Result<Option<(i64, Option<String>)>, QueryError> {
+        self.conn()
+            .query_row(
+                "SELECT ts_us, surface FROM feature_vectors \
+                 WHERE scope = ?1 AND key = ?2 ORDER BY ts_us DESC LIMIT 1",
+                params![scope, id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })
+    }
+
+    /// The actor turn table with its filters, newest first: flag (a
+    /// stored flag name), status (an exact code or an `Nxx` class),
+    /// route (a route name or folded path), limit (1 to 100,
+    /// default 20).
+    pub fn actor_turns_json(
+        &self,
+        id: &str,
+        flag: Option<&str>,
+        status: Option<&str>,
+        route: Option<&str>,
+        limit: i64,
+    ) -> Result<serde_json::Value, QueryError> {
+        let canonical = self.actor_ids(id)?[0].clone();
+        let (signals, _) = self.cited_signals("actor", &canonical)?;
+        let mut cited_by: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for s in &signals {
+            for rowid in &s.rowids {
+                cited_by.entry(*rowid).or_default().push(s.name.clone());
+            }
+        }
+        let (turns, total) =
+            self.subject_turns("actor", &canonical, limit, flag, status, route, &cited_by)?;
+        Ok(serde_json::json!({
+            "id": canonical,
+            "total": total,
+            "turns": turns,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4449,5 +5593,413 @@ mod tests {
         assert_eq!(m.drafts_parsed, 0);
         assert_eq!(m.drafts_moved, 0);
         assert_eq!(m.shadow_fp_moved_drafts, 0);
+    }
+
+    // ---------- Round A-2 ----------
+
+    /// a1: five scored turns in cluster c1, a proposal with two
+    /// claimed signals (one failed), the window anchored at t5. a2:
+    /// low score, nothing else. a3: mid score, shares c1. a4
+    /// (16-hex): stopped by an operator block. a5: high score, no
+    /// hits, no proposal. a6: low score, a watched rule. a7: low
+    /// score, an enforce hit. a11: mid score with a watched rule
+    /// (uncertain). a8/a9/a10: decided (disagree, agree, agree);
+    /// a10 is scored, so it also tests the decided-out rule.
+    fn review_db(name: &str) -> (Connection, i64) {
+        let now: i64 = 1_800_000_000;
+        let us = |s: i64| s * 1_000_000;
+        let path = std::env::temp_dir().join(format!("leesided-q-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut conn = Connection::open(&path).unwrap();
+        crate::store::migrate(&mut conn).unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO actors (id, opened_us, last_us, turns) VALUES \
+             ('a1', 0, {u5}, 5), ('a2', 0, {u5}, 1), ('a3', 0, {u5}, 1), \
+             ('aaaabbbbccccdddd', 0, {u5}, 1), ('a5', 0, {u5}, 1), \
+             ('a6', 0, {u5}, 1), ('a7', 0, {u5}, 1), ('a10', 0, {u5}, 1), ('a11', 0, {u5}, 1); \
+             INSERT INTO turns (turn_id, session_key, ts_us, ts, peer_key, principal, verb, route, \
+             status, latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id, cluster_key, surface, flags, path_pattern, \
+             rules_matched, ua_class, ja4) VALUES \
+             ('t1', 's1', {u1}, {t1}, 'p1', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1', 'c1', 'web', NULL, NULL, NULL, NULL, NULL), \
+             ('t2', 's1', {u2}, {t2}, 'p1', 'anon', 'GET', '_unrouted', 404, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1', 'c1', 'web', \
+             '[\"browser_no_sec_fetch\"]', '/[id]', NULL, NULL, NULL), \
+             ('t3', 's1', {u3}, {t3}, 'p1', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1', 'c1', 'web', NULL, NULL, \
+             '[{{\"rule\":\"auth-burst-peer\",\"action\":\"watch\",\"mode\":\"shadow\"}}]', NULL, NULL), \
+             ('t4', 's1', {u4}, {t4}, 'p1', 'anon', 'GET', '_unrouted', 404, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1', 'c1', 'web', \
+             '[\"ua_changes\"]', '/x', NULL, NULL, NULL), \
+             ('t5', 's1', {u5}, {t5}, 'p1', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a1', 'c1', 'web', NULL, NULL, NULL, \
+             'chromium', 'j4x'), \
+             ('t6', 's2', {u5}, {t5}, 'p2', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a2', NULL, 'web', NULL, NULL, NULL, NULL, NULL), \
+             ('t7', 's3', {u5}, {t5}, 'p3', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a3', 'c1', 'web', NULL, NULL, NULL, NULL, NULL), \
+             ('t8', 's4', {u5}, {t5}, 'p4', 'anon', 'GET', 'venues.show', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'aaaabbbbccccdddd', NULL, 'web', NULL, NULL, \
+             '[{{\"rule\":\"operator\",\"action\":\"block\",\"mode\":\"enforce\"}}]', NULL, NULL), \
+             ('t9', 's5', {u5}, {t5}, 'p5', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a5', NULL, 'web', NULL, NULL, NULL, NULL, NULL), \
+             ('t10', 's6', {u5}, {t5}, 'p6', 'anon', 'GET', 'x', 500, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a6', NULL, 'web', NULL, NULL, \
+             '[{{\"rule\":\"server-error-watch\",\"action\":\"watch\",\"mode\":\"shadow\"}}]', NULL, NULL), \
+             ('t11', 's7', {u5}, {t5}, 'p7', 'anon', 'GET', 'venues.show', 41, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a7', NULL, 'web', NULL, NULL, \
+             '[{{\"rule\":\"venue-enumeration\",\"action\":\"block\",\"mode\":\"enforce\"}}]', NULL, NULL), \
+             ('t13', 's8', {u5}, {t5}, 'p8', 'anon', 'GET', 'x', 500, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a11', NULL, 'web', NULL, NULL, \
+             '[{{\"rule\":\"server-error-watch\",\"action\":\"watch\",\"mode\":\"shadow\"}}]', NULL, NULL); \
+             INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) VALUES \
+             ('actor', 'aaaabbbbccccdddd', 'block', 'enforce', 'operator', 0, {c0}, {e1}); \
+             INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+             ('actor', 'a1', 't5', 'web', {u5}, 0.95, '0.1.0', '[{{\"name\":\"ratio_404\",\"path_gain\":0.63}}]'), \
+             ('actor', 'a2', 't6', 'web', {u5}, 0.2, '0.1.0', '[]'), \
+             ('actor', 'a3', 't7', 'web', {u5}, 0.6, '0.1.0', '[]'), \
+             ('actor', 'a5', 't9', 'web', {u5}, 0.9, '0.1.0', '[]'), \
+             ('actor', 'a6', 't10', 'web', {u5}, 0.2, '0.1.0', '[]'), \
+             ('actor', 'a7', 't11', 'web', {u5}, 0.2, '0.1.0', '[]'), \
+             ('actor', 'a10', 't12', 'web', {u5}, 0.9, '0.1.0', '[]'), \
+             ('actor', 'a11', 't13', 'web', {u5}, 0.6, '0.1.0', '[]'); \
+             INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
+             ('actor', 'a1', 't5', {u5}, 2, '[0.0]', 'web', 0); \
+             INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, signals, cited_turns, created_at) VALUES \
+             ('actor', 'a1', 'web', {u5}, 'malicious', 'llm_proposed', 0.91, \
+             'Wordlist paths at machine cadence. [llm_call:1]', '[\"scanner_paths\"]', '[0, 3]', {c1}), \
+             ('actor', 'a8', 'web', {u5}, 'malicious', 'llm_proposed', 0.8, 'r [llm_call:2]', '[]', '[]', {c1}), \
+             ('actor', 'a8', 'web', {u5}, 'benign', 'operator', 1.0, 'review CLI', NULL, NULL, {c2}), \
+             ('actor', 'a9', 'web', {u5}, 'malicious', 'llm_proposed', 0.8, 'r [llm_call:2]', '[]', '[]', {c1}), \
+             ('actor', 'a9', 'web', {u5}, 'malicious', 'operator', 1.0, 'review CLI', NULL, NULL, {c2}), \
+             ('actor', 'a10', 'web', {u5}, 'benign', 'llm_proposed', 0.7, 'r [llm_call:2]', '[]', '[]', {c0}), \
+             ('actor', 'a10', 'web', {u5}, 'benign', 'operator', 1.0, 'review CLI', NULL, NULL, {c2}); \
+             INSERT INTO llm_calls (id, point, model, prompt_hash, json_mode, input_summary, request, parsed, faithfulness_failed, prompt_tokens, completion_tokens, created_at) VALUES \
+             (1, 'label', 'Muse Spark', 'h', 'prompt', '{{}}', '{{}}', \
+             '{{\"label\":\"malicious\",\"confidence\":0.93,\"reason\":\"Wordlist paths.\", \
+             \"signals\":[{{\"name\":\"scanner_paths\",\"turns\":[0,3]}},{{\"name\":\"machine_cadence\",\"turns\":[4]}}]}}', \
+             '[\"machine_cadence\"]', 100, 50, {c1}), \
+             (2, 'label', 'Muse Spark', 'h', 'prompt', '{{}}', '{{}}', NULL, NULL, 10, 5, {c1});",
+            t1 = now - 400,
+            t2 = now - 300,
+            t3 = now - 200,
+            t4 = now - 100,
+            t5 = now - 60,
+            u1 = us(now - 400),
+            u2 = us(now - 300),
+            u3 = us(now - 200),
+            u4 = us(now - 100),
+            u5 = us(now - 60),
+            c0 = now - 200,
+            c1 = now - 50,
+            c2 = now - 10,
+            e1 = now + 1000,
+        ))
+        .unwrap();
+        (conn, now)
+    }
+
+    fn web_thresholds() -> std::collections::HashMap<String, f64> {
+        let mut thresholds = std::collections::HashMap::new();
+        thresholds.insert("web".to_string(), 0.5);
+        thresholds
+    }
+
+    #[test]
+    fn a2_phrases_cover_every_stored_name_with_fallbacks() {
+        assert_eq!(
+            flag_phrase("ua_chromium_no_ch"),
+            "says Chrome, sends no client hints"
+        );
+        assert_eq!(
+            flag_phrase("browser_no_sec_fetch"),
+            "browser sends no fetch metadata"
+        );
+        assert_eq!(
+            flag_phrase("browser_no_accept_language"),
+            "browser sends no language"
+        );
+        assert_eq!(
+            flag_phrase("ua_vs_ja4_mismatch"),
+            "user agent and TLS disagree"
+        );
+        assert_eq!(flag_phrase("ua_changes"), "user agent changed mid-window");
+        assert_eq!(flag_phrase("ua_inconsistent"), "client inconsistent");
+        assert_eq!(flag_phrase("library_ua_on_web"), "script UA on a web page");
+        assert_eq!(flag_phrase("whatever_new"), "whatever_new");
+        assert_eq!(signal_phrase("honeytoken_hit"), "hidden trap touched");
+        assert_eq!(signal_phrase("insufficient_data"), "too few requests");
+        assert_eq!(signal_phrase("whatever_new"), "whatever_new");
+        for name in crate::rules::features::NAMES {
+            assert!(feature_phrase(name).is_some(), "{name}");
+        }
+        assert_eq!(feature_display("ratio_404", 0.63), "404 share 0.63");
+        assert_eq!(feature_display("whatever_new", 0.5), "whatever_new 0.50");
+    }
+
+    #[test]
+    fn a2_headline_templates_state_and_day() {
+        assert_eq!(
+            headline("browser only", 0, "waiting"),
+            "A browser only first seen 1 Jan 1970, waiting for a decision"
+        );
+        assert_eq!(
+            headline("API client", 0, "stopped"),
+            "A API client first seen 1 Jan 1970, currently blocked"
+        );
+        assert_eq!(
+            headline("signed-in user", 0, "watched"),
+            "A signed-in user first seen 1 Jan 1970, under watch"
+        );
+    }
+
+    #[test]
+    fn a2_turn_verdicts_and_route_display() {
+        assert_eq!(route_display("portal.login", None), "portal.login");
+        assert_eq!(route_display("_unrouted", Some("/[id]")), "/[id]");
+        assert_eq!(route_display("_unrouted", None), "_unrouted");
+        let (_, verdict, note) = turn_verdict(None);
+        assert_eq!(
+            (verdict.as_str(), note.as_str()),
+            ("allowed", "no rule fired")
+        );
+        let (rules, verdict, note) = turn_verdict(Some(
+            "[{\"rule\":\"auth-burst-peer\",\"action\":\"watch\",\"mode\":\"shadow\"}]",
+        ));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            (verdict.as_str(), note.as_str()),
+            ("observed", "watched by auth-burst-peer")
+        );
+        let (_, verdict, note) = turn_verdict(Some(
+            "[{\"rule\":\"venue-enumeration\",\"action\":\"block\",\"mode\":\"enforce\"}]",
+        ));
+        assert_eq!(
+            (verdict.as_str(), note.as_str()),
+            ("blocked", "blocked by venue-enumeration")
+        );
+        let (_, verdict, note) = turn_verdict(Some(
+            "[{\"rule\":\"operator\",\"action\":\"block\",\"mode\":\"enforce\"}]",
+        ));
+        assert_eq!(
+            (verdict.as_str(), note.as_str()),
+            ("blocked", "blocked by your decision")
+        );
+    }
+
+    #[test]
+    fn a2_subject_states_mirror_episodes_and_queue() {
+        let (conn, now) = review_db("states");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        assert_eq!(
+            ctx.subject_state("actor", "aaaabbbbccccdddd", 0, now)
+                .unwrap(),
+            "stopped"
+        );
+        assert_eq!(ctx.subject_state("actor", "a1", 0, now).unwrap(), "waiting");
+        assert_eq!(ctx.subject_state("actor", "a2", 0, now).unwrap(), "waiting");
+        assert_eq!(
+            ctx.subject_state("actor", "a11", 0, now).unwrap(),
+            "waiting"
+        );
+        // Decided out: the operator stands at or after the proposal.
+        assert_eq!(
+            ctx.subject_state("actor", "a10", 0, now).unwrap(),
+            "watched"
+        );
+        // Unscored subjects are watched, decided or not.
+        assert_eq!(ctx.subject_state("actor", "a8", 0, now).unwrap(), "watched");
+    }
+
+    #[test]
+    fn a2_review_queue_orders_counts_and_decides() {
+        let (conn, now) = review_db("queue");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let q = ctx
+            .review_queue_json(&web_thresholds(), now - 86_400)
+            .unwrap();
+        assert_eq!(q["total"], 7);
+        assert_eq!(q["agree"], 3);
+        assert_eq!(q["disagree"], 4);
+        let ids: Vec<&str> = q["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a5", "a3", "a6", "a7", "a11", "a1", "a2"]);
+        assert_eq!(q["items"][0]["why"], "above_threshold_no_rule");
+        assert_eq!(q["items"][0]["why_phrase"], "score high, no rule fired");
+        assert_eq!(q["items"][1]["why"], "above_threshold_no_rule");
+        assert_eq!(q["items"][2]["why"], "observe_below_threshold");
+        assert_eq!(q["items"][2]["disagree"], true);
+        assert_eq!(q["items"][3]["why"], "rule_below_threshold");
+        assert_eq!(q["items"][4]["why"], "uncertain");
+        assert_eq!(q["items"][4]["disagree"], false);
+        assert_eq!(q["items"][5]["why"], "unlabelled_proposal");
+        assert_eq!(q["items"][5]["proposal"]["label"], "malicious");
+        assert_eq!(q["items"][6]["why"], "score");
+        assert_eq!(q["decided"]["total"], 3);
+        assert_eq!(q["decided"]["agreed"], 2);
+    }
+
+    #[test]
+    fn a2_review_item_carries_signals_evidence_and_neighbours() {
+        let (conn, now) = review_db("item");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let v = ctx
+            .review_item_json("actor", "a1", &web_thresholds(), now)
+            .unwrap();
+        assert_eq!(v["id"], "a1");
+        assert_eq!(v["kind"], "browser only");
+        assert_eq!(v["state"], "waiting");
+        assert_eq!(v["queue"]["total"], 7);
+        assert_eq!(v["queue"]["position"], 6);
+        assert_eq!(v["queue"]["prev"]["id"], "a11");
+        assert_eq!(v["queue"]["next"]["id"], "a2");
+        assert_eq!(v["why"], "unlabelled_proposal");
+        assert_eq!(v["model"]["score"], 0.95);
+        assert_eq!(v["model"]["verdict"], "hostile");
+        assert_eq!(v["model"]["by"], "Windside 0.1.0");
+        assert_eq!(v["model"]["top"][0]["display"], "404 share 0.63");
+        assert_eq!(v["model"]["rules_fired"]["count"], 1);
+        assert_eq!(v["model"]["rules_fired"]["names"][0], "auth-burst-peer");
+        assert_eq!(v["proposal"]["label"], "malicious");
+        assert_eq!(v["proposal"]["model"], "Muse Spark");
+        assert_eq!(v["signals"].as_array().unwrap().len(), 2);
+        assert_eq!(v["signals"][0]["name"], "scanner_paths");
+        assert_eq!(v["signals"][0]["passed"], true);
+        assert_eq!(v["signals"][0]["side"], "malicious");
+        let rows: Vec<i64> = v["signals"][0]["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["row"].as_i64().unwrap())
+            .collect();
+        assert_eq!(rows, vec![1, 4]);
+        assert_eq!(v["signals"][0]["turns"][0]["trace"], "t1");
+        assert_eq!(v["signals"][1]["name"], "machine_cadence");
+        assert_eq!(v["signals"][1]["passed"], false);
+        assert_eq!(
+            v["signals"][1]["failed_reason"],
+            "did not survive the evidence check"
+        );
+        assert_eq!(v["evidence"]["total"], 5);
+        assert_eq!(v["evidence"]["cited"].as_array().unwrap().len(), 3);
+        assert_eq!(v["evidence"]["cluster_size"], 2);
+        // Newest first; t5 is newest, t2 shows its folded path and flag.
+        // t5 is cited by the failed claim, t4 by the surviving one.
+        assert_eq!(v["evidence"]["turns"][0]["trace"], "t5");
+        assert_eq!(v["evidence"]["turns"][0]["cited"], true);
+        assert_eq!(v["evidence"]["turns"][0]["signals"][0], "machine_cadence");
+        assert_eq!(v["evidence"]["turns"][1]["cited"], true);
+        assert_eq!(v["evidence"]["turns"][1]["signals"][0], "scanner_paths");
+        assert_eq!(v["evidence"]["turns"][3]["route"], "/[id]");
+        assert_eq!(
+            v["evidence"]["turns"][3]["flags"][0]["phrase"],
+            "browser sends no fetch metadata"
+        );
+        assert_eq!(v["evidence"]["turns"][3]["cited"], false);
+        assert_eq!(v["decision"]["operator"], serde_json::Value::Null);
+        assert_eq!(v["window"]["window_end_ts"], (now - 60) * 1_000_000);
+        // Unknown scope and unscored subjects 404 like unknown ones.
+        assert!(ctx
+            .review_item_json("peer", "a1", &web_thresholds(), now)
+            .is_err());
+        assert!(ctx
+            .review_item_json("actor", "aaaabbbbccccdddd", &web_thresholds(), now)
+            .is_err());
+    }
+
+    #[test]
+    fn a2_actor_turns_filter_by_flag_status_and_route() {
+        let (conn, _) = review_db("turns");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let v = ctx.actor_turns_json("a1", None, None, None, 20).unwrap();
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["turns"].as_array().unwrap().len(), 5);
+        let v = ctx
+            .actor_turns_json("a1", Some("browser_no_sec_fetch"), None, None, 20)
+            .unwrap();
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["turns"][0]["trace"], "t2");
+        let v = ctx
+            .actor_turns_json("a1", None, Some("404"), None, 20)
+            .unwrap();
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["turns"][0]["trace"], "t4");
+        let v = ctx
+            .actor_turns_json("a1", None, Some("4xx"), None, 20)
+            .unwrap();
+        assert_eq!(v["total"], 2);
+        let v = ctx
+            .actor_turns_json("a1", None, Some("200"), None, 20)
+            .unwrap();
+        assert_eq!(v["total"], 3);
+        let v = ctx
+            .actor_turns_json("a1", None, None, Some("portal.login"), 20)
+            .unwrap();
+        assert_eq!(v["total"], 2);
+        let v = ctx
+            .actor_turns_json("a1", None, None, Some("/x"), 20)
+            .unwrap();
+        assert_eq!(v["total"], 1);
+        assert_eq!(v["turns"][0]["trace"], "t4");
+        let v = ctx.actor_turns_json("a1", None, None, None, 2).unwrap();
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["turns"].as_array().unwrap().len(), 2);
+        let v = ctx
+            .actor_turns_json("a1", None, Some("bogus"), None, 20)
+            .unwrap();
+        assert_eq!(v["total"], 0);
+        // The operator block reads as the operator's decision.
+        let v = ctx
+            .actor_turns_json("aaaabbbbccccdddd", None, None, None, 20)
+            .unwrap();
+        assert_eq!(v["turns"][0]["verdict"], "blocked");
+        assert_eq!(v["turns"][0]["note"], "blocked by your decision");
+    }
+
+    #[test]
+    fn a2_actor_page_carries_headline_client_and_score() {
+        let (conn, now) = review_db("actor");
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let classes = crate::tap::classes::Ja4Classes::default();
+        let v = ctx
+            .actor_json("a1", &web_thresholds(), &classes, now)
+            .unwrap();
+        assert_eq!(v["id"], "a1");
+        assert_eq!(v["state"], "waiting");
+        assert_eq!(
+            v["headline"],
+            "A browser only first seen 1 Jan 1970, waiting for a decision"
+        );
+        assert_eq!(v["client"]["ua_class"], "chromium");
+        assert_eq!(v["client"]["ja4"], "j4x");
+        assert_eq!(v["client"]["ja4_class"], "unknown");
+        assert_eq!(v["client"]["ja4_hostile"], false);
+        assert_eq!(v["client"]["turns_sampled"], 2);
+        assert_eq!(v["client"]["flags"].as_array().unwrap().len(), 2);
+        assert_eq!(v["client"]["flags"][0]["name"], "browser_no_sec_fetch");
+        assert_eq!(v["client"]["flags"][0]["rate"], 0.5);
+        assert_eq!(v["activity"]["turns"], 5);
+        assert_eq!(v["score"]["value"], 0.95);
+        assert_eq!(v["score"]["verdict"], "hostile");
+        assert_eq!(v["proposal"]["label"], "malicious");
+        assert_eq!(v["signals"].as_array().unwrap().len(), 2);
+        assert_eq!(v["blocked"], false);
+        assert_eq!(v["cluster"], "c1");
+        assert_eq!(v["cluster_actors"], 2);
+        assert_eq!(v["similar"].as_array().unwrap().len(), 1);
+        assert_eq!(v["similar"][0]["id"], "a3");
+        assert_eq!(v["similar"][0]["state"], "waiting");
+        assert_eq!(v["turn_total"], 5);
+        let v = ctx
+            .actor_json("aaaabbbbccccdddd", &web_thresholds(), &classes, now)
+            .unwrap();
+        assert_eq!(v["state"], "stopped");
+        assert_eq!(v["blocked"], true);
+        assert_eq!(v["score"], serde_json::Value::Null);
     }
 }

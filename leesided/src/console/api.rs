@@ -322,3 +322,345 @@ pub async fn api_decide(
     }))
     .into_response()
 }
+
+// ---------- Round A-2: review + actor pages ----------
+
+/// The Review page's two tabs: the queue in the CLI's order with its
+/// agree/disagree split, and the Decided tab over the window.
+pub async fn api_review_queue(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Query(q): Query<ApiQuery>,
+) -> Response {
+    let session = match session_of(&e, &headers) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let window_s = match window_of(&q) {
+        Ok(w) => w,
+        Err(r) => return *r,
+    };
+    let now = store::now_s();
+    let mut v = match read_json(&e, |ctx| {
+        ctx.review_queue_json(&super::thresholds(&e), now - window_s)
+    }) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    v["role"] = serde_json::Value::String(session.role.as_str().to_string());
+    Json(v).into_response()
+}
+
+/// One review item: model verdict, proposal with cited signals, the
+/// evidence table, the decision state, queue neighbours.
+pub async fn api_review_item(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((scope, id)): Path<(String, String)>,
+) -> Response {
+    let session = match session_of(&e, &headers) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let now = store::now_s();
+    let mut v = match read_json(&e, |ctx| {
+        ctx.review_item_json(&scope, &id, &super::thresholds(&e), now)
+    }) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    v["role"] = serde_json::Value::String(session.role.as_str().to_string());
+    Json(v).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ReviewBody {
+    decision: Option<String>,
+    window_end_ts: Option<i64>,
+}
+
+/// Decide a review item: `attack` writes the operator label and the
+/// block together, `unsure` and `fine` write the label alone. The
+/// window is freshness-checked like the dashboard decision; a stale
+/// render re-reads and decides again. Clusters take the label only:
+/// blocks are actor-scope, like the inspector's.
+pub async fn api_review_decide(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path((scope, id)): Path<(String, String)>,
+    body: String,
+) -> Response {
+    let session = match session_of(&e, &headers) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_admin_json(&session) {
+        return *r;
+    }
+    if scope != "actor" && scope != "cluster" {
+        return jerr(StatusCode::NOT_FOUND, "no such subject");
+    }
+    let parsed: ReviewBody = match serde_json::from_str(&body) {
+        Ok(b) => b,
+        Err(_) => return jerr(StatusCode::BAD_REQUEST, "invalid JSON"),
+    };
+    let (Some(decision), Some(window_end_ts)) = (parsed.decision, parsed.window_end_ts) else {
+        return jerr(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "decision and window_end_ts are required",
+        );
+    };
+    if !matches!(decision.as_str(), "attack" | "unsure" | "fine") {
+        return jerr(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "decision must be attack, unsure or fine",
+        );
+    }
+    let now = store::now_s();
+    let detail = read_json(&e, |ctx| {
+        if scope == "actor" {
+            ctx.actor_detail(&id, 0, now, &super::thresholds(&e))
+                .map(|d| (d.head.id, d.window_end_ts, d.window_surface))
+        } else {
+            ctx.cluster_detail(&id, 0, &super::thresholds(&e))
+                .map(|d| (d.row.key, d.window_end_ts, d.window_surface))
+        }
+    });
+    let (canonical, current_ts, surface) = match detail {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let Some(current_ts) = current_ts else {
+        return jerr(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "no window to label: the subject has no feature rows",
+        );
+    };
+    if current_ts != window_end_ts {
+        return jerr(
+            StatusCode::CONFLICT,
+            "stale window: a newer window landed since the item rendered; reload and decide again",
+        );
+    }
+    // Resolve the block key before writing anything: an
+    // unparseable id 404s with no label half-written.
+    let key = if decision == "attack" && scope == "actor" {
+        match crate::rules::windows::key16(&canonical) {
+            Some(k) => Some(k),
+            None => return jerr(StatusCode::NOT_FOUND, &format!("no actor {canonical}")),
+        }
+    } else {
+        None
+    };
+    let label = match decision.as_str() {
+        "attack" => "malicious",
+        "unsure" => "unknown",
+        _ => "benign",
+    };
+    let scope_static: &'static str = if scope == "actor" { "actor" } else { "cluster" };
+    e.store.send(StoreOp::Label(store::LabelRow {
+        scope: scope_static,
+        scope_id: canonical.clone(),
+        surface,
+        window_end_ts: current_ts,
+        label,
+        source: "operator",
+        confidence: 1.0,
+        kind: None,
+        note: Some("review".to_string()),
+        created_at: now,
+        signals: None,
+        daily_calls: super::llm_budgets(&e).0,
+        daily_tokens: super::llm_budgets(&e).1,
+    }));
+    let blocked = match key {
+        Some(k) => {
+            let d = crate::rules::decisions::Decision {
+                scope: crate::rules::model::Scope::Actor,
+                key: k,
+                action: crate::rules::model::Action::Block,
+                mode: e.mode(),
+                rule: std::sync::Arc::from("operator"),
+                rule_version: 0,
+                created_at: now,
+                expires_at: now + crate::rules::compile::BLOCK_TTL_S as i64,
+            };
+            e.decisions.insert(d.clone());
+            e.store.send(StoreOp::DecisionUpsert(d));
+            true
+        }
+        None => false,
+    };
+    e.store.flush().await;
+    Json(json!({
+        "ok": true,
+        "scope": scope_static,
+        "scope_id": canonical,
+        "label": label,
+        "blocked": blocked,
+    }))
+    .into_response()
+}
+
+/// One actor page: headline, client, activity, score, labels,
+/// proposal, decisions, similar actors, turns.
+pub async fn api_actor(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let session = match session_of(&e, &headers) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    let now = store::now_s();
+    let mut v = match read_json(&e, |ctx| {
+        ctx.actor_json(&id, &super::thresholds(&e), &e.ja4_classes, now)
+    }) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    v["role"] = serde_json::Value::String(session.role.as_str().to_string());
+    Json(v).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TurnsQuery {
+    flag: Option<String>,
+    status: Option<String>,
+    route: Option<String>,
+    limit: Option<i64>,
+}
+
+/// The actor turn table with its filters: flag, status (an exact
+/// code or an `Nxx` class), route, limit.
+pub async fn api_actor_turns(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<TurnsQuery>,
+) -> Response {
+    if let Err(r) = session_of(&e, &headers) {
+        return *r;
+    }
+    if let Some(s) = q.status.as_deref() {
+        let class = s.len() == 3 && s.ends_with("xx") && s.as_bytes()[0].is_ascii_digit();
+        let exact = !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if !class && !exact {
+            return jerr(
+                StatusCode::BAD_REQUEST,
+                "status must be a code or an Nxx class",
+            );
+        }
+    }
+    match read_json(&e, |ctx| {
+        ctx.actor_turns_json(
+            &id,
+            q.flag.as_deref(),
+            q.status.as_deref(),
+            q.route.as_deref(),
+            q.limit.unwrap_or(20),
+        )
+    }) {
+        Ok(v) => Json(v).into_response(),
+        Err(r) => *r,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BlockBody {
+    action: Option<String>,
+}
+
+/// Block or unblock an actor: the sticky `operator` decision plus
+/// the operator label together, since a label at or after the
+/// proposal is what removes the item from the queue. Unblocking
+/// with no live block 404s like the inspector's, with no label.
+pub async fn api_actor_block(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: String,
+) -> Response {
+    let session = match session_of(&e, &headers) {
+        Ok(s) => s,
+        Err(r) => return *r,
+    };
+    if let Err(r) = require_admin_json(&session) {
+        return *r;
+    }
+    let parsed: BlockBody = match serde_json::from_str(&body) {
+        Ok(b) => b,
+        Err(_) => return jerr(StatusCode::BAD_REQUEST, "invalid JSON"),
+    };
+    let Some(action) = parsed.action else {
+        return jerr(StatusCode::UNPROCESSABLE_ENTITY, "action is required");
+    };
+    if !matches!(action.as_str(), "block" | "unblock") {
+        return jerr(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "action must be block or unblock",
+        );
+    }
+    let now = store::now_s();
+    let resolved = read_json(&e, |ctx| {
+        let ids = ctx.actor_ids(&id)?;
+        let window = ctx.latest_window("actor", &ids[0])?;
+        Ok::<_, queries::QueryError>((ids[0].clone(), window))
+    });
+    let (canonical, window) = match resolved {
+        Ok(d) => d,
+        Err(r) => return *r,
+    };
+    let key = match crate::rules::windows::key16(&canonical) {
+        Some(k) => k,
+        None => return jerr(StatusCode::NOT_FOUND, &format!("no actor {canonical}")),
+    };
+    if action == "unblock" && !e.decisions.remove(crate::rules::model::Scope::Actor, key) {
+        return jerr(StatusCode::NOT_FOUND, "no live block on this actor");
+    }
+    let (label, blocked) = if action == "block" {
+        let d = crate::rules::decisions::Decision {
+            scope: crate::rules::model::Scope::Actor,
+            key,
+            action: crate::rules::model::Action::Block,
+            mode: e.mode(),
+            rule: std::sync::Arc::from("operator"),
+            rule_version: 0,
+            created_at: now,
+            expires_at: now + crate::rules::compile::BLOCK_TTL_S as i64,
+        };
+        e.decisions.insert(d.clone());
+        e.store.send(StoreOp::DecisionUpsert(d));
+        ("malicious", true)
+    } else {
+        e.store.send(StoreOp::DecisionDelete {
+            scope: crate::rules::model::Scope::Actor,
+            key,
+        });
+        ("benign", false)
+    };
+    e.store.send(StoreOp::Label(store::LabelRow {
+        scope: "actor",
+        scope_id: canonical.clone(),
+        surface: window.as_ref().and_then(|(_, s)| s.clone()),
+        window_end_ts: window.map(|(ts, _)| ts).unwrap_or(0),
+        label,
+        source: "operator",
+        confidence: 1.0,
+        kind: None,
+        note: Some("actor page".to_string()),
+        created_at: now,
+        signals: None,
+        daily_calls: super::llm_budgets(&e).0,
+        daily_tokens: super::llm_budgets(&e).1,
+    }));
+    e.store.flush().await;
+    Json(json!({
+        "ok": true,
+        "scope_id": canonical,
+        "label": label,
+        "blocked": blocked,
+    }))
+    .into_response()
+}

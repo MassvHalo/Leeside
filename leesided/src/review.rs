@@ -68,6 +68,28 @@ impl WhyInQueue {
             WhyInQueue::Score => 4,
         }
     }
+
+    /// The queue's short phrase, shared by the server review list and
+    /// the Windside Review page (Round A-2). Four come from the
+    /// review-actor handoff's queue column; `observe_below_threshold`
+    /// and `score` extend the same voice.
+    pub fn phrase(self) -> &'static str {
+        match self {
+            WhyInQueue::RuleBelowThreshold => "rule fired below threshold",
+            WhyInQueue::ObserveBelowThreshold => "watched rule fired, score low",
+            WhyInQueue::AboveThresholdNoRule => "score high, no rule fired",
+            WhyInQueue::Uncertain => "score uncertain",
+            WhyInQueue::UnlabelledProposal => "proposal unconfirmed",
+            WhyInQueue::Score => "scored low, nothing fired",
+        }
+    }
+
+    /// Tier 1 carries the "rule and model disagree" badge: a rule
+    /// fired under a low score, or the score is high with no rule
+    /// behind it. The queue's disagree count is tier-1 rows.
+    pub fn disagree(self) -> bool {
+        self.tier() == 1
+    }
 }
 
 /// One review candidate: the subject's latest score with its window,
@@ -126,7 +148,7 @@ pub(crate) struct Hit {
     pub(crate) ts: i64,
 }
 
-fn acting(action: &str) -> bool {
+pub(crate) fn acting(action: &str) -> bool {
     matches!(action, "block" | "rate_limit" | "challenge")
 }
 
@@ -380,6 +402,62 @@ pub fn review_rows(
     Ok(out.into_iter().map(|(r, _)| r).collect())
 }
 
+/// One decided subject: the operator's latest judgment in the tab's
+/// window beside the proposal it judged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecidedRow {
+    pub scope: String,
+    pub scope_id: String,
+    pub operator_label: String,
+    pub operator_ts: i64,
+    pub proposal: Option<String>,
+    pub agreed: bool,
+}
+
+/// The Decided tab (Round A-2): every subject whose latest operator
+/// label landed at or after `since_s`, newest first. `agreed` is the
+/// operator label equalling the then-latest proposal, with unknown
+/// against unknown counting as agree; a subject with no proposal at
+/// decision time never agrees. Human-scale, so uncapped: the tab's
+/// totals are these rows.
+pub fn decided_list(conn: &Connection, since_s: i64) -> Result<Vec<DecidedRow>, ReviewError> {
+    let mut stmt = conn.prepare(
+        "SELECT scope, scope_id, label, created_at FROM ( \
+           SELECT scope, scope_id, label, created_at, \
+             ROW_NUMBER() OVER (PARTITION BY scope, scope_id ORDER BY created_at DESC, id DESC) AS rn \
+           FROM labels WHERE source = 'operator' \
+         ) WHERE rn = 1 AND created_at >= ?1 ORDER BY created_at DESC",
+    )?;
+    let ops: Vec<(String, String, String, i64)> = stmt
+        .query_map(params![since_s], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut out = Vec::with_capacity(ops.len());
+    for (scope, scope_id, operator_label, operator_ts) in ops {
+        let proposal: Option<String> = conn
+            .query_row(
+                "SELECT label FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'llm_proposed' AND created_at <= ?3 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![scope, scope_id, operator_ts],
+                |r| r.get(0),
+            )
+            .ok();
+        let agreed = proposal.as_deref() == Some(operator_label.as_str());
+        out.push(DecidedRow {
+            scope,
+            scope_id,
+            operator_label,
+            operator_ts,
+            proposal,
+            agreed,
+        });
+    }
+    Ok(out)
+}
+
 /// Write the operator's decision for the reviewed window. Every judgment
 /// appends a row (0013); readers take the latest per subject and source,
 /// so a correction stays auditable and the newest stands.
@@ -581,4 +659,81 @@ pub fn run_review(
         }
     }
     Ok(labeled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn why_phrases_match_the_handoff_and_prompt() {
+        assert_eq!(
+            WhyInQueue::RuleBelowThreshold.phrase(),
+            "rule fired below threshold"
+        );
+        assert_eq!(
+            WhyInQueue::ObserveBelowThreshold.phrase(),
+            "watched rule fired, score low"
+        );
+        assert_eq!(
+            WhyInQueue::AboveThresholdNoRule.phrase(),
+            "score high, no rule fired"
+        );
+        assert_eq!(WhyInQueue::Uncertain.phrase(), "score uncertain");
+        assert_eq!(
+            WhyInQueue::UnlabelledProposal.phrase(),
+            "proposal unconfirmed"
+        );
+        assert_eq!(WhyInQueue::Score.phrase(), "scored low, nothing fired");
+    }
+
+    #[test]
+    fn disagree_is_tier_one() {
+        for w in [
+            WhyInQueue::RuleBelowThreshold,
+            WhyInQueue::ObserveBelowThreshold,
+            WhyInQueue::AboveThresholdNoRule,
+        ] {
+            assert!(w.disagree(), "{w:?}");
+        }
+        for w in [
+            WhyInQueue::Uncertain,
+            WhyInQueue::UnlabelledProposal,
+            WhyInQueue::Score,
+        ] {
+            assert!(!w.disagree(), "{w:?}");
+        }
+    }
+
+    #[test]
+    fn decided_list_agrees_on_equal_labels_including_unknown() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE labels (id INTEGER PRIMARY KEY, scope TEXT, scope_id TEXT, \
+             label TEXT, source TEXT, created_at INTEGER); \
+             INSERT INTO labels (scope, scope_id, label, source, created_at) VALUES \
+             ('actor', 'a1', 'malicious', 'llm_proposed', 100), \
+             ('actor', 'a1', 'malicious', 'operator', 200), \
+             ('actor', 'a2', 'unknown', 'llm_proposed', 100), \
+             ('actor', 'a2', 'unknown', 'operator', 210), \
+             ('actor', 'a3', 'malicious', 'llm_proposed', 100), \
+             ('actor', 'a3', 'benign', 'operator', 220), \
+             ('actor', 'a4', 'benign', 'operator', 230), \
+             ('actor', 'a5', 'malicious', 'operator', 10);",
+        )
+        .unwrap();
+        let rows = decided_list(&conn, 100).unwrap();
+        assert_eq!(rows.len(), 4);
+        // Newest first: a4 has no proposal, a3 disagrees, a2 and a1 agree.
+        assert_eq!(rows[0].scope_id, "a4");
+        assert_eq!(rows[0].proposal, None);
+        assert!(!rows[0].agreed);
+        assert_eq!(rows[1].scope_id, "a3");
+        assert_eq!(rows[1].proposal.as_deref(), Some("malicious"));
+        assert!(!rows[1].agreed);
+        assert_eq!(rows[2].scope_id, "a2");
+        assert!(rows[2].agreed);
+        assert_eq!(rows[3].scope_id, "a1");
+        assert!(rows[3].agreed);
+    }
 }
