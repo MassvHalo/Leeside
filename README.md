@@ -29,6 +29,13 @@ What's next: flip Windside from shadow to active after the shadow week,
 per-surface windows and fingerprint features for v3, and the designed console
 on the same data layer.
 
+Install on an Ubuntu 22.04 or 24.04 box that already hosts a Laravel app
+behind nginx:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | bash
+```
+
 ## How it works
 
 - `leeside/laravel` (the capture layer) emits a turn event per request —
