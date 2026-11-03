@@ -4,12 +4,12 @@
 //! and keeps the label only when a surviving signal sits on the
 //! label's side; every failure is logged.
 //!
-//! The label envelope carries the brief's window names (`iri_cv`,
-//! `asset_ratio`) as aliases beside the raw v2 features; flag shares
-//! and rejected credentials have no window source, so those checks
-//! compute over the signal's cited turns (`flags`, distinct `cred`
-//! prefixes). Checks are pure over the envelope, so the worker and
-//! `llm eval` run the same code.
+//! The label envelope carries the brief's window name (`iri_cv`)
+//! as an alias beside the raw v2 features; flag shares and rejected
+//! credentials have no window source, so those checks compute over
+//! the signal's cited turns (`flags`, distinct `cred` prefixes).
+//! Checks are pure over the envelope, so the worker and `llm eval`
+//! run the same code.
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -19,14 +19,16 @@ use std::collections::{HashMap, HashSet};
 /// the list.
 const SCANNER_PATHS_JSON: &str = include_str!("../data/scanner-paths.json");
 
-/// The brief's table, in order. `rejected_actions` joins the live
-/// signal enum with the outcomes round; its check already exists and
-/// fails closed until turns carry `app_outcome`.
-pub const SIGNALS: [&str; 12] = [
+/// The brief's table, in order. `no_assets` is retired: assets are
+/// served by nginx or artisan serve and never reach PHP, so the turns
+/// carry no asset evidence either way (docs/llm.md 8.1).
+/// `rejected_actions` joins the live signal enum with the outcomes
+/// round; its check already exists and fails closed until turns carry
+/// `app_outcome`.
+pub const SIGNALS: [&str; 13] = [
     "scanner_paths",
     "high_404_rate",
     "machine_cadence",
-    "no_assets",
     "ua_inconsistent",
     "credential_stuffing",
     "webhook_forgery",
@@ -34,6 +36,8 @@ pub const SIGNALS: [&str; 12] = [
     "rejected_actions",
     "normal_browsing",
     "verified_partner",
+    "human_cadence",
+    "client_consistent",
     "insufficient_data",
 ];
 
@@ -62,21 +66,22 @@ pub struct CitedSignal {
     pub turns: Vec<usize>,
 }
 
-/// The label side a signal argues for: the nine malicious signals,
-/// the two benign ones, and nothing for `insufficient_data` (it
-/// argues for `unknown`, which has no side).
+/// The label side a signal argues for: the eight malicious
+/// signals, the four benign ones, and nothing for
+/// `insufficient_data` (it argues for `unknown`, which has no side).
 pub fn side(signal: &str) -> Option<&'static str> {
     match signal {
         "scanner_paths"
         | "high_404_rate"
         | "machine_cadence"
-        | "no_assets"
         | "ua_inconsistent"
         | "credential_stuffing"
         | "webhook_forgery"
         | "honeytoken_hit"
         | "rejected_actions" => Some("malicious"),
-        "normal_browsing" | "verified_partner" => Some("benign"),
+        "normal_browsing" | "verified_partner" | "human_cadence" | "client_consistent" => {
+            Some("benign")
+        }
         _ => None,
     }
 }
@@ -124,17 +129,6 @@ fn is_404(t: &Value) -> bool {
     status(t) == Some(404)
 }
 
-fn is_asset(t: &Value) -> bool {
-    t.get("is_asset").and_then(Value::as_i64) == Some(1)
-}
-
-/// A page view: a 2xx on the web surface that is not an asset.
-fn is_html_turn(t: &Value) -> bool {
-    matches!(status(t), Some(s) if (200..300).contains(&s))
-        && str_field(t, "surface") == Some("web")
-        && !is_asset(t)
-}
-
 fn in_wordlist(path: &str, list: &HashSet<String>) -> bool {
     if list.contains(path) {
         return true;
@@ -171,10 +165,10 @@ fn distinct_rejected_creds<'a>(ts: &[&'a Value]) -> HashSet<&'a str> {
 /// Check every claimed signal against its own cited turns and
 /// return the failed signal names in claim order; empty means all
 /// passed. An out-of-range citation fails the signal under check:
-/// citing turns that are not there is unfaithful. `machine_cadence`
-/// and `insufficient_data` read the window only, so they may cite
-/// nothing; every other signal with no cited turns carries no
-/// evidence and fails.
+/// citing turns that are not there is unfaithful. `machine_cadence`,
+/// `human_cadence` and `insufficient_data` read the window only, so
+/// they may cite nothing; every other signal with no cited turns
+/// carries no evidence and fails.
 pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> Vec<String> {
     let all = turns(envelope);
     let win = window(envelope);
@@ -204,10 +198,6 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
                     window_num(win, "iri_cv").is_some_and(|v| v < 0.2)
                         || window_num(win, "turns_last_60s").is_some_and(|v| v >= 30.0)
                 }
-                "no_assets" => {
-                    window_num(win, "asset_ratio").is_some_and(|v| v < 0.05)
-                        && cited_turns.iter().any(|t| is_html_turn(t))
-                }
                 "ua_inconsistent" => cited_turns.iter().any(|t| {
                     (str_field(t, "ua_class") == Some("browser")
                         && flags(t).contains(&"ua_chromium_no_ch"))
@@ -233,8 +223,28 @@ pub fn check_proposal(envelope: &Value, signals: &[CitedSignal], aux: &Aux) -> V
                 }
                 "normal_browsing" => {
                     !cited_turns.is_empty()
-                        && max_flag_rate(&cited_turns) <= 0.2
-                        && window_num(win, "asset_ratio").is_some_and(|v| v > 0.1)
+                        && cited_turns
+                            .iter()
+                            .all(|t| str_field(t, "ua_class") == Some("browser"))
+                        && max_flag_rate(&all) <= 0.2
+                        && window_num(win, "ratio_404").is_some_and(|v| v < 0.2)
+                        && window_num(win, "turns_held").is_some_and(|v| v >= 10.0)
+                }
+                "human_cadence" => {
+                    window_num(win, "iri_cv").is_some_and(|v| v > 0.5)
+                        && window_num(win, "turns_last_60s").is_some_and(|v| v <= 30.0)
+                }
+                "client_consistent" => {
+                    !cited_turns.is_empty()
+                        && cited_turns.iter().all(|t| {
+                            str_field(t, "ua_class") == Some("browser")
+                                && !flags(t).contains(&"ua_chromium_no_ch")
+                                && !flags(t).contains(&"library_ua_on_web")
+                                && match t.get("ja4_class") {
+                                    None => true,
+                                    Some(v) => v.is_null() || v.as_str() == Some("browser"),
+                                }
+                        })
                 }
                 "verified_partner" => {
                     cited_turns
@@ -350,20 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn no_assets_needs_an_html_turn_and_almost_no_assets() {
-        let win = json!({"asset_ratio": 0.0});
-        let bot = vec![turn("/", 200)];
-        assert!(check(bot.clone(), win.clone(), "no_assets", &[0]).is_empty());
-        assert!(!check(bot, win.clone(), "no_assets", &[]).is_empty());
-        let mut asset = turn("/", 200);
-        asset["is_asset"] = json!(1);
-        assert!(!check(vec![asset], json!({"asset_ratio": 1.0}), "no_assets", &[0]).is_empty());
-        let mut t = turn("api.ping", 200);
-        t["surface"] = json!("api");
-        assert!(!check(vec![t], win, "no_assets", &[0]).is_empty());
-    }
-
-    #[test]
     fn ua_inconsistent_matches_flag_or_library_ja4() {
         let mut t = turn("/", 200);
         t["flags"] = json!(["ua_chromium_no_ch"]);
@@ -448,17 +444,21 @@ mod tests {
     }
 
     #[test]
-    fn normal_browsing_needs_cited_assets_and_quiet_flags() {
-        let mut ts = Vec::new();
-        for _ in 0..8 {
-            let mut t = turn("/", 200);
-            t["is_asset"] = json!(1);
-            ts.push(t);
-        }
-        ts.push(turn("/venues", 200));
-        ts.push(turn("/venues/1", 200));
-        let win = json!({"asset_ratio": 0.8});
-        assert!(check(ts, win.clone(), "normal_browsing", &[8, 9]).is_empty());
+    fn normal_browsing_needs_browser_turns_quiet_flags_and_depth() {
+        let win = json!({"ratio_404": 0.0, "turns_held": 64.0});
+        let pages = vec![turn("/venues", 200), turn("/venues/1", 200)];
+        assert!(check(pages, win.clone(), "normal_browsing", &[0, 1]).is_empty());
+        // A library turn in the cited set fails it.
+        let mut lib = turn("/", 200);
+        lib["ua_class"] = json!("library");
+        assert!(!check(
+            vec![turn("/venues", 200), lib],
+            win.clone(),
+            "normal_browsing",
+            &[0, 1]
+        )
+        .is_empty());
+        // So does citing nothing.
         assert!(!check(
             vec![turn("/venues", 200)],
             win.clone(),
@@ -466,10 +466,67 @@ mod tests {
             &[]
         )
         .is_empty());
+        // A flag above 0.2 anywhere in the window fails it, even off
+        // the cited turns.
         let mut flagged = turn("/", 200);
-        flagged["flags"] = json!(["library_ua_on_web"]);
-        let ts = vec![flagged.clone(), flagged];
-        assert!(!check(ts, win, "normal_browsing", &[0]).is_empty());
+        flagged["flags"] = json!(["browser_no_sec_fetch"]);
+        let ts = vec![turn("/venues", 200), flagged];
+        assert!(!check(ts, win.clone(), "normal_browsing", &[0]).is_empty());
+        // Too many 404s, or too few turns, fail it.
+        let pages = vec![turn("/venues", 200)];
+        assert!(!check(
+            pages.clone(),
+            json!({"ratio_404": 0.2, "turns_held": 64.0}),
+            "normal_browsing",
+            &[0]
+        )
+        .is_empty());
+        assert!(!check(
+            pages,
+            json!({"ratio_404": 0.0, "turns_held": 9.0}),
+            "normal_browsing",
+            &[0]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn human_cadence_needs_variable_gaps_without_a_burst() {
+        let ts = vec![turn("/", 200)];
+        let human = json!({"iri_cv": 0.9, "turns_last_60s": 4.0});
+        assert!(check(ts.clone(), human, "human_cadence", &[0]).is_empty());
+        let edge = json!({"iri_cv": 0.51, "turns_last_60s": 30.0});
+        assert!(check(ts.clone(), edge, "human_cadence", &[]).is_empty());
+        let steady = json!({"iri_cv": 0.5, "turns_last_60s": 4.0});
+        assert!(!check(ts.clone(), steady, "human_cadence", &[0]).is_empty());
+        let burst = json!({"iri_cv": 0.9, "turns_last_60s": 31.0});
+        assert!(!check(ts.clone(), burst, "human_cadence", &[0]).is_empty());
+        assert!(!check(ts, json!({}), "human_cadence", &[0]).is_empty());
+    }
+
+    #[test]
+    fn client_consistent_needs_a_clean_browser_client() {
+        let mut t = turn("/", 200);
+        t["ja4_class"] = json!("browser");
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // No fingerprint at all is consistent; a library or unknown
+        // one is not a browser client.
+        t["ja4_class"] = json!(null);
+        assert!(check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t["ja4_class"] = json!("library");
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t["ja4_class"] = json!("unknown");
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        // Either inconsistency flag fails it, as does a library UA.
+        t["ja4_class"] = json!("browser");
+        t["flags"] = json!(["ua_chromium_no_ch"]);
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t["flags"] = json!(["library_ua_on_web"]);
+        assert!(!check(vec![t.clone()], json!({}), "client_consistent", &[0]).is_empty());
+        t["flags"] = json!([]);
+        t["ua_class"] = json!("library");
+        assert!(!check(vec![t], json!({}), "client_consistent", &[0]).is_empty());
+        assert!(!check(vec![turn("/", 200)], json!({}), "client_consistent", &[]).is_empty());
     }
 
     #[test]
@@ -542,7 +599,6 @@ mod tests {
             "scanner_paths",
             "high_404_rate",
             "machine_cadence",
-            "no_assets",
             "ua_inconsistent",
             "credential_stuffing",
             "webhook_forgery",
@@ -551,10 +607,16 @@ mod tests {
         ] {
             assert_eq!(side(s), Some("malicious"), "{s}");
         }
-        for s in ["normal_browsing", "verified_partner"] {
+        for s in [
+            "normal_browsing",
+            "verified_partner",
+            "human_cadence",
+            "client_consistent",
+        ] {
             assert_eq!(side(s), Some("benign"), "{s}");
         }
         assert_eq!(side("insufficient_data"), None);
+        assert_eq!(side("no_assets"), None, "retired");
         assert_eq!(side("no_such_signal"), None);
     }
 }

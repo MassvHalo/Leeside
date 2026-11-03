@@ -12,7 +12,7 @@
 use crate::llm::{
     apply_faithfulness, budget_check, build_draft_envelope, build_label_envelope_at,
     execute_call_with_system, log_exchanges, validate_classify, validate_draft, validate_explain,
-    validate_label, Exec, ExecutionOutcome, JsonMode, LlmError, WindowSel,
+    validate_label, Exec, ExecutionOutcome, JsonMode, LlmError, WindowSel, LABEL_SIGNALS,
 };
 use crate::rules::model::{Rule, Scope, StatusClass, StatusSel, Surface, TurnFilter, Verb};
 use crate::store::now_s;
@@ -43,6 +43,13 @@ pub struct LabelRow {
     pub kind: Option<String>,
     #[serde(default)]
     pub prefilled_from: Option<String>,
+    /// Further acceptable labels besides the expected one: cold
+    /// windows on verified-clean subjects accept `benign`.
+    #[serde(default)]
+    pub also_accept: Vec<String>,
+    /// The window's turn id, for watermark filtering at build time.
+    #[serde(default)]
+    pub window_turn_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -797,22 +804,22 @@ fn grade(
             let raw = p.label.clone();
             let claimed = p.signal_names();
             let failed = apply_faithfulness(envelope, &mut p, honeytoken_routes);
-            let agree_raw = raw == expected;
-            let agree = p.label == expected;
+            let accepted = |l: &str| l == expected || row.also_accept.iter().any(|a| a == l);
+            let agree_raw = accepted(&raw);
+            let agree = accepted(&p.label);
             acc.graded += 1;
             if agree {
                 acc.agree += 1;
             } else {
-                acc.push_worst(
-                    n,
-                    expected,
-                    &p.label,
-                    format!(
-                        "raw={raw} conf={:.2} failed={failed:?} signals={:?}",
-                        p.confidence,
-                        p.signal_names(),
-                    ),
+                let mut detail = format!(
+                    "raw={raw} conf={:.2} failed={failed:?} signals={:?}",
+                    p.confidence,
+                    p.signal_names(),
                 );
+                if !row.also_accept.is_empty() {
+                    detail.push_str(&format!(" accepted={:?}", row.also_accept));
+                }
+                acc.push_worst(n, expected, &p.label, detail);
             }
             if agree_raw {
                 acc.agree_raw += 1;
@@ -850,12 +857,19 @@ fn grade(
                     .collect();
                 if !bad.is_empty() {
                     acc.signal_violations += 1;
-                    acc.push_worst(
-                        n,
-                        expected,
-                        &p.label,
-                        format!("signals outside allowed: {bad:?}"),
-                    );
+                    // A known signal outside the row's list on an
+                    // agreed row is a count, not a worst row; an
+                    // unknown signal, or any violation on a miss, is
+                    // worth showing.
+                    let known = bad.iter().all(|s| LABEL_SIGNALS.contains(s));
+                    if !(agree && known) {
+                        acc.push_worst(
+                            n,
+                            expected,
+                            &p.label,
+                            format!("signals outside allowed: {bad:?}"),
+                        );
+                    }
                 }
             }
             if !failed.is_empty() {
@@ -1260,6 +1274,8 @@ pub fn eval_build(
                             "expected_label": expected,
                             "allowed_signals": serde_json::Value::Null,
                             "prefilled_from": from,
+                            "also_accept": Vec::<String>::new(),
+                            "window_turn_id": meta.window_turn_id,
                             "envelope": envelope,
                         })
                         .to_string(),
@@ -1692,10 +1708,23 @@ mod tests {
         turns: Vec<serde_json::Value>,
         window: serde_json::Value,
     ) -> String {
+        label_row_full(kind, scope, expected, turns, window, None, Vec::new())
+    }
+
+    fn label_row_full(
+        kind: &str,
+        scope: &str,
+        expected: Option<&str>,
+        turns: Vec<serde_json::Value>,
+        window: serde_json::Value,
+        allowed: Option<Vec<&str>>,
+        also_accept: Vec<&str>,
+    ) -> String {
         serde_json::json!({
             "point": "label", "kind": kind,
             "expected_label": expected,
-            "allowed_signals": null, "prefilled_from": "tool_run",
+            "allowed_signals": allowed, "prefilled_from": "tool_run",
+            "also_accept": also_accept,
             "envelope": {
                 "task": "propose_label",
                 "subject": {"scope": scope, "id": "aa"},
@@ -1713,30 +1742,43 @@ mod tests {
         std::fs::write(&db, b"").unwrap();
         let scan_turns = vec![turn("/a", 404), turn("/b", 404), turn("/c", 404)];
         let quiet_turns = vec![turn("/", 200)];
+        let mut verified = turn("api.ping", 200);
+        verified["credential_status"] = serde_json::json!("verified");
         std::fs::write(
             &set,
             format!(
-                "{}\n{}\n{}\n",
+                "{}\n{}\n{}\n{}\n",
                 label_row(
                     "attack-ffuf",
                     "actor",
                     Some("malicious"),
                     scan_turns.clone(),
-                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "asset_ratio": 0.0}),
+                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "ratio_404": 1.0}),
                 ),
                 label_row(
                     "attack-ffuf",
                     "cluster",
                     Some("malicious"),
                     scan_turns,
-                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "asset_ratio": 0.0}),
+                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.02, "ratio_404": 1.0}),
                 ),
-                label_row(
+                label_row_full(
                     "benign-chromium",
                     "actor",
                     Some("benign"),
                     quiet_turns,
-                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.9, "asset_ratio": 0.8}),
+                    serde_json::json!({"turns_held": 64.0, "iri_cv": 0.9, "ratio_404": 0.0}),
+                    Some(vec!["normal_browsing"]),
+                    Vec::new(),
+                ),
+                label_row_full(
+                    "benign-api",
+                    "actor",
+                    Some("unknown"),
+                    vec![verified],
+                    serde_json::json!({"turns_held": 4.0, "iri_cv": 0.9, "ratio_404": 0.0}),
+                    Some(vec!["insufficient_data"]),
+                    vec!["benign"],
                 ),
             ),
         )
@@ -1745,11 +1787,17 @@ mod tests {
         // Right label, unsupported signal: one cited turn is no
         // scanner, so the row lands unknown and only the raw agrees.
         let thin = r#"{"label":"malicious","confidence":0.9,"reason":"one 404.","signals":[{"name":"scanner_paths","turns":[0]}]}"#;
-        let calm = r#"{"label":"benign","confidence":0.9,"reason":"quiet.","signals":[{"name":"normal_browsing","turns":[0]}]}"#;
+        // human_cadence is outside this row's list and fails its
+        // window (no turns_last_60s): dropped, counted, not shown.
+        let calm = r#"{"label":"benign","confidence":0.9,"reason":"quiet.","signals":[{"name":"normal_browsing","turns":[0]},{"name":"human_cadence","turns":[]}]}"#;
+        // Cold but verified-clean: benign is accepted too, and the
+        // outside-list claim is a count, not a worst row.
+        let warm = r#"{"label":"benign","confidence":0.8,"reason":"verified.","signals":[{"name":"verified_partner","turns":[0]}]}"#;
         let (url, seen) = mock_server(vec![
             (200, completion(hit)),
             (200, completion(thin)),
             (200, completion(calm)),
+            (200, completion(warm)),
         ]);
         let exec = exec_for(&url);
         let input = EvalInput {
@@ -1762,20 +1810,24 @@ mod tests {
             limit: None,
         };
         let summary = evaluate(&db, &set, "label", &input).unwrap();
-        assert_eq!(summary.rows, 3);
+        assert_eq!(summary.rows, 4);
         assert_eq!(summary.skipped, 0);
         assert_eq!(summary.errors, 0);
-        assert_eq!(summary.agreement, Some(2.0 / 3.0));
+        assert_eq!(summary.agreement, Some(0.75));
         assert_eq!(summary.agreement_raw, Some(1.0));
         assert_eq!(summary.parse_failures, 0);
-        assert_eq!(summary.faithfulness_failures, 1);
-        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert_eq!(summary.faithfulness_failures, 2);
+        assert_eq!(seen.lock().unwrap().len(), 4);
         assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree"], 1);
         assert_eq!(summary.groups["kind"]["attack-ffuf"]["agree_raw"], 2);
-        assert_eq!(summary.groups["scope"]["actor"]["n"], 2);
+        assert_eq!(summary.groups["kind"]["benign-api"]["agree"], 1);
+        assert_eq!(summary.groups["scope"]["actor"]["n"], 3);
+        assert_eq!(summary.groups["scope"]["actor"]["agree"], 3);
         assert_eq!(summary.groups["scope"]["cluster"]["agree"], 0);
         assert_eq!(summary.groups["scope"]["cluster"]["agree_raw"], 1);
         assert_eq!(summary.groups["dropped_signals"]["scanner_paths"], 1);
+        assert_eq!(summary.groups["dropped_signals"]["human_cadence"], 1);
+        assert_eq!(summary.groups["signal_violations"], 2);
         assert_eq!(summary.calibration.as_array().unwrap().len(), 5);
         assert!(summary.tokens_per_row.unwrap() > 0.0);
         let worst = summary.worst.as_array().unwrap();
@@ -1797,19 +1849,19 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert_eq!(stored, ("label".to_string(), 2.0 / 3.0, 1.0, 1, 0));
+        assert_eq!(stored, ("label".to_string(), 0.75, 1.0, 2, 0));
         let calls: i64 = conn
             .query_row("SELECT count(*) FROM llm_calls", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(calls, 3, "dry-send logs the calls");
-        let failed: Option<String> = conn
+        assert_eq!(calls, 4, "dry-send logs the calls");
+        let failed: i64 = conn
             .query_row(
-                "SELECT faithfulness_failed FROM llm_calls WHERE faithfulness_failed IS NOT NULL",
+                "SELECT count(*) FROM llm_calls WHERE faithfulness_failed IS NOT NULL",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(failed.as_deref(), Some(r#"["scanner_paths"]"#));
+        assert_eq!(failed, 2);
         let labels: i64 = conn
             .query_row("SELECT count(*) FROM labels", [], |r| r.get(0))
             .unwrap();

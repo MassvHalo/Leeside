@@ -3,13 +3,15 @@
 //! `leesided label-import <manifest>` labels every feature window in the
 //! run's store after the warmup watermark: run membership, not a
 //! wall-clock interval, so a backward clock step cannot exclude a turn.
-//! The generator records `warmup_last_turn_id` once its two warmup turns
-//! have landed; the store is fresh per run, so everything ingested after
-//! it is run traffic. `attack-*` kinds label malicious with source
-//! `tool_run`, `benign-*` kinds benign with `synthetic_benign`, both at
-//! 0.95; the run kind lands in `labels.kind` for per-kind sampling and
-//! eval. Reruns are safe: the insert skips windows its source already
-//! labeled (labels append since 0013, so no constraint dedups them).
+//! The generator used to record `warmup_last_turn_id` once its two
+//! warmup turns had landed; now it purges the warmup turns before the
+//! copy and records an empty watermark, which means every turn is run
+//! traffic. The store is fresh per run either way. `attack-*` kinds
+//! label malicious with source `tool_run`, `benign-*` kinds benign with
+//! `synthetic_benign`, both at 0.95; the run kind lands in
+//! `labels.kind` for per-kind sampling and eval. Reruns are safe: the
+//! insert skips windows its source already labeled (labels append since
+//! 0013, so no constraint dedups them).
 
 use crate::store::{now_s, StoreError};
 use rusqlite::{params, Connection};
@@ -92,19 +94,25 @@ pub fn import(
     let mut conn = Connection::open(db)?;
     conn.busy_timeout(std::time::Duration::from_secs(30))?;
     crate::store::migrate(&mut conn)?;
-    let watermark: Option<i64> = conn
-        .query_row(
-            "SELECT rowid FROM turns WHERE turn_id = ?1",
-            params![m.warmup_last_turn_id],
-            |r| r.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })?;
-    let Some(mark) = watermark else {
-        return Err(ImportError::Watermark(m.warmup_last_turn_id.clone()));
+    let mark: i64 = if m.warmup_last_turn_id.is_empty() {
+        // Purged warmups: every turn in the fresh store is run traffic.
+        0
+    } else {
+        let watermark: Option<i64> = conn
+            .query_row(
+                "SELECT rowid FROM turns WHERE turn_id = ?1",
+                params![m.warmup_last_turn_id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        let Some(mark) = watermark else {
+            return Err(ImportError::Watermark(m.warmup_last_turn_id.clone()));
+        };
+        mark
     };
     // Run stores are append-only, so rowid is the ingest order: every
     // turn after the watermark is run traffic, whatever its stamp says.
@@ -284,6 +292,41 @@ mod tests {
         // Unknown kinds refuse.
         manifest(&mf, "weird-demo");
         assert!(matches!(import(&db, &mf, "k"), Err(ImportError::Kind(_))));
+    }
+
+    #[test]
+    fn import_with_an_empty_watermark_labels_every_turn() {
+        let dir = std::env::temp_dir().join(format!("leeside-labels-e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("gen.sqlite");
+        let mf = dir.join("manifest.json");
+        fixture(&db);
+        manifest(&mf, "attack-demo");
+        // The purged-warmup manifest: no watermark turn to name.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mf).unwrap()).unwrap();
+        v["warmup_last_turn_id"] = serde_json::Value::String(String::new());
+        std::fs::write(&mf, v.to_string()).unwrap();
+
+        let stats = import(&db, &mf, "k").unwrap();
+        // All 62 turns, warmups included: the purge removed them from
+        // real stores, but this fixture keeps them to prove the empty
+        // watermark does not exclude by rowid.
+        assert_eq!(
+            stats,
+            ImportStats {
+                actor: 30,
+                cluster: 62
+            }
+        );
+        // A named but missing watermark still refuses.
+        v["warmup_last_turn_id"] = serde_json::Value::String("t9".to_string());
+        std::fs::write(&mf, v.to_string()).unwrap();
+        assert!(matches!(
+            import(&db, &mf, "k"),
+            Err(ImportError::Watermark(_))
+        ));
     }
 
     #[test]

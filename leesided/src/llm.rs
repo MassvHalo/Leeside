@@ -51,7 +51,7 @@ pub const ENVELOPE_TURNS: i64 = 30;
 
 /// The point-1 schema of docs/llm.md section 8.1, sent as the
 /// `response_format` in schema mode.
-pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["name","turns"],"properties":{"name":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","no_assets","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","insufficient_data"]},"turns":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":0}}}}}}}"#;
+pub const LABEL_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["label","confidence","reason","signals"],"properties":{"label":{"type":"string","enum":["benign","malicious","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string","maxLength":600},"signals":{"type":"array","maxItems":5,"items":{"type":"object","additionalProperties":false,"required":["name","turns"],"properties":{"name":{"type":"string","enum":["scanner_paths","high_404_rate","machine_cadence","ua_inconsistent","credential_stuffing","webhook_forgery","honeytoken_hit","normal_browsing","verified_partner","human_cadence","client_consistent","insufficient_data"]},"turns":{"type":"array","maxItems":6,"items":{"type":"integer","minimum":0}}}}}}}"#;
 
 /// The point-2 schema of docs/llm.md section 8.2.
 pub const EXPLAIN_SCHEMA_JSON: &str = r#"{"type":"object","additionalProperties":false,"required":["explanation"],"properties":{"explanation":{"type":"string","maxLength":240}}}"#;
@@ -73,17 +73,18 @@ pub fn prompt_for(point: &str) -> Result<(&'static str, &'static str), LlmError>
     }
 }
 
-pub const LABEL_SIGNALS: [&str; 11] = [
+pub const LABEL_SIGNALS: [&str; 12] = [
     "scanner_paths",
     "high_404_rate",
     "machine_cadence",
-    "no_assets",
     "ua_inconsistent",
     "credential_stuffing",
     "webhook_forgery",
     "honeytoken_hit",
     "normal_browsing",
     "verified_partner",
+    "human_cadence",
+    "client_consistent",
     "insufficient_data",
 ];
 
@@ -384,6 +385,7 @@ pub fn subjects(db: &Path, scope: Option<&str>, top: usize) -> Result<Vec<Subjec
 /// What the envelope was built from, for the label the worker writes.
 pub struct LabelMeta {
     pub window_end_ts: i64,
+    pub window_turn_id: String,
     pub surface: Option<String>,
     pub turns: usize,
     pub score: Option<f64>,
@@ -440,16 +442,22 @@ pub fn build_label_envelope_at(
         WindowSel::Earliest => ("ASC", -1),
         WindowSel::At(ts) => ("DESC", ts),
     };
-    let (window_ts, vector, surface, anchor): (i64, String, Option<String>, i64) = conn
+    let (window_ts, window_turn_id, vector, surface, anchor): (
+        i64,
+        String,
+        String,
+        Option<String>,
+        i64,
+    ) = conn
         .query_row(
             &format!(
-                "SELECT fv.ts_us, fv.vector, fv.surface, t.rowid FROM feature_vectors fv \
+                "SELECT fv.ts_us, fv.turn_id, fv.vector, fv.surface, t.rowid FROM feature_vectors fv \
                  JOIN turns t ON fv.turn_id = coalesce(t.turn_id, t.peer_key || ':' || t.ts_us) \
                  WHERE fv.scope = ?1 AND fv.key = ?2 AND fv.version = ?3 \
                  AND (?4 < 0 OR fv.ts_us = ?4) ORDER BY t.rowid {order} LIMIT 1",
             ),
             params![subject.scope, subject.id, features::VERSION, at],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => {
@@ -589,31 +597,16 @@ pub fn build_label_envelope_at(
     for (name, v) in features::NAMES.iter().zip(values.iter()) {
         window.insert((*name).to_string(), (*v).into());
     }
-    // Stable aliases under the brief's names (docs/llm-evals.md
-    // section 3 checks read these): the gap variation, and the asset
-    // share over the window's turns, as in the explain envelope.
+    // Stable alias under the brief's name (docs/llm-evals.md
+    // section 3 checks read it): the gap variation. There is no
+    // asset alias: assets never reach PHP, so the turns carry no
+    // asset evidence either way (docs/llm.md 8.1).
     if let Some(cv) = window.get("gap_cv").cloned() {
         window.insert("iri_cv".to_string(), cv);
     }
-    // The turns pair with the window exactly: the last 64 at or
-    // before the window's own turn, so early and spread windows do
-    // not see later traffic.
-    let asset_ratio: Option<f64> = conn
-        .query_row(
-            &format!(
-                "SELECT avg(is_asset = 1) FROM (SELECT is_asset FROM turns \
-                 WHERE {turn_col} = ?1 AND rowid <= ?2 ORDER BY rowid DESC LIMIT 64)"
-            ),
-            params![subject.id, anchor],
-            |r| r.get(0),
-        )
-        .ok()
-        .flatten();
-    window.insert(
-        "asset_ratio".to_string(),
-        asset_ratio.map_or(serde_json::Value::Null, Into::into),
-    );
 
+    // The turns pair with the window exactly: the last 30 at or
+    // before the window's own turn.
     let mut stmt = conn.prepare(&format!(
         "SELECT ts_us, verb, route, status, ua_class, flags, credential_status, tag_status, ja4, \
          surface, is_asset, credential_hash, path_pattern \
@@ -691,6 +684,7 @@ pub fn build_label_envelope_at(
 
     let meta = LabelMeta {
         window_end_ts: window_ts,
+        window_turn_id,
         surface: surface.clone(),
         turns: turns.len(),
         score: score.as_ref().map(|(p, _)| *p),
@@ -3280,10 +3274,10 @@ mod tests {
         assert_eq!(env["subject"]["asn"], 16509);
         assert_eq!(env["subject"]["country"], "US");
         assert_eq!(env["window"]["features_version"], 2);
-        assert_eq!(env["window"].as_object().unwrap().len(), 41);
+        assert_eq!(env["window"].as_object().unwrap().len(), 40);
         assert_eq!(env["window"]["turns_held"], 1.0);
         assert_eq!(env["window"]["iri_cv"], 1.0);
-        assert!(env["window"]["asset_ratio"].is_null());
+        assert!(env["window"].get("asset_ratio").is_none());
         let turns = env["turns"].as_array().unwrap();
         assert_eq!(turns.len(), 3);
         assert_eq!(turns[0]["path"], "/");

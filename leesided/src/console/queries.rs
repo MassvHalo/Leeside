@@ -3293,7 +3293,7 @@ mod tests {
              INSERT INTO llm_calls (point, model, prompt_hash, json_mode, input_summary, request, response, parsed, \
              faithfulness_failed, prompt_tokens, completion_tokens, created_at) VALUES \
              ('label', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', '{\"label\":\"x\"}', NULL, 100, 50, 100), \
-             ('label', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', '{\"label\":\"x\"}', 'no_assets', 100, 50, 100), \
+             ('label', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', '{\"label\":\"x\"}', '[\"client_consistent\"]', 100, 50, 100), \
              ('classify', 'm', 'h', 'prompt', '{}', '{}', '{\"ok\":true}', NULL, NULL, 10, 5, 100); \
              INSERT INTO llm_evals (created_at, point, prompt_hash, model, json_mode, rows, agreement) VALUES \
              (100, 'classify', 'h', 'm', 'prompt', 10, 0.8);",

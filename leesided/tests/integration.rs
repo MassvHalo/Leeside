@@ -4696,7 +4696,6 @@ fn golden_sets_keep_their_shape() {
             "scanner_paths",
             "high_404_rate",
             "machine_cadence",
-            "no_assets",
             "ua_inconsistent",
             "credential_stuffing",
             "webhook_forgery",
@@ -4706,10 +4705,15 @@ fn golden_sets_keep_their_shape() {
         ]
         .into_iter()
         .collect();
-        let ben: std::collections::HashSet<&str> =
-            ["normal_browsing", "verified_partner", "insufficient_data"]
-                .into_iter()
-                .collect();
+        let ben: std::collections::HashSet<&str> = [
+            "normal_browsing",
+            "verified_partner",
+            "human_cadence",
+            "client_consistent",
+            "insufficient_data",
+        ]
+        .into_iter()
+        .collect();
         match exp {
             Some("malicious") => assert_eq!(allowed, mal, "{r}"),
             Some("benign") => assert_eq!(allowed, ben, "{r}"),
@@ -4717,6 +4721,34 @@ fn golden_sets_keep_their_shape() {
                 assert_eq!(allowed, ["insufficient_data"].into_iter().collect(), "{r}")
             }
             _ => unreachable!(),
+        }
+        // Every row carries its window's turn id for watermark
+        // filtering at build time.
+        assert!(
+            r.get("window_turn_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "window turn id: {r}"
+        );
+        // Under-floor rows on verified-clean subjects also accept
+        // benign; every other row accepts its expectation alone.
+        let also_accept: Vec<&str> = r
+            .get("also_accept")
+            .and_then(|v| v.as_array())
+            .expect("also_accept")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let verified_clean = turns
+            .iter()
+            .any(|t| t.get("credential_status").and_then(|v| v.as_str()) == Some("verified"))
+            && !turns
+                .iter()
+                .any(|t| t.get("credential_status").and_then(|v| v.as_str()) == Some("rejected"));
+        if held < 10.0 && verified_clean {
+            assert_eq!(also_accept, vec!["benign"], "{r}");
+        } else {
+            assert!(also_accept.is_empty(), "{r}");
         }
     }
     assert!(
