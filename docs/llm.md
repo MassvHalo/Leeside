@@ -97,8 +97,8 @@ Envelope (user message):
               "score": 0.91, "threshold": 0.5,
               "top3": [["ratio_4xx", 0.81, 2.4], ["iri_cv", 0.02, 1.9], ["distinct_routes", 61, 1.1]]},
   "window": {"features_version": 2, "turns_held": 64, "req_rate_per_min": 118,
-             "ratio_4xx": 0.81, "distinct_routes": 61, "iri_cv": 0.02, "asset_ratio": 0.0,
-             "f_ua_chromium_no_ch": 1.0, "...": "all 38 names"},
+             "ratio_4xx": 0.81, "distinct_routes": 61, "iri_cv": 0.02,
+             "turns_last_60s": 61, "f_ua_chromium_no_ch": 1.0, "...": "all 38 names"},
   "turns": [
     {"t_ms": -2980, "method": "GET", "path": "/wp-login.php", "status": 404, "ua_class": "chromium",
      "flags": ["ua_chromium_no_ch", "browser_no_sec_fetch"], "credential_status": null,
@@ -125,9 +125,9 @@ Schema:
      "additionalProperties": false, "required": ["name", "turns"],
      "properties": {
        "name": {"type": "string", "enum": [
-         "scanner_paths", "high_404_rate", "machine_cadence", "no_assets", "ua_inconsistent",
+         "scanner_paths", "high_404_rate", "machine_cadence", "ua_inconsistent",
          "credential_stuffing", "webhook_forgery", "honeytoken_hit", "normal_browsing",
-         "verified_partner", "insufficient_data"]},
+         "verified_partner", "human_cadence", "client_consistent", "insufficient_data"]},
        "turns": {"type": "array", "maxItems": 6,
          "items": {"type": "integer", "minimum": 0}}}}}}}
 ```
@@ -139,11 +139,12 @@ Expected `content`:
  "reason": "Sixty-one distinct paths in under five minutes, 81% of them 404s against wordlist-style names, with a fixed interval and no asset loads.",
  "signals": [{"name": "scanner_paths", "turns": [0, 1, 2, 3, 4, 5]},
              {"name": "high_404_rate", "turns": [0, 1, 2, 3, 4, 5]},
-             {"name": "machine_cadence", "turns": []},
-             {"name": "no_assets", "turns": [0]}]}
+             {"name": "machine_cadence", "turns": []}]}
 ```
 
-Each signal carries its own cited turns (at most 6); there is no shared list. Every signal is checked against its own turns before anything lands, and each failure is dropped, with the whole failed list on the call row; the label stands only when a surviving signal sits on its side (the nine scanner/stuffing/forgery signals for `malicious`, `normal_browsing` and `verified_partner` for `benign`), else it lands as `unknown` with the reason kept.
+Each signal carries its own cited turns (at most 6); there is no shared list. Every signal is checked against its own turns before anything lands, and each failure is dropped, with the whole failed list on the call row; the label stands only when a surviving signal sits on its side (the eight scanner/stuffing/forgery signals for `malicious`, the four browsing/partner/cadence/consistency signals for `benign`), else it lands as `unknown` with the reason kept.
+
+No asset evidence exists in this capture model: static files are served by nginx in production (or artisan serve's static path in generators) and never reach PHP, so turns carry no asset loads either way and `asset_ratio` is a constant 0. It was removed from the label envelope and `no_assets` retired from the signal enum; `normal_browsing` now reads UA class, flag quiet, 404 share and depth instead.
 
 Written as `labels` (`llm_proposed`, 0.6, note = reason, surviving signal names plus the derived cited-turn union in JSON columns) plus `llm_calls`. `signals` is an enum on purpose: the CLI filters on it and it becomes trainable; `reason` is display text.
 

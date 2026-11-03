@@ -75,14 +75,14 @@ Sources, with the confidence they carry:
 
 Rule-decision labels bootstrap training and are excluded from evaluation without exception, otherwise the model is graded on how well it reproduces the rules. The exclusion is a view, `labels_test_eligible`, over the four test sources (operator, tool_run, synthetic_benign, honeytoken), picking the latest row per subject and source; train.py splits from the view, not the table.
 
-Generator labels are applied by run membership, not by header and not by wall-clock interval: the generator records a warmup watermark (`warmup_last_turn_id`, once its two warmup turns have landed) and `leesided label-import <manifest>` labels every window in the fresh run store after it, whatever the turns' stamps say — a backward clock step cannot exclude a turn. The interval stays in the manifest for the record, and benign and malicious runs never overlap in time on the same instance.
+Generator labels are applied by run membership, not by header and not by wall-clock interval. The two library-UA warmup hits that prove the stack is up are purged (with their derived rows) before the run database is copied, so they leave no sampleable subjects; the manifest records an empty `warmup_last_turn_id`, and `leesided label-import <manifest>` labels every window in the fresh run store, whatever the turns' stamps say — a backward clock step cannot exclude a turn. Older manifests name a real watermark turn and import everything after it. The interval stays in the manifest for the record, and benign and malicious runs never overlap in time on the same instance.
 
 ## 4. Traffic generators (leeside-sample/bin)
 
 All runs target the e2e instance on 7391, never the deployed 7390. Each run writes its manifest to `runs/`.
 
 Benign (`bin/benign.sh`, Playwright under Chromium, Firefox and WebKit):
-- page walks with asset loads, think time between 2 and 20 seconds, back navigation, a login and a logged-in session
+- page walks with asset loads, think time between 2 and 20 seconds, back navigation, a login and a logged-in session; every engine runs with `locale: 'en-US'` so all three send `Accept-Language` like a real browser
 - partner API calls with a valid key at a steady cadence (one every 5 to 30 seconds, occasional bursts of 20)
 - webhooks with valid signatures, bursty (a dozen within a second, then quiet)
 

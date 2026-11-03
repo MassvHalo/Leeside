@@ -6,7 +6,7 @@ Companion to `docs/llm.md`. Nothing about a prompt or a model choice changes wit
 
 Under `windside/evals/`, one JSONL file per point, built from the generator stores and operator labels, never from the model's own proposals:
 
-- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist. Each envelope pairs its window with exactly the turns up to that window's turn id; any row with `turns_held` under 10 expects `unknown`.
+- `label.jsonl`: the envelope as the worker builds it, plus `expected_label` and `allowed_signals`. At least 100 rows across kinds and both scopes, including the hard ones: the cookie-keeping scraper, the benign api client, cold-start windows, `attack-promo` once outcomes exist. Each envelope pairs its window with exactly the turns up to that window's turn id; any row with `turns_held` under 10 expects `unknown`, except on a subject holding a verified credential with no rejections, where `benign` is also accepted (`also_accept`).
 - `classify.jsonl`: `{method, path_pattern, sample_query, body_slice, expected_category}`, at least 200, half of them `none`.
 - `explain.jsonl`: `{score, threshold, top3, window, must_mention}` where `must_mention` lists the feature names an explanation has to reference; at least 50.
 - `draft.jsonl`: `{cluster summary, expected_scope, expected_surface, must_parse: true}`; at least 20.
@@ -21,7 +21,7 @@ Per point:
 
 | Point | Agreement | Also |
 | --- | --- | --- |
-| label | post-faithfulness label, per kind and per scope; `agreement_raw` beside it; confidence calibration in five bins | faithfulness failures, dropped signals per name, `unknown` rate |
+| label | post-faithfulness label against the accepted set, per kind and per scope; `agreement_raw` beside it; confidence calibration in five bins | faithfulness failures, dropped signals per name, `unknown` rate, signal violations as a count (a known signal outside the row's list on an agreed row is not a worst row) |
 | classify | expected category; per category precision and recall | cache hit rate on real traffic |
 | explain | every `must_mention` feature named; length within limit | operator rating when the console has one |
 | draft | parses; scope and surface as expected | dry-run match count against the cluster it came from |
@@ -37,14 +37,15 @@ Each claimed signal carries its own cited turns (at most 6 per signal, at most 5
 | scanner_paths | at least 3 distinct paths and a 404 share above 0.5, or paths in the scanner wordlist |
 | high_404_rate | 404 share above 0.5 across the cited turns |
 | machine_cadence | window `iri_cv` below 0.2, or `turns_last_60s` at least 30 |
-| no_assets | window `asset_ratio` below 0.05 and at least one HTML turn |
 | ua_inconsistent | a browser `ua_class` with `ua_chromium_no_ch` or a library JA4 class on the cited turns |
 | credential_stuffing | at least 5 distinct rejected credentials in the window |
 | webhook_forgery | cited turns are `webhook` with `credential_status` rejected |
 | honeytoken_hit | a cited turn's route is in the honeytoken list |
 | rejected_actions | cited turns carry `app_outcome` ending in `:rejected` (fails closed until the outcomes round adds the field; see `docs/outcomes.md`) |
-| normal_browsing | no flag above 0.2 and `asset_ratio` above 0.1 |
+| normal_browsing | browser `ua_class` on the cited turns, no flag rate above 0.2 across the window, `ratio_404` below 0.2, `turns_held` at least 10 |
 | verified_partner | the actor holds a verified credential and `rejected_credentials` is 0 |
+| human_cadence | window `iri_cv` above 0.5 and `turns_last_60s` at most 30 |
+| client_consistent | browser `ua_class`, no `ua_chromium_no_ch`, no `library_ua_on_web`, JA4 class browser or null, on the cited turns |
 | insufficient_data | `turns_held` below 10 |
 
 Checks are deterministic and cheap; they run before anything is written.
