@@ -37,10 +37,10 @@ Viewer token: available in the demo video, or on request.
 To trigger it yourself, walk the venue ids the way a scraper would:
 
 ```bash
-for i in $(seq 1 30); do curl -s -o /dev/null "https://webapp.leeside.halowifi.com/api/venues/$i"; done
+for i in $(seq 1 30); do curl -s -o /dev/null "https://webapp.leeside.halowifi.com/venues/$i"; done
 ```
 
-Those ids match no route, so every hit lands as a 404; refreshing the console shows a new scored actor waiting on a person, under an episode titled "Someone scanned for weak spots". It touches only the public demo app, and the rule flagging it (http-404-scan) ships in every install.
+That walks a real route the way a scraper would; refreshing the console shows a new scored actor waiting on a person, under an episode titled "Someone walked through venue ids". It touches only the public demo app, and the rule flagging it (venue-enumeration) watches the sample app on prod.
 
 Install on an Ubuntu 22.04, 24.04 or 26.04 box that already hosts a Laravel app
 behind nginx:
