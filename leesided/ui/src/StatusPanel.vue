@@ -10,6 +10,7 @@
       <p class="crumb">Settings <span aria-hidden="true">&rsaquo;</span> <b>Status</b></p>
       <div class="headline-row"><h1 class="headline">Status</h1></div>
       <p class="subline">Settings live in /etc/leeside/leesided.env on the box; restart leesided after a change.</p>
+      <p class="subline"><a :href="`${consolePrefix}/settings`">Change these on the controls page</a></p>
     </div>
   </header>
 
@@ -80,6 +81,7 @@ import { fmtDur, fmtInt } from './fmt.js'
 const props = defineProps({
   status: { type: Object, default: null },
   assistantModel: { type: String, default: null },
+  consolePrefix: { type: String, default: '' },
 })
 
 const rulesLine = computed(() => {
