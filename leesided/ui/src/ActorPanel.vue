@@ -1,7 +1,7 @@
 <template>
   <header v-if="!actor && !notFound" class="page-head page-head-tabs" aria-busy="true">
     <div class="page-head-text">
-      <a class="crumb" :href="`${consolePrefix}/ui/actors`">Traffic <span aria-hidden="true">&rsaquo;</span> <b>Actors</b></a>
+      <a class="crumb" :href="`${consolePrefix}/actors`">Traffic <span aria-hidden="true">&rsaquo;</span> <b>Actors</b></a>
       <span class="skeleton skeleton-title"></span>
     </div>
     <nav class="tabs" aria-label="Page sections">
@@ -13,12 +13,12 @@
     <div class="page-head-text">
       <p class="crumb">Traffic <span aria-hidden="true">&rsaquo;</span> <b>Actors</b></p>
       <div class="headline-row"><h1 class="headline">No actor with this id.</h1></div>
-      <p class="subline">It may have merged into another actor. Its turns are still under <a class="inline-more" :href="`${consolePrefix}/ui/traffic`">Traffic<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></a></p>
+      <p class="subline">It may have merged into another actor. Its turns are still under <a class="inline-more" :href="`${consolePrefix}/actors`">Traffic<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></a></p>
     </div>
   </header>
   <header v-else class="page-head page-head-tabs">
     <div class="page-head-text">
-      <a class="crumb" :href="`${consolePrefix}/ui/actors`">Traffic <span aria-hidden="true">&rsaquo;</span> <b>Actors</b></a>
+      <a class="crumb" :href="`${consolePrefix}/actors`">Traffic <span aria-hidden="true">&rsaquo;</span> <b>Actors</b></a>
       <div class="headline-row"><h1 class="headline" data-field="actor.headline">{{ actor.headline }}</h1></div>
       <p class="actor-idline"><span data-field="actor.kind">{{ actor.kind }}</span> <span class="actor-id" data-field="actor.id">{{ actor.id }}</span> <button type="button" class="copy" data-copy @click="copyText(actor.id, 'id')">{{ copiedKey === 'id' ? 'Copied' : 'Copy' }}</button></p>
     </div>
@@ -86,7 +86,7 @@
         <div><dt>Surfaces</dt><dd data-field="actor.surfaces">{{ actor.surfaces.join(', ') }}</dd></div>
         <div><dt>Network</dt><dd>&mdash;</dd></div>
         <div><dt>Country</dt><dd>&mdash;</dd></div>
-        <div><dt>Cluster</dt><dd v-if="actor.cluster"><a class="time" data-field="actor.cluster" :href="`${consolePrefix}/ui/clusters/${encodeURIComponent(actor.cluster)}`">{{ actor.cluster }}</a></dd><dd v-else>&mdash;</dd></div>
+        <div><dt>Cluster</dt><dd v-if="actor.cluster"><a class="time" data-field="actor.cluster" :href="`${consolePrefix}/clusters/${encodeURIComponent(actor.cluster)}`">{{ actor.cluster }}</a></dd><dd v-else>&mdash;</dd></div>
       </dl>
       <div class="table-wrap"><table class="dense-table">
         <thead><tr><th>Binding</th><th>Value</th><th>State</th><th>First</th><th>Last</th></tr></thead>
@@ -252,7 +252,7 @@
         <tbody>
           <tr v-for="(t, i) in turnsRows" :key="t.row" class="turn-row" :class="{ 'is-cited': t.cited }" :id="`ad-turn-${i}`">
             <td class="turn-index">{{ i }}</td>
-            <td v-if="t.trace"><a class="time" data-field="turn.at" :href="`${consolePrefix}/ui/trace/${t.trace}`">{{ fmtMillis(t.at) }}</a></td>
+            <td v-if="t.trace"><a class="time" data-field="turn.at" :href="`${consolePrefix}/trace/${t.trace}`">{{ fmtMillis(t.at) }}</a></td>
             <td v-else><span class="time" data-field="turn.at">{{ fmtMillis(t.at) }}</span></td>
             <td class="mono-cell" data-field="turn.method">{{ t.method }}</td>
             <td class="mono-cell" data-field="turn.route">{{ t.route }}</td>

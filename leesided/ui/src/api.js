@@ -46,3 +46,4 @@ export const getActorTurns = (id, filter = {}) => {
 }
 export const postActorBlock = (id, action) =>
   call(`/actors/${encodeURIComponent(id)}/block`, { method: 'POST', body: { action } })
+export const getStatus = () => call('/status')

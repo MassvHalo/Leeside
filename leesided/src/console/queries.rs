@@ -3234,13 +3234,15 @@ pub struct EpisodeStory {
 }
 
 /// One "look closer" chip. `href` is the path under the console
-/// prefix; the API layer prepends `LEESIDED_CONSOLE_PATH`.
+/// prefix when the target page exists; the API layer prepends
+/// `LEESIDED_CONSOLE_PATH`. `None` renders as plain text.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EpisodeChip {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<i64>,
-    pub href: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub href: Option<String>,
 }
 
 /// One episode: a subject (actor or cluster), a time span, and what
@@ -3689,26 +3691,27 @@ impl Ctx<'_> {
                 chips.push(EpisodeChip {
                     label: "actors".to_string(),
                     count: Some(actors),
-                    href: format!("/ui/actors?episode={episode_id}"),
+                    href: Some(format!("/actors?episode={episode_id}")),
                 });
             }
         } else {
             chips.push(EpisodeChip {
                 label: "actor".to_string(),
                 count: None,
-                href: format!("/ui/actors/{id}"),
+                href: Some(format!("/actors/{id}")),
             });
         }
+        // No /traffic page: the requests chip is plain text.
         chips.push(EpisodeChip {
             label: "requests".to_string(),
             count: Some(turns),
-            href: format!("/ui/traffic?episode={episode_id}"),
+            href: None,
         });
         if let Some(rule) = rule_chip {
             chips.push(EpisodeChip {
                 label: format!("Rule {rule}"),
                 count: None,
-                href: format!("/ui/rules/{rule}"),
+                href: Some("/rules".to_string()),
             });
         }
         Ok(Some(Episode {
@@ -5815,7 +5818,7 @@ mod tests {
         assert_eq!(stopped.explained_by, None);
         assert_eq!(stopped.chips.len(), 3);
         assert_eq!(stopped.chips[2].label, "Rule portal-otp-burst");
-        assert_eq!(stopped.chips[2].href, "/ui/rules/portal-otp-burst");
+        assert_eq!(stopped.chips[2].href.as_deref(), Some("/rules"));
 
         let blocked = by_id("ep_actor_a_stop2");
         assert_eq!(blocked.state, "stopped");
@@ -5836,7 +5839,7 @@ mod tests {
         assert_eq!(waiting.score, Some(0.9));
         assert_eq!(waiting.threshold, Some(0.5));
         assert!(waiting.window_end_ts.is_some());
-        assert_eq!(waiting.chips[0].href, "/ui/actors/a_wait");
+        assert_eq!(waiting.chips[0].href.as_deref(), Some("/actors/a_wait"));
         assert_eq!(waiting.chips[1].count, Some(2));
 
         let watched = by_id("ep_cluster_c_watch");

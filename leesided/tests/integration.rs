@@ -449,6 +449,26 @@ fn ui_escape(s: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_v1_status_gated_viewer_allowed() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/status", None, None)
+        .await;
+    assert_eq!(st, 401);
+    assert_eq!(v["error"], "login required");
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/status", Some(&viewer), None)
+        .await;
+    assert_eq!(st, 200);
+    assert_eq!(v["ok"], true);
+    assert!(v["uptime_s"].is_number(), "{v}");
+    assert!(v["windside"]["mode"].is_string(), "{v}");
+    assert!(v["rules"]["hash"].is_string(), "{v}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_v1_empty_shapes_and_roles() {
     let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
     // No session: 401 JSON, not a login redirect.

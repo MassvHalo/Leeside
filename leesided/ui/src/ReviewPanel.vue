@@ -184,7 +184,7 @@
             <tbody>
               <tr v-for="(t, i) in item.evidence.turns" :key="t.row" class="turn-row" :class="{ 'is-cited': t.cited }" :id="`rv-turn-${i}`">
                 <td class="turn-index">{{ i }}</td>
-                <td v-if="t.trace"><a class="time" data-field="turn.at" :href="`${consolePrefix}/ui/trace/${t.trace}`">{{ fmtMillis(t.at) }}</a></td>
+                <td v-if="t.trace"><a class="time" data-field="turn.at" :href="`${consolePrefix}/trace/${t.trace}`">{{ fmtMillis(t.at) }}</a></td>
                 <td v-else><span class="time" data-field="turn.at">{{ fmtMillis(t.at) }}</span></td>
                 <td class="mono-cell" data-field="turn.method">{{ t.method }}</td>
                 <td class="mono-cell" data-field="turn.route">{{ t.route }}</td>
@@ -242,7 +242,7 @@ const decidedRows = computed(() => {
 const subjectHref = computed(() => {
   if (!props.item) return '#'
   if (props.item.scope === 'actor') return `#/actors/${encodeURIComponent(props.item.id)}`
-  return `${props.consolePrefix}/ui/clusters/${encodeURIComponent(props.item.id)}`
+  return `${props.consolePrefix}/clusters/${encodeURIComponent(props.item.id)}`
 })
 
 function keyOf(item) {

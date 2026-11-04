@@ -99,6 +99,7 @@ pub fn router(engine: Arc<Engine>) -> Router {
             get(crate::console::api::api_episodes),
         )
         .route(&u("/api/v1/traffic"), get(crate::console::api::api_traffic))
+        .route(&u("/api/v1/status"), get(crate::console::api::api_status))
         .route(
             &u("/api/v1/episodes/{id}/decision"),
             post(crate::console::api::api_decide),

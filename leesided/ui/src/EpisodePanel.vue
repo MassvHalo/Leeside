@@ -49,7 +49,7 @@
       </ol>
       <div class="closer">
         <span class="closer-label">Look closer</span>
-        <a v-for="c in selected.chips" :key="c.href" class="chip" data-field="chip.href" :href="c.href"><span v-if="c.count !== null && c.count !== undefined" class="chip-count" data-field="chip.count">{{ fmtInt(c.count) }}</span><span data-field="chip.label">{{ c.label }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></a>
+        <template v-for="c in selected.chips" :key="c.label"><a v-if="c.href" class="chip" data-field="chip.href" :href="c.href"><span v-if="c.count !== null && c.count !== undefined" class="chip-count" data-field="chip.count">{{ fmtInt(c.count) }}</span><span data-field="chip.label">{{ c.label }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></a><span v-else class="chip" data-field="chip.text"><span v-if="c.count !== null && c.count !== undefined" class="chip-count" data-field="chip.count">{{ fmtInt(c.count) }}</span><span data-field="chip.label">{{ c.label }}</span></span></template>
       </div>
       <div class="detail-foot"><button type="button" class="next-button" @click="$emit('next', 1)">Next<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></button><span class="key-hint"><kbd>j</kbd><kbd>k</kbd> move</span></div>
     </section>

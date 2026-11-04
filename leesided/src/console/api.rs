@@ -115,6 +115,15 @@ pub async fn api_summary(
     Json(v).into_response()
 }
 
+/// The daemon's health JSON unchanged, session-gated for the
+/// Settings Status page (the browser cannot reach the local API).
+pub async fn api_status(State(e): State<Arc<Engine>>, headers: HeaderMap) -> Response {
+    if let Err(r) = session_of(&e, &headers) {
+        return *r;
+    }
+    Json(e.health()).into_response()
+}
+
 pub async fn api_episodes(
     State(e): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -136,7 +145,9 @@ pub async fn api_episodes(
         Ok(mut episodes) => {
             for ep in &mut episodes {
                 for chip in &mut ep.chips {
-                    chip.href = format!("{prefix}{}", chip.href);
+                    if let Some(h) = chip.href.take() {
+                        chip.href = Some(format!("{prefix}{h}"));
+                    }
                 }
             }
             Json(episodes).into_response()

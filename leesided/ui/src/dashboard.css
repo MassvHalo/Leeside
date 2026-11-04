@@ -298,6 +298,7 @@ body { background: var(--ground); font-family: var(--font-sans); letter-spacing:
 .sidebar-foot { margin-top: auto; gap: var(--space-3); padding: var(--space-4) 20px 0; border-top: 1px solid var(--line); }
 .app-switch { border: 0; padding: 0; min-height: 0; font-size: var(--size-small); color: var(--text); }
 .connection { align-self: flex-start; padding: 5px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); color: var(--text-2); font-size: 9.5px; letter-spacing: 0.12em; }
+.connection.attribution { text-transform: none; }
 .connection::before { background: var(--positive); }
 
 .content {

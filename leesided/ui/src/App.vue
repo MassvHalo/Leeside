@@ -1,7 +1,7 @@
 <template>
   <div class="frame">
     <header class="topbar">
-      <a class="brand" href="#"><svg class="brand-mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><rect class="brand-mark-dim" x="2" y="4" width="10" height="2.4" rx="1"></rect><rect class="brand-mark-hostile" x="6" y="8.8" width="12" height="2.4" rx="1"></rect><rect class="brand-mark-dim" x="4" y="13.6" width="6" height="2.4" rx="1"></rect></svg><span>windside</span></a>
+      <a class="brand" href="#/"><svg class="brand-mark" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><rect class="brand-mark-dim" x="2" y="4" width="10" height="2.4" rx="1"></rect><rect class="brand-mark-hostile" x="6" y="8.8" width="12" height="2.4" rx="1"></rect><rect class="brand-mark-dim" x="4" y="13.6" width="6" height="2.4" rx="1"></rect></svg><span>windside</span></a>
       <button type="button" class="user" aria-haspopup="menu"><span class="user-avatar" aria-hidden="true">{{ roleInitial }}</span><span class="user-text"><span class="user-name" data-field="user.name">{{ role }}</span></span><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 L5 6.5 L8 3.5"></path></svg></button>
     </header>
     <aside class="sidebar" aria-label="Console">
@@ -10,12 +10,12 @@
         <a class="nav-link" :class="{ 'is-current': route.group === 'dashboard' }" href="#/" :aria-current="route.group === 'dashboard' ? 'page' : null"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M2 6.6 L7 2.4 L12 6.6 V12 H8.6 V8.8 H5.4 V12 H2 Z" fill="none"></path></svg><span class="nav-label">Dashboard</span></a>
         <div class="nav-section">Daily</div>
         <details class="nav-group" :open="route.group === 'review' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'review' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.8" y="1.8" width="10.4" height="10.4" rx="2.4" fill="none"></rect><path d="M4.4 7.2 L6.3 9.1 L9.8 5.2" fill="none"></path></svg><span class="nav-label">Review</span><span v-if="pending > 0" class="count-pill" data-field="review.pending">{{ pending }}</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-queue' }" href="#/review" :aria-current="route.name === 'review-queue' ? 'page' : null">Queue</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'review-decided' }" href="#/review/decided" :aria-current="route.name === 'review-decided' ? 'page' : null">Decided</a></details>
-        <details class="nav-group" :open="route.group === 'actor' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'actor' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7 H3.6 L5.2 3 L8 11 L9.8 7 H13" fill="none"></path></svg><span class="nav-label">Traffic</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.group === 'actor' }" href="#" :aria-current="route.group === 'actor' ? 'page' : null">Actors</a><a class="nav-link nav-child" href="#">Clusters</a><a class="nav-link nav-child" href="#">Live</a></details>
+        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 7 H3.6 L5.2 3 L8 11 L9.8 7 H13" fill="none"></path></svg><span class="nav-label">Traffic</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :href="`${consolePrefix}/actors`">Actors</a><a class="nav-link nav-child" :href="`${consolePrefix}/clusters`">Clusters</a></details>
         <div class="nav-section">Control</div>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 L12 3 V7 C12 10 9.8 11.9 7 12.8 C4.2 11.9 2 10 2 7 V3 Z" fill="none"></path></svg><span class="nav-label">Protection</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Rules</a><a class="nav-link nav-child" href="#">Drafts</a><a class="nav-link nav-child" href="#">Decisions</a><a class="nav-link nav-child" href="#">Mode</a></details>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none"></circle><circle cx="7" cy="7" r="2.2" fill="none"></circle></svg><span class="nav-label">Intelligence</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Model</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">Evals</a><a class="nav-link nav-child" href="#">Fingerprints</a></details>
+        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 L12 3 V7 C12 10 9.8 11.9 7 12.8 C4.2 11.9 2 10 2 7 V3 Z" fill="none"></path></svg><span class="nav-label">Protection</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :href="`${consolePrefix}/rules`">Rules</a><a class="nav-link nav-child" :href="`${consolePrefix}/labels`">Decisions</a></details>
+        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none"></circle><circle cx="7" cy="7" r="2.2" fill="none"></circle></svg><span class="nav-label">Intelligence</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :href="`${consolePrefix}/model`">Model</a><a class="nav-link nav-child" :href="`${consolePrefix}/llm`">Assistant</a><a class="nav-link nav-child" :href="`${consolePrefix}/payloads`">Payloads</a></details>
         <template v-if="role !== 'viewer'"><div class="nav-section">System</div>
-        <details class="nav-group" :open="route.group === 'settings' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'settings' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">App</a><a class="nav-link nav-child" href="#">Surfaces</a><a class="nav-link nav-child" href="#">Redaction</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'settings-assistant' }" href="#/settings/assistant" :aria-current="route.name === 'settings-assistant' ? 'page' : null">Assistant</a><a class="nav-link nav-child" href="#">GeoIP</a><a class="nav-link nav-child" href="#">Access</a></details></template>
+        <details class="nav-group" :open="route.group === 'settings' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'settings' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'settings-status' }" href="#/settings" :aria-current="route.name === 'settings-status' ? 'page' : null">Status</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'settings-assistant' }" href="#/settings/assistant" :aria-current="route.name === 'settings-assistant' ? 'page' : null">Assistant</a></details></template>
       </nav>
       <div class="sidebar-foot">
         <button type="button" class="app-switch" aria-haspopup="menu"><span data-field="app.host">{{ host }}</span><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 L5 6.5 L8 3.5"></path></svg></button>
@@ -35,7 +35,7 @@
           <h1 v-else-if="summary.attacks === 0" class="headline">Watching.</h1>
           <h1 v-else class="headline"><span class="headline-dim"><span data-field="summary.attacks">{{ fmtInt(summary.attacks) }}</span> attacks in <span data-field="summary.window">{{ summary.window }}</span>.</span> <span class="headline-rest"><span data-field="summary.stopped">{{ fmtInt(summary.stopped) }}</span> {{ stoppedWord }}.</span><span v-if="showTail" class="headline-tail">In shadow, Windside would have stopped <span data-field="summary.would_have_stopped">{{ fmtInt(summary.would_have_stopped) }}</span> more.</span></h1>
           <div v-if="summary" class="subline-row"><span class="mode-chip" :data-mode="summary.mode"><span data-field="summary.mode">{{ summary.mode }}</span> mode</span><p v-if="summary.attacks === 0" class="subline"><span data-field="summary.requests">{{ fmtInt(summary.requests) }}</span> requests seen<template v-if="summary.fingerprinted !== null">, <span data-field="summary.fingerprinted">{{ summary.fingerprinted }}%</span> fingerprinted</template>, nothing hostile yet</p><p v-else class="subline"><span data-field="summary.waiting">{{ fmtInt(summary.waiting) }}</span> waiting on you.</p></div>
-          <div v-if="summary && summary.attacks > 0" class="cta-row"><a v-if="summary.waiting > 0" class="cta cta-primary" href="#/review">Review what's waiting</a><a class="cta cta-ghost" :href="`${consolePrefix}/ui/traffic`">See all traffic</a></div>
+          <div v-if="summary && summary.attacks > 0" class="cta-row"><a v-if="summary.waiting > 0" class="cta cta-primary" href="#/review">Review what's waiting</a><a class="cta cta-ghost" :href="`${consolePrefix}/actors`">See all traffic</a></div>
         </header>
         <div class="hero-card">
           <div class="hero-card-head"><span class="card-label">Traffic</span><div class="window-toggle" role="group" aria-label="Time window"><button v-for="w in windows" :key="w" type="button" :data-window="w" :aria-pressed="String(win === w)" @click="setWindow(w)">{{ windowLabel(w) }}</button></div></div>
@@ -67,9 +67,9 @@
         @decide="decide"
       />
       <section v-if="summary" class="tiles" aria-label="Go deeper">
-        <a class="tile" :href="`${consolePrefix}/ui/actors`"><span class="tile-label">Who is on your app</span><span class="tile-line"><span data-field="tiles.actors.normal">{{ fmtInt(summary.tiles.actors.normal) }}</span><span class="tile-of">/ <span data-field="tiles.actors.total">{{ fmtInt(summary.tiles.actors.total) }}</span></span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.actors.normal, summary.tiles.actors.total)}`"></span></span><span class="tile-caption">actors look normal</span><span class="tile-more">See who they are<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
-        <a class="tile" :href="`${consolePrefix}/ui/rules`"><span class="tile-label">How your rules are doing</span><span class="tile-line"><span data-field="tiles.rules.active">{{ fmtInt(summary.tiles.rules.active) }}</span><span class="tile-of">active</span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.rules.active, summary.tiles.rules.active + summary.tiles.rules.ready)}`"></span></span><span class="tile-caption"><span data-field="tiles.rules.ready">{{ fmtInt(summary.tiles.rules.ready) }}</span> ready to turn on</span><span class="tile-more">See your rules<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
-        <a class="tile" :href="`${consolePrefix}/ui/model`"><span class="tile-label">Can you trust the detection</span><span class="tile-line"><span data-field="tiles.reviews.agreed">{{ fmtInt(summary.tiles.reviews.agreed) }}</span><span class="tile-of">/ <span data-field="tiles.reviews.total">{{ fmtInt(summary.tiles.reviews.total) }}</span></span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.reviews.agreed, summary.tiles.reviews.total)}`"></span></span><span class="tile-caption">agreed with the proposal</span><span class="tile-more">See how it decides<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
+        <a class="tile" :href="`${consolePrefix}/actors`"><span class="tile-label">Who is on your app</span><span class="tile-line"><span data-field="tiles.actors.normal">{{ fmtInt(summary.tiles.actors.normal) }}</span><span class="tile-of">/ <span data-field="tiles.actors.total">{{ fmtInt(summary.tiles.actors.total) }}</span></span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.actors.normal, summary.tiles.actors.total)}`"></span></span><span class="tile-caption">actors look normal</span><span class="tile-more">See who they are<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
+        <a class="tile" :href="`${consolePrefix}/rules`"><span class="tile-label">How your rules are doing</span><span class="tile-line"><span data-field="tiles.rules.active">{{ fmtInt(summary.tiles.rules.active) }}</span><span class="tile-of">active</span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.rules.active, summary.tiles.rules.active + summary.tiles.rules.ready)}`"></span></span><span class="tile-caption"><span data-field="tiles.rules.ready">{{ fmtInt(summary.tiles.rules.ready) }}</span> ready to turn on</span><span class="tile-more">See your rules<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
+        <a class="tile" :href="`${consolePrefix}/model`"><span class="tile-label">Can you trust the detection</span><span class="tile-line"><span data-field="tiles.reviews.agreed">{{ fmtInt(summary.tiles.reviews.agreed) }}</span><span class="tile-of">/ <span data-field="tiles.reviews.total">{{ fmtInt(summary.tiles.reviews.total) }}</span></span></span><span class="tile-bar" aria-hidden="true"><span class="tile-bar-fill" :style="`--share:${share(summary.tiles.reviews.agreed, summary.tiles.reviews.total)}`"></span></span><span class="tile-caption">agreed with the proposal</span><span class="tile-more">See how it decides<svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></span></a>
       </section>
       </template>
       <ReviewPanel
@@ -89,8 +89,13 @@
         @next="reviewNext"
         @decide="reviewDecide"
       />
+      <StatusPanel
+        v-else-if="route.name === 'settings-status'"
+        :status="status"
+        :assistant-model="summary && summary.assistant ? summary.assistant.model : null"
+      />
       <AssistantPanel
-        v-else-if="route.group === 'settings'"
+        v-else-if="route.name === 'settings-assistant'"
         :assistant="summary ? summary.assistant : null"
         :is-operator="role !== 'viewer'"
       />
@@ -119,12 +124,14 @@ import ActorPanel from './ActorPanel.vue'
 import AssistantPanel from './AssistantPanel.vue'
 import EpisodePanel from './EpisodePanel.vue'
 import ReviewPanel from './ReviewPanel.vue'
+import StatusPanel from './StatusPanel.vue'
 import { fmtClock, fmtInt } from './fmt.js'
 import {
   getActor,
   getEpisodes,
   getReview,
   getReviewItem,
+  getStatus,
   getSummary,
   getTraffic,
   postActorBlock,
@@ -135,7 +142,8 @@ import {
 
 // Hash routes: '' or '#/' dashboard, '#/review' queue, '#/review/decided',
 // '#/review/{actor|cluster}/{id}' queue with a selected item,
-// '#/actors/{id}' and '#/actors/{id}/raw', '#/settings/assistant'.
+// '#/actors/{id}' and '#/actors/{id}/raw', '#/settings' and
+// '#/settings/assistant'.
 // Unknown hashes fall back to the dashboard; turn anchors use
 // replaceState, never routing.
 function parseHash() {
@@ -144,6 +152,7 @@ function parseHash() {
   if (h === '/review') return { group: 'review', name: 'review-queue', scope: null, id: null, actorId: null }
   if (h === '/review/decided') return { group: 'review', name: 'review-decided', scope: null, id: null, actorId: null }
   if (h === '/settings/assistant') return { group: 'settings', name: 'settings-assistant', scope: null, id: null, actorId: null }
+  if (h === '/settings') return { group: 'settings', name: 'settings-status', scope: null, id: null, actorId: null }
   const m = h.match(/^\/review\/(actor|cluster)\/(.+)$/)
   if (m) return { group: 'review', name: 'review-queue', scope: m[1], id: decodeURIComponent(m[2]), actorId: null }
   const raw = h.match(/^\/actors\/(.+)\/raw$/)
@@ -181,6 +190,7 @@ const reviewItemLoading = ref(false)
 const emptyDecided = { total: 0, agreed: 0, items: [] }
 const actor = ref(null)
 const actorNotFound = ref(false)
+const status = ref(null)
 
 // Selection is the route's item, else the first queue row. Plain #/review
 // shows the first item without rewriting the URL.
@@ -333,11 +343,23 @@ async function loadAssistant() {
   stopRetry()
 }
 
+async function loadStatus() {
+  const [s, st] = await Promise.all([getSummary('24h'), getStatus()])
+  summary.value = s
+  status.value = st
+  nowS.value = Math.floor(Date.now() / 1000)
+  disconnected.value = false
+  everLoaded.value = true
+  lastSeen.value = nowS.value
+  stopRetry()
+}
+
 async function reload() {
   try {
     if (route.value.group === 'review') await loadReview()
     else if (route.value.group === 'actor') await loadActor()
-    else if (route.value.group === 'settings') await loadAssistant()
+    else if (route.value.name === 'settings-status') await loadStatus()
+    else if (route.value.name === 'settings-assistant') await loadAssistant()
     else await loadDashboard()
   } catch (err) {
     if (err && err.message === 'logged out') return
@@ -359,6 +381,8 @@ function onHashChange() {
   } else if (next.group === 'review' && (next.scope !== prev.scope || next.id !== prev.id)) {
     reloadReviewItem()
   } else if (next.group === 'actor' && next.actorId !== prev.actorId) {
+    void reload()
+  } else if (next.group === 'settings' && next.name !== prev.name) {
     void reload()
   }
 }
