@@ -327,8 +327,11 @@ password_policy() {
     [ -n "$rest" ] || { echo "at least one symbol"; return 1; }
     case "$pw" in *[[:space:]]*) echo "no whitespace"; return 1 ;; *) ;; esac
     # systemd eats backslashes in env files (proven on 26.04), so the
-    # password cannot carry them; everything else passes through verbatim.
+    # password cannot carry them; matching quotes around a value are
+    # stripped too, so " and ' are out as well. Everything else passes
+    # through verbatim.
     case "$pw" in *\\*) echo "no backslashes (the env file cannot carry them)"; return 1 ;; *) ;; esac
+    case "$pw" in *\"*|*"'"*) echo 'no quotes (" and '"'"' are stripped by the env file)'; return 1 ;; *) ;; esac
     return 0
 }
 
@@ -351,7 +354,7 @@ ask_password() {
         return 0
     fi
     while true; do
-        read_answer first "Console admin password (at least 12 characters, with a lowercase, an uppercase, a digit and a symbol, no whitespace, no backslashes): " 1
+        read_answer first "Console admin password (at least 12 characters, with a lowercase, an uppercase, a digit and a symbol; no whitespace, backslashes or quotes): " 1
         if ! rule="$(password_policy "$first")"; then
             log "that password fails the policy: $rule."
             continue
