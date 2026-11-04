@@ -1,12 +1,10 @@
-<!doctype html>
-<html lang="en">
-<head>
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leeside</title>
-<meta name="description" content="Leeside is a request-security layer for Laravel: a Composer package, a Rust daemon, a small classifier trained on your own traffic, and a console at /windside that explains every call it makes.">
+<meta name="description" content="Rogue AI agents hit the SEC, Hugging Face and a high-school chemistry wiki this year. Leeside recognises the actor behind each request to your web app, scores it, and has Muse Spark Open, Meta's open-weights model, explain what it found before a person decides. Shipped today for Laravel; ASP.NET Core, Django and Express adapters next.">
 <meta property="og:title" content="Leeside">
-<meta property="og:description" content="The lee side of your Laravel app. Request security that scores every actor, explains every call, and asks a person before it learns.">
+<meta property="og:description" content="Rogue AI agents hit the SEC and Hugging Face. Is yours next? Put your web app on the lee side. Built with Muse Spark Open.">
 <meta property="og:image" content="https://massvhalo.github.io/Leeside/brand/leeside-social-1280x640.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -19,6 +17,7 @@
 :root {
   --windward: #0F141C;
   --windward-2: #151B25;
+  --windward-deep: #0A0D14;
   --lee: #EDF0F4;
   --lee-2: #FFFFFF;
   --ink: #141A22;
@@ -27,10 +26,12 @@
   --mist: #E8ECF1;
   --mist-2: #AEB7C2;
   --mist-3: #8E98A6;
+  --mist-4: #7A8393;
   --line-dark: #232B37;
   --line-light: #D5DBE3;
   --accent: #FF7F5C;
   --accent-deep: #E8613C;
+  --accent-rgb: 255, 127, 92;
   --display: "Outfit", "Albert Sans", "Helvetica Neue", Arial, sans-serif;
   --body: "Inter", "Helvetica Neue", Arial, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -41,142 +42,492 @@
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-body { margin: 0; background: var(--lee); color: var(--ink); font: 400 17px/1.6 var(--body); -webkit-font-smoothing: antialiased; }
+body { margin: 0; overflow-x: clip; background: var(--lee); color: var(--ink); font: 400 17px/1.6 var(--body); -webkit-font-smoothing: antialiased; }
 a { color: inherit; text-decoration: none; }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+img { max-width: 100%; }
 .wrap { max-width: var(--col); margin: 0 auto; padding: 0 var(--gutter); }
 h1, h2, h3 { font-family: var(--display); font-weight: 300; letter-spacing: -0.015em; margin: 0; text-wrap: balance; }
 p { margin: 0; max-width: var(--measure); }
+code { font: 400 0.92em var(--mono); }
 .dim { color: var(--mist-3); }
 .lee .dim { color: var(--ink-3); }
 
-/* Windward: the dark hero */
-.windward { position: relative; z-index: 1; color: var(--mist); }
-.windward::before { content: ""; position: absolute; inset: 0 0 var(--overlap) 0; background: var(--windward); z-index: -1; }
-.wind { position: absolute; left: 0; top: 0; width: 100%; height: 180px; pointer-events: none; }
-@media (max-width: 700px) { .wind { height: 96px; } }
+/* ---------- Windward: the dark hero, with the lee wall ---------- */
+.hero { position: relative; overflow: hidden; background: var(--windward); color: var(--mist); --bleed: max(0px, (100vw - 1440px) / 2); }
+.hero-in { position: relative; max-width: 1440px; margin: 0 auto; min-height: 900px; }
+.field { position: absolute; pointer-events: none; }
+.field--wide { --off: var(--bleed); --offr: var(--bleed); left: 0; top: 0; width: 100%; height: 900px; }
+.field--band { --off: var(--gutter); --offr: 0px; display: none; left: var(--gutter); right: 0; top: 64px; height: 140px; }
+.wall { position: absolute; box-sizing: border-box; border: 3px solid var(--accent); border-left: 0; }
+.field--wide .wall { left: 110px; top: 200px; width: 300px; height: 600px; border-radius: 0 300px 300px 0; box-shadow: 16px 0 70px -24px rgba(var(--accent-rgb), .45), inset -16px 0 50px -24px rgba(var(--accent-rgb), .35); }
+.field--band .wall { left: 0; top: 10px; width: 60px; height: 120px; border-width: 2px; border-radius: 0 60px 60px 0; box-shadow: 6px 0 28px -10px rgba(var(--accent-rgb), .45), inset -6px 0 20px -10px rgba(var(--accent-rgb), .35); }
+.ln { position: absolute; height: 1px; }
+.ln:not(.hz) { right: calc(-1 * var(--offr)); background: linear-gradient(90deg, rgba(255,255,255,.08), rgba(255,255,255,.11) var(--w), rgba(255,255,255,.025) calc(var(--w) + 40px), rgba(255,255,255,0) calc(var(--w) + 420px)); }
+.run { position: absolute; top: -0.5px; left: 0; height: 2px; width: calc(var(--w) + 140px); }
+.run::before { content: ""; position: absolute; top: 0; left: -160px; width: 160px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, rgba(190,200,216,0), rgba(190,200,216,.7)); opacity: 0; }
+.hz { background: linear-gradient(90deg, rgba(var(--accent-rgb), 0), rgba(var(--accent-rgb), .45)); }
+.hz::before { content: ""; position: absolute; top: -0.5px; left: -140px; width: 140px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, rgba(var(--accent-rgb), 0), var(--accent)); opacity: 0; }
+.hz .dot { position: absolute; right: -4px; top: -3.5px; width: 8px; height: 8px; border-radius: 8px; background: var(--accent); }
+.field--band .hz .dot { right: -3px; top: -2.5px; width: 6px; height: 6px; }
+.field--band .run::before { left: -90px; width: 90px; }
+.field--band .hz::before { left: -80px; width: 80px; }
 @media (prefers-reduced-motion: no-preference) {
-  .wind g { animation: arrive 1.4s ease-out both; }
-  @keyframes arrive { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+  .run::before { animation: lsPass calc(var(--dur) * 1.6) linear var(--del) infinite; }
+  .hz::before { animation: lsStop var(--dur) linear var(--del) infinite; }
+  .hz .dot { animation: lsPulse var(--dur) ease-out var(--del) infinite; }
+  .field--band .run::before { animation-name: lsPassS; }
+  .field--band .hz::before { animation-name: lsStopS; }
+  @keyframes lsPass { 0% { left: -160px; opacity: 0; } 8% { opacity: 1; } 70% { opacity: 1; } 100% { left: calc(100% - 160px); opacity: 0; } }
+  @keyframes lsStop { 0% { left: -140px; opacity: 0; } 10% { opacity: 1; } 84% { left: calc(100% - 140px); opacity: 1; } 100% { left: calc(100% - 140px); opacity: 0; } }
+  @keyframes lsPassS { 0% { left: -90px; opacity: 0; } 8% { opacity: 1; } 70% { opacity: 1; } 100% { left: calc(100% - 90px); opacity: 0; } }
+  @keyframes lsStopS { 0% { left: -80px; opacity: 0; } 10% { opacity: 1; } 84% { left: calc(100% - 80px); opacity: 1; } 100% { left: calc(100% - 80px); opacity: 0; } }
+  @keyframes lsPulse { 0%, 80% { transform: scale(1); box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); } 86% { transform: scale(1.5); box-shadow: 0 0 0 4px rgba(var(--accent-rgb), .35); } 100% { transform: scale(1); box-shadow: 0 0 0 14px rgba(var(--accent-rgb), 0); } }
 }
-.nav { position: relative; display: flex; align-items: center; justify-content: space-between; padding: 28px 0 0; }
+
+.nav { position: relative; z-index: 2; display: flex; align-items: center; justify-content: space-between; height: 88px; padding: 0 64px; }
 .brand { display: inline-flex; align-items: center; gap: 12px; font-family: var(--display); font-weight: 300; font-size: 26px; letter-spacing: -0.02em; line-height: 1; }
 .brand svg { width: 26px; height: 26px; }
 .brand .lee-part { color: var(--mist-3); }
 .brand .dot { color: var(--accent); }
-.nav-links { display: flex; gap: 28px; font-size: 15px; color: var(--mist-2); }
+.nav-links { display: flex; align-items: center; gap: 36px; font-size: 15px; color: var(--mist-2); }
 .nav-links a:hover { color: var(--mist); }
-.hero { position: relative; padding: clamp(72px, 11vw, 150px) 0 0; }
-.hero h1 { font-weight: 200; font-size: clamp(44px, 7.2vw, 96px); line-height: 1.02; max-width: 12ch; }
-.hero .lede { margin-top: 28px; font-size: clamp(17px, 1.6vw, 21px); line-height: 1.55; color: var(--mist-2); max-width: 58ch; }
-.install { margin-top: 40px; display: inline-flex; align-items: stretch; max-width: 100%; border: 1px solid var(--line-dark); border-radius: 10px; background: var(--windward-2); }
-.install code { display: block; padding: 14px 18px; font: 400 14.5px/1.5 var(--mono); color: var(--mist); overflow-x: auto; white-space: nowrap; }
-.install code .cmd { color: var(--mist-3); }
-.install button { border: 0; border-left: 1px solid var(--line-dark); background: transparent; color: var(--mist-2); padding: 0 16px; font: 500 13px var(--body); cursor: pointer; }
-.install button:hover { color: var(--mist); }
-.hero-links { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 15px; color: var(--mist-2); }
-.hero-links a { border-bottom: 1px solid var(--line-dark); padding-bottom: 2px; }
-.hero-links a:hover { color: var(--mist); border-color: var(--mist-3); }
-.shot-hero { position: relative; z-index: 2; margin-top: clamp(56px, 7vw, 96px); }
-:root { --overlap: clamp(120px, 20vw, 300px); }
-.windward { padding-bottom: 0; }
-.shot-hero .frame { margin-bottom: 0; }
-.shot-hero { margin-bottom: calc(-1 * var(--overlap)); }
-.lee > .section:first-child { padding-top: calc(var(--overlap) + clamp(64px, 9vw, 128px)); }
+.nav-links .gh { padding: 9px 16px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: var(--mist); }
+.nav-links .gh:hover { border-color: rgba(255,255,255,.3); }
 
-/* Frames hold screenshots */
+.hero-copy { position: relative; z-index: 2; margin: 0 48px 0 470px; min-height: 812px; padding: 24px 0 48px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+.pill { display: inline-flex; align-items: center; gap: 10px; padding: 8px 16px 8px 10px; border: 1px solid rgba(255,255,255,.1); border-radius: 999px; background: rgba(255,255,255,.03); font-size: 14px; line-height: 1.2; color: var(--mist-2); }
+.pill:hover { border-color: rgba(255,255,255,.2); }
+.pill b { font-weight: 500; color: var(--mist); }
+.pill svg { flex: none; width: 16px; height: 16px; }
+.hero h1 { margin-top: 24px; font-weight: 300; font-size: clamp(44px, calc((100vw - 518px) * 0.0825), 76px); line-height: 0.98; letter-spacing: -0.03em; text-wrap: wrap; }
+.hot { color: var(--accent); }
+.hero .lede { margin-top: 22px; max-width: 640px; font-size: 18px; line-height: 1.55; color: var(--mist-2); text-wrap: pretty; }
+.hero .lede b { font-weight: 500; color: var(--mist); white-space: nowrap; }
+
+/* the install, as a terminal with one tab per adapter; dashed means next, as in the engine diagram */
+.term { margin-top: 34px; align-self: stretch; min-width: 0; border-radius: 16px; background: var(--windward-deep); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 40px 100px -30px rgba(0,0,0,.9); overflow: hidden; }
+.term-tabs { display: flex; align-items: stretch; height: 42px; background: var(--windward-2); border-bottom: 1px solid rgba(255,255,255,.08); font: 400 12px/1 var(--mono); overflow-x: auto; scrollbar-width: none; }
+.term-tabs::-webkit-scrollbar { display: none; }
+.tab { position: relative; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 16px; margin: 0; border: 0; border-right: 1px solid rgba(255,255,255,.06); background: transparent; color: var(--mist-3); font: inherit; white-space: nowrap; cursor: pointer; transition: color .15s ease, background-color .15s ease; }
+.tab:hover { color: var(--mist-2); background: rgba(255,255,255,.025); }
+.tab:focus-visible { outline-offset: -3px; }
+.tab .st { color: var(--mist-4); }
+.tab.is-on { background: var(--windward-deep); color: var(--mist); border-right-color: rgba(255,255,255,.08); margin-bottom: -1px; cursor: default; }
+.tab.is-on::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: var(--accent); }
+.tab.is-on .st { color: var(--accent); }
+.tab:hover .ic { opacity: .75; }
+.tab.is-on .ic { opacity: .95; }
+.tab.is-on:not(.is-next) .ic { opacity: 1; filter: invert(66%) sepia(12%) saturate(5510%) hue-rotate(321deg) brightness(102%) contrast(104%); }
+.tab.is-next.is-on::before { background: repeating-linear-gradient(90deg, var(--accent) 0 6px, transparent 6px 10px); }
+.term .ic { flex: none; display: block; width: 15px; height: 15px; filter: invert(1); opacity: .55; }
+.tab-gap { flex: 1; }
+.tab-plat { flex: none; display: none; align-items: center; padding: 0 16px; color: var(--mist-4); white-space: nowrap; }
+.term-body { display: grid; grid-template-columns: minmax(0, 1fr); padding: 22px 24px 24px; font: 400 13.5px/1.5 var(--mono); text-align: left; }
+.panel { grid-area: 1 / 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.panel:not(.is-on) { visibility: hidden; opacity: 0; }
+.cmt { color: var(--mist-4); }
+.cmt.is-gap { margin-top: 8px; }
+.cmd { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 -10px; padding: 0 8px 0 10px; border-radius: 10px; }
+.cmd.is-main { padding-block: 9px; background: rgba(var(--accent-rgb), .08); }
+.cmd.is-wait { margin-top: 4px; padding-block: 8px; border: 1px dashed rgba(var(--accent-rgb), .35); }
+.cmd .line { display: block; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; white-space: nowrap; font: inherit; color: var(--mist); }
+.cmd .line::-webkit-scrollbar { display: none; }
+.cmd .p { color: var(--accent); margin-right: .6em; }
+.cmd .pipe { color: var(--mist-4); margin: 0 .6em; }
+.cmd .arg { color: var(--mist-2); margin-left: .6em; }
+.cur { display: inline-block; width: .6em; height: 1.2em; vertical-align: -0.25em; background: var(--accent); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.copy { flex: none; width: 74px; height: 32px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; background: transparent; color: var(--mist); font: 500 14px/1 var(--body); cursor: pointer; }
+.copy:hover { border-color: rgba(255,255,255,.32); }
+.copy.is-primary { height: 34px; border: 0; background: var(--accent); color: #160B07; }
+.copy.is-primary:hover { background: #FF9372; }
+.act { flex: none; display: inline-flex; align-items: center; height: 34px; padding: 0 14px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; color: var(--mist); font: 500 14px/1 var(--body); white-space: nowrap; }
+.act:hover { border-color: rgba(255,255,255,.32); }
+
+/* adapter, daemon, console: the adapter wire is dashed until it ships */
+.flow { display: flex; align-items: center; margin: 10px 0 6px; font-size: 12px; line-height: 1; }
+.node { flex: none; display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 8px; color: var(--mist-2); white-space: nowrap; }
+.node.is-next { border-style: dashed; border-color: rgba(var(--accent-rgb), .55); color: var(--mist); }
+.node.is-next .ic { width: 14px; height: 14px; opacity: .95; }
+.wire { position: relative; flex: 1 1 0; min-width: 18px; height: 1px; margin: 0 6px 0 4px; background: rgba(255,255,255,.22); }
+.wire::after { content: ""; position: absolute; right: -1px; top: -3px; width: 6px; height: 6px; border-top: 1px solid rgba(255,255,255,.35); border-right: 1px solid rgba(255,255,255,.35); transform: rotate(45deg); }
+.wire.is-next { background: repeating-linear-gradient(90deg, rgba(var(--accent-rgb), .85) 0 5px, transparent 5px 9px); background-size: 9px 1px; }
+.wire.is-next::after { border-color: rgba(var(--accent-rgb), .85); }
+.wl { position: absolute; left: 50%; top: -17px; transform: translateX(-50%); font-size: 10.5px; color: var(--mist-4); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .panel { transition: opacity .2s ease, transform .2s ease, visibility 0s linear .2s; }
+  .panel:not(.is-on) { transform: translateY(4px); }
+  .panel.is-on { transition-delay: 0s; }
+  .wire.is-next { animation: lsFlow .9s linear infinite; }
+  .cur { animation: lsBlink 1.1s steps(1, end) infinite; }
+  @keyframes lsFlow { from { background-position: 0 0; } to { background-position: 9px 0; } }
+  @keyframes lsBlink { 50% { opacity: 0; } }
+}
+@media (min-width: 1440px) {
+  .tab-plat { display: flex; }
+  .cmt-plat { display: none; }
+}
+@media (max-width: 1439px) {
+  .cmd .line { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+}
+
+/* ---------- Console: a second, deeper dark passage ---------- */
+.console { background: var(--windward-deep); color: var(--mist); padding: 112px 0 120px; }
+.console-in { max-width: 1440px; margin: 0 auto; }
+.console-head { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 48px; align-items: end; padding: 0 64px 56px; }
+.console h2 { font-size: clamp(44px, 7.2vw, 104px); line-height: 0.94; letter-spacing: -0.04em; text-wrap: wrap; }
+.console-head p { margin: 0 0 10px; font-size: 18px; line-height: 1.55; color: var(--mist-2); }
+.console-shot { padding: 0 24px; }
+.console .frame { border-color: rgba(255,255,255,.1); box-shadow: none; }
+.console-cap { padding: 14px 64px 0; max-width: none; font-size: 14px; color: var(--mist-3); }
+.states { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 48px; padding: 48px 64px 0; }
+.state { display: flex; flex-direction: column; gap: 12px; padding-top: 24px; border-top: 1px solid rgba(255,255,255,.1); }
+.state h3 { display: flex; align-items: center; gap: 12px; font-size: 30px; line-height: 1; letter-spacing: -0.02em; }
+.state p { font-size: 16px; line-height: 1.55; color: var(--mist-3); }
+.mk { flex: none; width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; }
+.mk-stop { background: var(--accent); }
+.mk-wait { border: 2px solid var(--accent); background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+.mk-watch { border: 2px solid var(--accent); }
+
+/* below the wide layout, the lee wall becomes a band under the nav */
+@media (max-width: 1179px) {
+  .hero-in { min-height: 0; }
+  .field--wide { display: none; }
+  .field--band { display: block; }
+  .nav { height: 64px; padding: 0 var(--gutter); }
+  .hero-copy { margin: 0 var(--gutter); min-height: 0; padding: 156px 0 64px; }
+  .hero h1 { font-size: clamp(36px, 6.4vw, 64px); }
+  .console { padding: clamp(72px, 10vw, 112px) 0 clamp(72px, 10vw, 120px); }
+  .console-head { grid-template-columns: 1fr; gap: 20px; padding: 0 var(--gutter) 40px; }
+  .console-head p { margin: 0; max-width: 46ch; }
+  .console-shot { padding: 0 min(24px, var(--gutter)); }
+  .console-cap { padding: 12px var(--gutter) 0; }
+  .states { padding: 40px var(--gutter) 0; gap: 32px; }
+}
+@media (max-width: 860px) {
+  .states { grid-template-columns: 1fr; gap: 28px; }
+  .state h3 { font-size: 26px; }
+}
+@media (max-width: 640px) {
+  .term-tabs { display: grid; grid-template-columns: 1fr 1fr; height: auto; }
+  .tab { height: 40px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .tab:nth-child(2n) { border-right: 0; }
+  .tab.is-on { margin-bottom: 0; }
+  .tab-gap { display: none; }
+  .term-body { padding: 16px 16px 18px; font-size: 13px; }
+  .cmd { margin: 0 -8px; padding: 0 6px 0 8px; gap: 10px; }
+  .copy { width: 64px; font-size: 13px; }
+  .act { height: 32px; padding: 0 10px; font-size: 13px; }
+  .flow { font-size: 11.5px; }
+  .wl { display: none; }
+  .hero-copy { padding-top: 146px; }
+  .hero h1 { margin-top: 18px; }
+  .hero .lede { margin-top: 16px; font-size: 16.5px; }
+  .term { margin-top: 26px; }
+  .pill { font-size: 13px; }
+}
+@media (max-width: 520px) {
+  .pill-more { display: none; }
+  .wire.is-far, .node.is-far { display: none; }
+}
+
+/* ---------- Frames hold screenshots ---------- */
 .frame { border: 1px solid var(--line-light); border-radius: 12px; overflow: hidden; background: #0D1015; box-shadow: 0 30px 80px -30px rgba(15, 20, 28, 0.45); }
-.windward .frame { border-color: #2A3340; }
 .frame img { display: block; width: 100%; height: auto; }
 .caption { margin-top: 14px; font-size: 14px; color: var(--ink-3); max-width: 70ch; }
 
-/* The lee: light body */
+/* ---------- The lee: light body ---------- */
 .lee { background: var(--lee); }
 .section { padding: clamp(64px, 9vw, 128px) 0 0; }
-.section:last-of-type { padding-bottom: clamp(64px, 9vw, 128px); }
-.section h2 { font-size: clamp(30px, 3.6vw, 46px); line-height: 1.1; max-width: 18ch; }
+.section h2 { font-size: clamp(30px, 3.6vw, 46px); line-height: 1.1; max-width: 20ch; }
 .section > .wrap > p.intro { margin-top: 22px; font-size: 18px; color: var(--ink-2); }
-.loops { margin-top: 48px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border-top: 1px solid var(--line-light); }
-.loop { padding: 28px 28px 0 0; border-top: 1px solid transparent; }
+
+/* incidents */
+.incidents { margin-top: 40px; border-top: 1px solid var(--line-light); }
+.incident { display: grid; grid-template-columns: 200px 250px 1fr; gap: 24px; padding: 18px 0; border-bottom: 1px solid var(--line-light); font-size: 15.5px; line-height: 1.5; }
+.incident .when { color: var(--ink-3); font-size: 14px; padding-top: 2px; }
+.incident .who { color: var(--ink); font-weight: 500; }
+.incident .what { color: var(--ink-2); }
+.cite { margin-top: 14px; font-size: 14px; color: var(--ink-3); max-width: none; }
+.cite a { color: var(--ink-2); border-bottom: 1px solid var(--line-light); }
+.cite a:hover { color: var(--ink); border-color: var(--ink-3); }
+
+/* threats */
+.threats { margin-top: 44px; border-top: 1px solid var(--line-light); }
+.threats-head { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr; gap: 24px; padding: 0 0 10px; font-size: 14px; color: var(--ink-3); }
+.threat { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr; gap: 24px; padding: 20px 0; border-bottom: 1px solid var(--line-light); }
+.threat h3 { font-size: 20px; line-height: 1.25; }
+.threat h3 small { display: block; font-family: var(--body); font-size: 14px; color: var(--ink-3); margin-top: 4px; font-weight: 400; }
+.threat p { font-size: 15.5px; color: var(--ink-2); line-height: 1.5; }
+.threat p code { font-size: 13.5px; color: var(--ink); }
+.threat .does { color: var(--ink); }
+
+/* engine diagram */
+.engine { margin-top: 48px; display: grid; grid-template-columns: 240px 84px 1fr 84px 220px; align-items: center; gap: 0; }
+.adapters { display: grid; gap: 10px; }
+.adapter { display: grid; grid-template-columns: 36px 1fr auto; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--line-light); border-radius: 10px; background: var(--lee-2); }
+.adapter.is-next { background: transparent; border-style: dashed; }
+.adapter img { width: 22px; height: 22px; display: block; margin: 0 auto; opacity: 0.9; }
+.adapter.is-next img { opacity: 0.55; }
+.adapter .name { font-weight: 500; font-size: 15px; line-height: 1.2; }
+.adapter .name small { display: block; font-weight: 400; font-size: 12.5px; color: var(--ink-3); margin-top: 2px; }
+.adapter .status { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: var(--ink); color: var(--lee); }
+.adapter.is-next .status { background: transparent; border: 1px solid var(--line-light); color: var(--ink-3); }
+.link { position: relative; height: 1px; background: var(--line-light); }
+.link::after { content: ""; position: absolute; right: -1px; top: -3px; width: 6px; height: 6px; border-top: 1px solid var(--ink-3); border-right: 1px solid var(--ink-3); transform: rotate(45deg); }
+.link span { position: absolute; left: 50%; top: -22px; transform: translateX(-50%); white-space: nowrap; font-size: 11.5px; color: var(--ink-3); }
+.daemon { border: 1px solid var(--ink); border-radius: 14px; padding: 18px 20px; background: var(--lee-2); }
+.daemon h3 { font-size: 22px; line-height: 1.2; }
+.daemon h3 small { display: block; font-family: var(--body); font-size: 13.5px; color: var(--ink-3); font-weight: 400; margin-top: 2px; }
+.daemon ul { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+.daemon li { font-size: 14.5px; color: var(--ink-2); padding-left: 14px; position: relative; }
+.daemon li::before { content: ""; position: absolute; left: 0; top: 10px; width: 6px; height: 1px; background: var(--ink-3); }
+.daemon li b { font-weight: 500; color: var(--ink); }
+.side { border: 1px solid var(--accent-deep); border-radius: 14px; padding: 16px 18px; background: var(--lee-2); }
+.side h3 { font-size: 18px; line-height: 1.25; }
+.side h3 small { display: block; font-family: var(--body); font-size: 13px; color: var(--ink-3); font-weight: 400; margin-top: 2px; }
+.side p { font-size: 13.5px; color: var(--ink-2); margin-top: 10px; line-height: 1.5; }
+.engine-note { margin-top: 26px; font-size: 15px; color: var(--ink-2); max-width: 70ch; }
+
+/* loops */
+.loops { margin-top: 48px; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line-light); }
+.loop { padding: 28px 28px 0 0; }
 .loop + .loop { border-left: 1px solid var(--line-light); padding-left: 28px; }
 .loop h3 { font-size: 22px; line-height: 1.2; }
 .loop .cadence { display: block; margin-top: 6px; font-size: 14px; color: var(--ink-3); }
 .loop p { margin-top: 16px; font-size: 16px; color: var(--ink-2); }
-.parts { margin-top: 48px; display: grid; grid-template-columns: 220px 1fr; row-gap: 28px; column-gap: 32px; border-top: 1px solid var(--line-light); padding-top: 28px; }
-.parts dt { font-family: var(--display); font-weight: 300; font-size: 24px; line-height: 1.2; }
-.parts dt small { display: block; font-family: var(--body); font-size: 14px; color: var(--ink-3); margin-top: 4px; }
-.parts dd { margin: 0; color: var(--ink-2); max-width: 64ch; }
 .shot { margin-top: 48px; }
-.evals { margin-top: 40px; display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 40px; align-items: start; }
-table { border-collapse: collapse; width: 100%; font-size: 16px; }
-th, td { text-align: left; padding: 12px 0; border-bottom: 1px solid var(--line-light); }
-th { font-weight: 500; color: var(--ink-3); font-size: 14px; }
-td.num { font-family: var(--mono); font-size: 15px; }
-tr.now td { font-weight: 500; }
-tr.now td.num:last-child { color: var(--accent-deep); }
-.evals p { color: var(--ink-2); }
-.evals p + p { margin-top: 14px; }
+
+/* dark interlude: Muse */
+.section.dark { background: var(--windward); color: var(--mist); padding-bottom: clamp(64px, 9vw, 128px); margin-top: clamp(64px, 9vw, 128px); }
+.section.dark .dim { color: var(--mist-3); }
+.muse { margin-top: 40px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 56px; align-items: start; }
+.muse p { color: var(--mist-2); }
+.muse p + p { margin-top: 14px; }
+.muse .built { margin-top: 22px; font-size: 14px; color: var(--mist-3); }
+.muse table { border-collapse: collapse; width: 100%; font-size: 16px; }
+.muse th, .muse td { text-align: left; padding: 12px 0; border-bottom: 1px solid var(--line-dark); }
+.muse th { font-weight: 500; color: var(--mist-3); font-size: 14px; }
+.muse td.num { font-family: var(--mono); font-size: 15px; }
+.muse tr.now td { font-weight: 500; }
+.muse tr.now td.num:last-child { color: var(--accent); }
+.muse .tablenote { margin-top: 14px; font-size: 13.5px; color: var(--mist-3); }
+.checks { margin-top: 28px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.check { padding: 16px 18px; border: 1px solid var(--line-dark); border-radius: 12px; background: var(--windward-2); }
+.check b { display: block; font-weight: 500; font-size: 15px; color: var(--mist); }
+.check span { display: block; margin-top: 6px; font-size: 14px; color: var(--mist-2); line-height: 1.5; }
+
+/* install */
 .steps { margin-top: 36px; display: grid; gap: 22px; max-width: 760px; }
 .steps pre { margin: 0; padding: 16px 18px; border: 1px solid var(--line-light); border-radius: 10px; background: var(--lee-2); font: 400 14px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
 .steps p { color: var(--ink-2); }
 .steps .lead { color: var(--ink); }
+.section.last { padding-bottom: clamp(64px, 9vw, 128px); }
 footer { border-top: 1px solid var(--line-light); padding: 36px 0 56px; font-size: 14px; color: var(--ink-3); }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; align-items: center; }
 footer nav { display: flex; gap: 24px; }
 footer a:hover { color: var(--ink); }
 
+@media (max-width: 960px) {
+  .engine { grid-template-columns: 1fr; gap: 18px; }
+  .link { width: 1px; height: 36px; margin-left: 28px; }
+  .link::after { right: -3px; top: auto; bottom: -1px; transform: rotate(135deg); }
+  .link span { left: 14px; top: 50%; transform: translateY(-50%); }
+}
 @media (max-width: 860px) {
+  .incident { grid-template-columns: 1fr; gap: 3px; padding: 16px 0; }
+  .threat, .threats-head { grid-template-columns: 1fr; gap: 8px; }
+  .threats-head { display: none; }
+  .threat { padding: 22px 0; }
   .loops { grid-template-columns: 1fr; }
   .loop + .loop { border-left: 0; border-top: 1px solid var(--line-light); padding-left: 0; }
-  .parts { grid-template-columns: 1fr; row-gap: 8px; }
-  .parts dd { margin-bottom: 20px; }
-  .evals { grid-template-columns: 1fr; }
+  .muse { grid-template-columns: 1fr; }
+  .checks { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
-  .nav-links { gap: 18px; font-size: 14px; }
-  .install { display: flex; }
-  .install code { font-size: 13px; }
+  .nav-links { gap: 16px; font-size: 14px; }
+  .nav-links .gh { padding: 7px 12px; }
+  .nav-links a { white-space: nowrap; }
+  .nav-links a:nth-child(-n+2) { display: none; }
 }
 </style>
-</head>
-<body>
-
-<header class="windward">
-  <svg class="wind" viewBox="0 0 1440 180" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="1300" y1="0" y2="0"><stop offset="0" stop-color="#AEB7C2"/><stop offset="1" stop-color="#AEB7C2" stop-opacity="0"/></linearGradient></defs><g stroke-width="1" stroke-linecap="round" vector-effect="non-scaling-stroke"><line x1="0" y1="10" x2="979" y2="10" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.27"/><line x1="0" y1="27" x2="1080" y2="27" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.29"/><line x1="0" y1="39" x2="1142" y2="39" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.22"/><line x1="180" y1="53" x2="1289" y2="53" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.24"/><line x1="0" y1="70" x2="807" y2="70" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.24"/><line x1="90" y1="82" x2="596" y2="82" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.22"/><line x1="0" y1="97" x2="1000" y2="97" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.37"/><line x1="180" y1="108" x2="529" y2="108" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.21"/><line x1="0" y1="117" x2="1012" y2="117" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.23"/><line x1="0" y1="128" x2="516" y2="128" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.26"/><line x1="260" y1="140" x2="1377" y2="140" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.34"/><line x1="0" y1="152" x2="927" y2="152" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.23"/><line x1="0" y1="167" x2="242" y2="167" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.27"/></g></svg>
-  <div class="wrap">
+<header class="hero">
+  <div class="hero-in">
+    <div class="field field--wide" aria-hidden="true"><span class="wall"></span><span class="ln" style="left:calc(0px - var(--off));top:136px;--dur:4.43s;--del:-0.00s;--w:calc(420.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(30px - var(--off));top:168px;--dur:3.26s;--del:-2.57s;--w:calc(390.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(0px - var(--off));top:200px;--dur:5.09s;--del:-2.95s;--w:calc(420.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(50px - var(--off));top:232px;--dur:3.91s;--del:-1.44s;--w:calc(185.8px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(10px - var(--off));top:264px;--dur:5.74s;--del:-0.91s;width:calc(276.2px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(0px - var(--off));top:296px;--dur:4.57s;--del:-4.32s;--w:calc(321.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(40px - var(--off));top:328px;--dur:3.39s;--del:-2.50s;--w:calc(306.8px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(0px - var(--off));top:360px;--dur:5.22s;--del:-2.75s;width:calc(366.3px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(20px - var(--off));top:392px;--dur:4.04s;--del:-1.28s;--w:calc(360.9px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(60px - var(--off));top:424px;--dur:5.87s;--del:-0.62s;--w:calc(331.2px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(0px - var(--off));top:456px;--dur:4.70s;--del:-4.20s;width:calc(397.8px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(10px - var(--off));top:488px;--dur:3.52s;--del:-2.41s;--w:calc(390.8px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(0px - var(--off));top:520px;--dur:5.35s;--del:-2.53s;--w:calc(400.3px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(30px - var(--off));top:552px;--dur:4.17s;--del:-1.10s;width:calc(366.5px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(0px - var(--off));top:584px;--dur:3.00s;--del:-0.16s;--w:calc(389.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(50px - var(--off));top:616px;--dur:4.83s;--del:-4.06s;--w:calc(327.7px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(10px - var(--off));top:648px;--dur:3.65s;--del:-2.31s;width:calc(352.0px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(0px - var(--off));top:680px;--dur:5.48s;--del:-2.31s;--w:calc(341.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(40px - var(--off));top:712px;--dur:4.30s;--del:-0.91s;--w:calc(273.3px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(0px - var(--off));top:744px;--dur:3.13s;--del:-0.00s;width:calc(275.5px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(20px - var(--off));top:776px;--dur:4.96s;--del:-3.91s;--w:calc(198.6px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(60px - var(--off));top:808px;--dur:3.78s;--del:-2.19s;--w:calc(360.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(0px - var(--off));top:840px;--dur:5.61s;--del:-2.07s;--w:calc(420.0px + var(--off))"><span class="run"></span></span></div>
+    <div class="field field--band" aria-hidden="true"><span class="wall"></span><span class="ln" style="left:calc(0px - var(--off));top:6px;--dur:4.43s;--del:-0.00s;--w:calc(70.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(10px - var(--off));top:18px;--dur:3.26s;--del:-2.57s;--w:calc(18.1px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(0px - var(--off));top:30px;--dur:5.09s;--del:-2.95s;width:calc(42.9px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(16px - var(--off));top:42px;--dur:3.91s;--del:-1.44s;--w:calc(35.3px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(4px - var(--off));top:54px;--dur:5.74s;--del:-0.91s;--w:calc(52.0px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(0px - var(--off));top:66px;--dur:4.57s;--del:-4.32s;width:calc(58.1px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(12px - var(--off));top:78px;--dur:3.39s;--del:-2.50s;--w:calc(45.7px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(0px - var(--off));top:90px;--dur:5.22s;--del:-2.75s;--w:calc(54.8px + var(--off))"><span class="run"></span></span><span class="ln hz" style="left:calc(6px - var(--off));top:102px;--dur:4.04s;--del:-1.28s;width:calc(43.0px + var(--off))"><span class="dot"></span></span><span class="ln" style="left:calc(18px - var(--off));top:114px;--dur:5.87s;--del:-0.62s;--w:calc(21.0px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(0px - var(--off));top:126px;--dur:4.70s;--del:-4.20s;--w:calc(19.7px + var(--off))"><span class="run"></span></span><span class="ln" style="left:calc(4px - var(--off));top:138px;--dur:3.52s;--del:-2.41s;--w:calc(66.0px + var(--off))"><span class="run"></span></span></div>
     <nav class="nav" aria-label="Site">
       <a class="brand" href="#top" id="top" aria-label="Leeside, home">
         <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h6.2M3 12h8M3 16h5" stroke="#E8ECF1" stroke-width="2.2"/><path d="M14.2 3.6c4.3 1.4 6.8 4.6 6.8 8.4s-2.5 7-6.8 8.4" stroke="#FF7F5C" stroke-width="2.2"/></svg>
         <span><span class="lee-part">lee</span>side<span class="dot">.</span></span>
       </a>
       <div class="nav-links">
-        <a href="#how">How it works</a>
+        <a href="#threats">What it stops</a>
+        <a href="#engine">How it's built</a>
         <a href="#install">Install</a>
-        <a href="https://github.com/MassvHalo/Leeside">GitHub</a>
+        <a class="gh" href="https://github.com/MassvHalo/Leeside">GitHub</a>
       </div>
     </nav>
 
-    <section class="hero">
-      <h1><span class="dim">The lee side of</span><br>your Laravel app.</h1>
-      <p class="lede">Leeside is a request-security layer for Laravel. A Composer package captures the shape of every request, a Rust daemon judges it in under a millisecond, and a console at <code>/windside</code> on your own domain explains every call it makes.</p>
-      <div class="install">
-        <code id="oneliner"><span class="cmd">$</span> curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash</code>
-        <button type="button" data-copy="curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash">Copy</button>
+    <div class="hero-copy">
+      <a class="pill" href="#muse"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.4" stroke="#FF7F5C" stroke-width="1.6"/><circle cx="8" cy="8" r="2" fill="#FF7F5C"/></svg><span><b>Built with Muse Spark Open</b><span class="pill-more">, Meta's open-weights model</span></span></a>
+      <h1><span class="dim">Rogue AI agents hit</span><br>the SEC and Hugging&nbsp;Face.<br><span class="hot">Is yours next?</span></h1>
+      <p class="lede">Leeside recognises the actor behind every request, blocks and rate-limits what its rules already know in milliseconds, and has <b>Muse Spark Open</b> explain anything new, with evidence, so a person only steps in to teach it.</p>
+      <div class="term">
+        <div class="term-tabs" role="tablist" aria-label="Adapters">
+          <button type="button" class="tab is-on" role="tab" id="tab-laravel" aria-selected="true" aria-controls="panel-laravel"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+TGFyYXZlbDwvdGl0bGU+PHBhdGggZD0iTTIzLjY0MiA1LjQzYS4zNjQuMzY0IDAgMDEuMDE0LjF2NS4xNDljMCAuMTM1LS4wNzMuMjYtLjE4OS4zMjZsLTQuMzIzIDIuNDl2NC45MzRhLjM3OC4zNzggMCAwMS0uMTg4LjMyNkw5LjkzIDIzLjk0OWEuMzE2LjMxNiAwIDAxLS4wNjYuMDI3Yy0uMDA4LjAwMi0uMDE2LjAwOC0uMDI0LjAxYS4zNDguMzQ4IDAgMDEtLjE5MiAwYy0uMDExLS4wMDItLjAyLS4wMDgtLjAzLS4wMTItLjAyLS4wMDgtLjA0Mi0uMDE0LS4wNjItLjAyNUwuNTMzIDE4Ljc1NWEuMzc2LjM3NiAwIDAxLS4xODktLjMyNlYyLjk3NGMwLS4wMzMuMDA1LS4wNjYuMDE0LS4wOTguMDAzLS4wMTIuMDEtLjAyLjAxNC0uMDMyYS4zNjkuMzY5IDAgMDEuMDIzLS4wNThjLjAwNC0uMDEzLjAxNS0uMDIyLjAyMy0uMDMzbC4wMzMtLjA0NWMuMDEyLS4wMS4wMjUtLjAxOC4wMzctLjAyNy4wMTQtLjAxMi4wMjctLjAyNC4wNDEtLjAzNEguNTNMNS4wNDMuMDVhLjM3NS4zNzUgMCAwMS4zNzUgMEw5LjkzIDIuNjQ3aC4wMDJjLjAxNS4wMS4wMjcuMDIxLjA0LjAzM2wuMDM4LjAyN2MuMDEzLjAxNC4wMi4wMy4wMzMuMDQ1LjAwOC4wMTEuMDIuMDIxLjAyNS4wMzMuMDEuMDIuMDE3LjAzOC4wMjQuMDU4LjAwMy4wMTEuMDEuMDIxLjAxMy4wMzIuMDEuMDMxLjAxNC4wNjQuMDE0LjA5OHY5LjY1MmwzLjc2LTIuMTY0VjUuNTI3YzAtLjAzMy4wMDQtLjA2Ni4wMTMtLjA5OC4wMDMtLjAxLjAxLS4wMi4wMTMtLjAzMmEuNDg3LjQ4NyAwIDAxLjAyNC0uMDU5Yy4wMDctLjAxMi4wMTgtLjAyLjAyNS0uMDMzLjAxMi0uMDE1LjAyMS0uMDMuMDMzLS4wNDMuMDEyLS4wMTIuMDI1LS4wMi4wMzctLjAyOC4wMTQtLjAxLjAyNi0uMDIzLjA0MS0uMDMyaC4wMDFsNC41MTMtMi41OThhLjM3NS4zNzUgMCAwMS4zNzUgMGw0LjUxMyAyLjU5OGMuMDE2LjAxLjAyNy4wMjEuMDQyLjAzMS4wMTIuMDEuMDI1LjAxOC4wMzYuMDI4LjAxMy4wMTQuMDIyLjAzLjAzNC4wNDQuMDA4LjAxMi4wMTkuMDIxLjAyNC4wMzMuMDExLjAyLjAxOC4wNC4wMjQuMDYuMDA2LjAxLjAxMi4wMjEuMDE1LjAzMnptLS43NCA1LjAzMlY2LjE3OWwtMS41NzguOTA4LTIuMTgyIDEuMjU2djQuMjgzem0tNC41MSA3Ljc1di00LjI4N2wtMi4xNDcgMS4yMjUtNi4xMjYgMy40OTh2NC4zMjV6TTEuMDkzIDMuNjI0djE0LjU4OGw4LjI3MyA0Ljc2MXYtNC4zMjVsLTQuMzIyLTIuNDQ1LS4wMDItLjAwM0g1LjA0Yy0uMDE0LS4wMS0uMDI1LS4wMjEtLjA0LS4wMzEtLjAxMS0uMDEtLjAyNC0uMDE4LS4wMzUtLjAyN2wtLjAwMS0uMDAyYy0uMDEzLS4wMTItLjAyMS0uMDI1LS4wMzEtLjA0LS4wMS0uMDExLS4wMjEtLjAyMi0uMDI4LS4wMzZoLS4wMDJjLS4wMDgtLjAxNC0uMDEzLS4wMzEtLjAyLS4wNDctLjAwNi0uMDE2LS4wMTQtLjAyNy0uMDE4LS4wNDNhLjQ5LjQ5IDAgMDEtLjAwOC0uMDU3Yy0uMDAyLS4wMTQtLjAwNi0uMDI3LS4wMDYtLjA0MVY1Ljc4OWwtMi4xOC0xLjI1N3pNNS4yMy44MUwxLjQ3IDIuOTc0bDMuNzYgMi4xNjQgMy43NTgtMi4xNjR6bTEuOTU2IDEzLjUwNWwyLjE4Mi0xLjI1NlYzLjYyNGwtMS41OC45MS0yLjE4MiAxLjI1NXY5LjQzNXptMTEuNTgxLTEwLjk1bC0zLjc2IDIuMTYzIDMuNzYgMi4xNjMgMy43NTktMi4xNjR6bS0uMzc2IDQuOTc4TDE2LjIxIDcuMDg3IDE0LjYzIDYuMTh2NC4yODNsMi4xODIgMS4yNTYgMS41OC45MDh6bS04LjY1IDkuNjU0bDUuNTE0LTMuMTQ4IDIuNzU2LTEuNTcyLTMuNzU3LTIuMTYzLTQuMzIzIDIuNDg5LTMuOTQxIDIuMjd6Ii8+PC9zdmc+" alt="" width="15" height="15">laravel<span class="st">shipped</span></button>
+          <button type="button" class="tab is-next" role="tab" id="tab-dotnet" aria-selected="false" aria-controls="panel-dotnet" tabindex="-1"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+Lk5FVDwvdGl0bGU+PHBhdGggZD0iTTI0IDguNzdoLTIuNDY4djcuNTY1aC0xLjQyNVY4Ljc3aC0yLjQ2MlY3LjUzSDI0em0tNi44NTIgNy41NjVoLTQuODIxVjcuNTNoNC42M3YxLjI0aC0zLjIwNXYyLjQ5NGgyLjk1M3YxLjIzNGgtMi45NTN2Mi42MDRoMy4zOTZ6bS02LjcwOCAwSDguODgyTDQuNzggOS44NjNhMi44OTYgMi44OTYgMCAwIDEtLjI1OC0uNTFoLS4wMzZjLjAzMi4xODkuMDQ4LjU5Mi4wNDggMS4yMXY1Ljc3MkgzLjE1N1Y3LjUzaDEuNjU5bDMuOTY1IDYuMzJjLjE2Ny4yNjEuMjc1LjQ0Mi4zMjMuNTRoLjAyNGMtLjA0LS4yMzMtLjA2LS42MjktLjA2LTEuMTg1VjcuNTI5aDEuMzcyem0tOC43MDMtLjY5M2EuODY4LjgyOSAwIDAgMS0uODY5LjgyOS44NjguODI5IDAgMCAxLS44NjgtLjgzLjg2OC44MjkgMCAwIDEgLjg2OC0uODI4Ljg2OC44MjkgMCAwIDEgLjg2OS44MjlaIi8+PC9zdmc+" alt="" width="15" height="15">asp.net core<span class="st">next</span></button>
+          <button type="button" class="tab is-next" role="tab" id="tab-django" aria-selected="false" aria-controls="panel-django" tabindex="-1"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RGphbmdvPC90aXRsZT48cGF0aCBkPSJNMTEuMTQ2IDBoMy45MjR2MTguMTY2Yy0yLjAxMy4zODItMy40OTEuNTM1LTUuMDk2LjUzNS00Ljc5MSAwLTcuMjg4LTIuMTY2LTcuMjg4LTYuMzIgMC00LjAwMiAyLjY1LTYuNiA2Ljc1My02LjYuNjM3IDAgMS4xMjEuMDUgMS43MDcuMjAzem0wIDkuMTQzYTMuODk0IDMuODk0IDAgMDAtMS4zMjUtLjIwNGMtMS45ODggMC0zLjEzNCAxLjIyMy0zLjEzNCAzLjM2NSAwIDIuMDkgMS4wOTYgMy4yMzYgMy4xMDkgMy4yMzYuNDMzIDAgLjc5LS4wMjUgMS4zNS0uMTAyVjkuMTQyek0yMS4zMTQgNi4wNnY5LjA5OGMwIDMuMTM0LS4yMjkgNC42MzgtLjkxNyA1LjkzNy0uNjM3IDEuMjQ5LTEuNDc4IDIuMDM5LTMuMjExIDIuOTA1bC0zLjY0NC0xLjczM2MxLjczMy0uODE1IDIuNTc0LTEuNTMgMy4xMDktMi42MjUuNTYxLTEuMTIxLjczOS0yLjQyMS43MzktNS44MzVWNi4wNTloMy45MjR6TTE3LjM5LjAyMWgzLjkyNHY0LjAyNkgxNy4zOXoiLz48L3N2Zz4=" alt="" width="15" height="15">django<span class="st">next</span></button>
+          <button type="button" class="tab is-next" role="tab" id="tab-express" aria-selected="false" aria-controls="panel-express" tabindex="-1"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RXhwcmVzczwvdGl0bGU+PHBhdGggZD0iTTI0IDE4LjU4OGExLjUyOSAxLjUyOSAwIDAxLTEuODk1LS43MmwtMy40NS00Ljc3MS0uNS0uNjY3LTQuMDAzIDUuNDQ0YTEuNDY2IDEuNDY2IDAgMDEtMS44MDIuNzA4bDUuMTU4LTYuOTItNC43OTgtNi4yNTFhMS41OTUgMS41OTUgMCAwMTEuOS42NjZsMy41NzYgNC44MyAzLjU5Ni00LjgxYTEuNDM1IDEuNDM1IDAgMDExLjc4OC0uNjY4TDIxLjcwOCA3LjlsLTIuNTIyIDMuMjgzYS42NjYuNjY2IDAgMDAwIC45OTRsNC44MDQgNi40MTJ6TS4wMDIgMTEuNTc2bC40Mi0yLjA3NWMxLjE1NC00LjEwMyA1Ljg1OC01LjgxIDkuMDk0LTMuMjcgMS44OTUgMS40ODkgMi4zNjggMy41OTcgMi4yNzUgNS45NzNIMS4xMTZDLjk0MyAxNi40NDcgNC4wMDUgMTkuMDA5IDcuOTIgMTcuN2E0LjA3OCA0LjA3OCAwIDAwMi41ODItMi44NzZjLjIwNy0uNjY2LjU0OC0uNzggMS4xNzQtLjU4OGE1LjQxNyA1LjQxNyAwIDAxLTIuNTg5IDMuOTU3IDYuMjcyIDYuMjcyIDAgMDEtNy4zMDYtLjkzMyA2LjU3NSA2LjU3NSAwIDAxLTEuNjQtMy44NThjMC0uMjM1LS4wOC0uNDU1LS4xMzQtLjY2NkE4OC4zMyA4OC4zMyAwIDAxMCAxMS41Nzd6bTEuMTI3LS4yODZoOS42NTRjLS4wNi0zLjA3Ni0yLjAwMS01LjI1OC00LjU5LTUuMjc4LTIuODgyLS4wNC00Ljk0NCAyLjA5NC01LjA3MSA1LjI2NHoiLz48L3N2Zz4=" alt="" width="15" height="15">express<span class="st">next</span></button>
+          <span class="tab-gap"></span>
+          <span class="tab-plat">ubuntu 22.04 · 24.04 · 26.04 · x86_64 · arm</span>
+        </div>
+        <div class="term-body">
+          <div class="panel is-on" role="tabpanel" id="panel-laravel" aria-labelledby="tab-laravel">
+            <div class="cmt"># one line to put your web app on the lee side</div>
+            <div class="cmd is-main"><code class="line" id="oneliner"><span class="p">$</span>curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh<span class="pipe">|</span>sudo bash</code><button type="button" class="copy is-primary" data-copy="curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash">Copy</button></div>
+            <div class="cmt is-gap"># then, in the app</div>
+            <div class="cmd"><code class="line"><span class="p">$</span>composer require<span class="arg">'leeside/laravel:@dev'</span></code><button type="button" class="copy" data-copy="composer require 'leeside/laravel:@dev'">Copy</button></div>
+            <div class="cmt is-gap cmt-plat"># ubuntu 22.04 · 24.04 · 26.04 · x86_64 · arm</div>
+          </div>
+          <div class="panel" role="tabpanel" id="panel-dotnet" aria-labelledby="tab-dotnet">
+            <div class="cmt"># asp.net core middleware is next</div>
+            <div class="flow" aria-hidden="true"><span class="node is-next"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+Lk5FVDwvdGl0bGU+PHBhdGggZD0iTTI0IDguNzdoLTIuNDY4djcuNTY1aC0xLjQyNVY4Ljc3aC0yLjQ2MlY3LjUzSDI0em0tNi44NTIgNy41NjVoLTQuODIxVjcuNTNoNC42M3YxLjI0aC0zLjIwNXYyLjQ5NGgyLjk1M3YxLjIzNGgtMi45NTN2Mi42MDRoMy4zOTZ6bS02LjcwOCAwSDguODgyTDQuNzggOS44NjNhMi44OTYgMi44OTYgMCAwIDEtLjI1OC0uNTFoLS4wMzZjLjAzMi4xODkuMDQ4LjU5Mi4wNDggMS4yMXY1Ljc3MkgzLjE1N1Y3LjUzaDEuNjU5bDMuOTY1IDYuMzJjLjE2Ny4yNjEuMjc1LjQ0Mi4zMjMuNTRoLjAyNGMtLjA0LS4yMzMtLjA2LS42MjktLjA2LTEuMTg1VjcuNTI5aDEuMzcyem0tOC43MDMtLjY5M2EuODY4LjgyOSAwIDAgMS0uODY5LjgyOS44NjguODI5IDAgMCAxLS44NjgtLjgzLjg2OC44MjkgMCAwIDEgLjg2OC0uODI4Ljg2OC44MjkgMCAwIDEgLjg2OS44MjlaIi8+PC9zdmc+" alt="" width="15" height="15">asp.net core</span><span class="wire is-next"><span class="wl">events</span></span><span class="node">leesided</span><span class="wire is-far"></span><span class="node is-far">/windside</span></div>
+            <div class="cmt"># same daemon, same model, same console at /windside. only the adapter is new.</div>
+            <div class="cmd is-wait"><span class="line"><span class="p">$</span><span class="cur" aria-hidden="true"></span><span class="sr">The install line for asp.net core will appear here when it ships.</span></span><a class="act" href="https://github.com/MassvHalo/Leeside">Watch on GitHub</a></div>
+          </div>
+          <div class="panel" role="tabpanel" id="panel-django" aria-labelledby="tab-django">
+            <div class="cmt"># django middleware is next</div>
+            <div class="flow" aria-hidden="true"><span class="node is-next"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RGphbmdvPC90aXRsZT48cGF0aCBkPSJNMTEuMTQ2IDBoMy45MjR2MTguMTY2Yy0yLjAxMy4zODItMy40OTEuNTM1LTUuMDk2LjUzNS00Ljc5MSAwLTcuMjg4LTIuMTY2LTcuMjg4LTYuMzIgMC00LjAwMiAyLjY1LTYuNiA2Ljc1My02LjYuNjM3IDAgMS4xMjEuMDUgMS43MDcuMjAzem0wIDkuMTQzYTMuODk0IDMuODk0IDAgMDAtMS4zMjUtLjIwNGMtMS45ODggMC0zLjEzNCAxLjIyMy0zLjEzNCAzLjM2NSAwIDIuMDkgMS4wOTYgMy4yMzYgMy4xMDkgMy4yMzYuNDMzIDAgLjc5LS4wMjUgMS4zNS0uMTAyVjkuMTQyek0yMS4zMTQgNi4wNnY5LjA5OGMwIDMuMTM0LS4yMjkgNC42MzgtLjkxNyA1LjkzNy0uNjM3IDEuMjQ5LTEuNDc4IDIuMDM5LTMuMjExIDIuOTA1bC0zLjY0NC0xLjczM2MxLjczMy0uODE1IDIuNTc0LTEuNTMgMy4xMDktMi42MjUuNTYxLTEuMTIxLjczOS0yLjQyMS43MzktNS44MzVWNi4wNTloMy45MjR6TTE3LjM5LjAyMWgzLjkyNHY0LjAyNkgxNy4zOXoiLz48L3N2Zz4=" alt="" width="15" height="15">django</span><span class="wire is-next"><span class="wl">events</span></span><span class="node">leesided</span><span class="wire is-far"></span><span class="node is-far">/windside</span></div>
+            <div class="cmt"># same daemon, same model, same console at /windside. only the adapter is new.</div>
+            <div class="cmd is-wait"><span class="line"><span class="p">$</span><span class="cur" aria-hidden="true"></span><span class="sr">The install line for django will appear here when it ships.</span></span><a class="act" href="https://github.com/MassvHalo/Leeside">Watch on GitHub</a></div>
+          </div>
+          <div class="panel" role="tabpanel" id="panel-express" aria-labelledby="tab-express">
+            <div class="cmt"># express middleware for node.js is next</div>
+            <div class="flow" aria-hidden="true"><span class="node is-next"><img class="ic" src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RXhwcmVzczwvdGl0bGU+PHBhdGggZD0iTTI0IDE4LjU4OGExLjUyOSAxLjUyOSAwIDAxLTEuODk1LS43MmwtMy40NS00Ljc3MS0uNS0uNjY3LTQuMDAzIDUuNDQ0YTEuNDY2IDEuNDY2IDAgMDEtMS44MDIuNzA4bDUuMTU4LTYuOTItNC43OTgtNi4yNTFhMS41OTUgMS41OTUgMCAwMTEuOS42NjZsMy41NzYgNC44MyAzLjU5Ni00LjgxYTEuNDM1IDEuNDM1IDAgMDExLjc4OC0uNjY4TDIxLjcwOCA3LjlsLTIuNTIyIDMuMjgzYS42NjYuNjY2IDAgMDAwIC45OTRsNC44MDQgNi40MTJ6TS4wMDIgMTEuNTc2bC40Mi0yLjA3NWMxLjE1NC00LjEwMyA1Ljg1OC01LjgxIDkuMDk0LTMuMjcgMS44OTUgMS40ODkgMi4zNjggMy41OTcgMi4yNzUgNS45NzNIMS4xMTZDLjk0MyAxNi40NDcgNC4wMDUgMTkuMDA5IDcuOTIgMTcuN2E0LjA3OCA0LjA3OCAwIDAwMi41ODItMi44NzZjLjIwNy0uNjY2LjU0OC0uNzggMS4xNzQtLjU4OGE1LjQxNyA1LjQxNyAwIDAxLTIuNTg5IDMuOTU3IDYuMjcyIDYuMjcyIDAgMDEtNy4zMDYtLjkzMyA2LjU3NSA2LjU3NSAwIDAxLTEuNjQtMy44NThjMC0uMjM1LS4wOC0uNDU1LS4xMzQtLjY2NkE4OC4zMyA4OC4zMyAwIDAxMCAxMS41Nzd6bTEuMTI3LS4yODZoOS42NTRjLS4wNi0zLjA3Ni0yLjAwMS01LjI1OC00LjU5LTUuMjc4LTIuODgyLS4wNC00Ljk0NCAyLjA5NC01LjA3MSA1LjI2NHoiLz48L3N2Zz4=" alt="" width="15" height="15">express</span><span class="wire is-next"><span class="wl">events</span></span><span class="node">leesided</span><span class="wire is-far"></span><span class="node is-far">/windside</span></div>
+            <div class="cmt"># same daemon, same model, same console at /windside. only the adapter is new.</div>
+            <div class="cmd is-wait"><span class="line"><span class="p">$</span><span class="cur" aria-hidden="true"></span><span class="sr">The install line for express will appear here when it ships.</span></span><a class="act" href="https://github.com/MassvHalo/Leeside">Watch on GitHub</a></div>
+          </div>
+        </div>
       </div>
-      <div class="hero-links">
-        <a href="https://github.com/MassvHalo/Leeside">Read the source</a>
-        <a href="https://github.com/MassvHalo/Leeside/releases/latest">Latest release</a>
-        <a href="#judgement">See a judgement</a>
-      </div>
-    </section>
-
-    <div class="shot-hero">
-      <div class="frame"><img src="assets/console-dashboard.png" width="1440" height="1264" alt="The Windside dashboard: a headline reading 8 attacks in 24 hours, 3 stopped by rules; a traffic histogram with stopped, waiting and watched markers; a list of episodes with one selected and its story in four steps." loading="eager"></div>
     </div>
   </div>
 </header>
 
+<section class="console" id="console">
+  <div class="console-in">
+    <div class="console-head">
+      <h2>Every attack<br>gets a name,<br><span class="hot">and a verdict.</span></h2>
+      <p>Leeside turns raw traffic into short stories you can act on, and shows its working.</p>
+    </div>
+    <div class="console-shot">
+      <div class="frame"><img src="assets/console-dashboard.png" width="1440" height="1264" alt="The Windside dashboard: a headline reading 8 attacks in 24 hours, 3 stopped by rules; a traffic histogram with stopped, waiting and watched markers; a list of episodes with one selected and its story in four steps." loading="lazy"></div>
+    </div>
+    <p class="console-cap">Sample data from the design build.</p>
+    <div class="states">
+      <div class="state"><h3><span class="mk mk-stop" aria-hidden="true"></span>Stopped</h3><p>A rule caught it. Leeside slowed or refused it, and tells you how.</p></div>
+      <div class="state"><h3><span class="mk mk-wait" aria-hidden="true"></span>Waiting on you</h3><p>Looks hostile, but a person makes the call. The evidence is already laid out.</p></div>
+      <div class="state"><h3><span class="mk mk-watch" aria-hidden="true"></span>Watched</h3><p>Odd, not harmful yet. Kept in view in case it becomes something.</p></div>
+    </div>
+  </div>
+</section>
+
 <main class="lee">
+  <section class="section" id="incidents">
+    <div class="wrap">
+      <h2>What rogue agents did this year, <span class="dim">on the record.</span></h2>
+      <p class="intro">Outside researchers found most of it by searching the open web for traces of the agents. These are the incidents behind the headline, with the reports they come from.</p>
+      <div class="incidents" aria-label="Incidents in 2026">
+        <div class="incident"><span class="when">May to July 2026</span><span class="who">A high-school chemistry wiki</span><span class="what">Nearly thirty edits by OpenAI's agents, leaving links so they could help each other with tasks.</span></div>
+        <div class="incident"><span class="when">Disclosed July 2026</span><span class="who">Hugging Face</span><span class="what">A swarm escaped its sandbox and attacked the site; OpenAI said two of its models were responsible.</span></div>
+        <div class="incident"><span class="when">Disclosed September 2026</span><span class="who">SEC and Census Bureau sites</span><span class="what">Public data reached, and a failed hack attempt on an Education Department site, which the department says had no impact.</span></div>
+      </div>
+      <p class="cite">Reported by <a href="https://fortune.com/2026/09/09/openai-rogue-ai-agents-reached-12-more-websites/">Fortune</a> and <a href="https://www.cbsnews.com/news/openai-ai-agent-bot-rogue-hack-government-website/">CBS News</a>, September 2026.</p>
+    </div>
+  </section>
+
+  <section class="section" id="threats">
+    <div class="wrap">
+      <h2>What's at the door, <span class="dim">and what happens to it.</span></h2>
+      <p class="intro">Each of these is recognised by a named signal or rule in Leeside, not a feeling. Rules act in milliseconds; the Windside score and the assistant's judgement decide what a person is asked to confirm.</p>
+      <div class="threats">
+        <div class="threats-head"><span>What arrives</span><span>How Leeside recognises it</span><span>What happens</span></div>
+        <div class="threat">
+          <h3>Wordlist scanners<small>/.env, /wp-login.php, /phpinfo.php, /.git/config</small></h3>
+          <p>Probe paths from a curated wordlist, a 404 rate that no person produces, and a client whose TLS handshake doesn't match the browser it claims to be. Signals <code>scanner_paths</code> and <code>high_404_rate</code>.</p>
+          <p class="does">Scored as it happens and proposed as malicious with the cited turns; one keystroke confirms it. Switch the install's 404-scan rule from shadow to enforce and the sweep is blocked for ten minutes after twenty misses.</p>
+        </div>
+        <div class="threat">
+          <h3>Credential stuffing and code guessing<small>login forms, OTP prompts, password resets</small></h3>
+          <p>Failed logins counted per peer in a ten-minute window, with the rejected actions kept as evidence. Signal <code>credential_stuffing</code>.</p>
+          <p class="does">Rate limited after the tenth miss, in enforce mode, with the burst reported as one episode on the dashboard.</p>
+        </div>
+        <div class="threat">
+          <h3>API-key spraying<small>trying keys against your API and webhook routes</small></h3>
+          <p>Rejected keys per peer across the API and webhook surfaces. Signal <code>rejected_actions</code>.</p>
+          <p class="does">Rate limited after five rejected keys; vouched partner keys are never touched.</p>
+        </div>
+        <div class="threat">
+          <h3>Forged webhooks<small>payloads that claim to come from a provider</small></h3>
+          <p>Your app verifies the signature ahead of the gate; Leeside counts the failures per sender. Signal <code>webhook_forgery</code>, decisive on its own.</p>
+          <p class="does">Refused, and the sender is labelled without waiting for more turns.</p>
+        </div>
+        <div class="threat">
+          <h3>Bots posing as browsers<small>a Python library wearing a Chrome User-Agent</small></h3>
+          <p>User-Agent family checked against the TLS fingerprint (JA4) from a passive tap, plus the Client Hints and fetch-metadata headers a real browser always sends. Flags <code>ua_vs_ja4_mismatch</code> and <code>ua_chromium_no_ch</code>.</p>
+          <p class="does">Flagged on every turn and weighed by the Windside score; the actor page shows the claim and the handshake side by side.</p>
+        </div>
+        <div class="threat">
+          <h3>Injection payloads<small>SQL injection, XSS, path traversal, template and command injection</small></h3>
+          <p>Thirty-one curated patterns in five classes, matched on the request and attached to the turn as a hint. Signal <code>attack_payload</code>, decisive on its own.</p>
+          <p class="does">Labelled malicious on first sight, without a warm-up window.</p>
+        </div>
+        <div class="threat">
+          <h3>Scrapers walking your ids<small>/venues/37, /venues/38, /venues/39, every 1.6 seconds</small></h3>
+          <p>Request cadence with too little variation for a person, the same route repeated across ids, and the share of turns that hit nothing. Signal <code>machine_cadence</code> and the model's cadence and route-spread features.</p>
+          <p class="does">Scored and watched; proposed for review when the score crosses the threshold with no rule to explain it.</p>
+        </div>
+        <div class="threat">
+          <h3>Honeytoken touches<small>routes that no legitimate client is ever told about</small></h3>
+          <p>You name the honeytoken routes once; any touch is a signal on its own. Signal <code>honeytoken_hit</code>.</p>
+          <p class="does">Labelled on the first touch and shown on the dashboard as "Crawlers touched a hidden trap".</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="engine">
+    <div class="wrap">
+      <h2>One engine, <span class="dim">one adapter per framework.</span></h2>
+      <p class="intro">Nothing in Leeside that judges a request knows which framework produced it. An adapter captures the request shape inside the app, hashes identifiers with your key, and emits one event over a local socket in under a millisecond. Everything after that works on events.</p>
+      <div class="engine">
+        <div class="adapters" aria-label="Adapters">
+          <div class="adapter"><img src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+TGFyYXZlbDwvdGl0bGU+PHBhdGggZD0iTTIzLjY0MiA1LjQzYS4zNjQuMzY0IDAgMDEuMDE0LjF2NS4xNDljMCAuMTM1LS4wNzMuMjYtLjE4OS4zMjZsLTQuMzIzIDIuNDl2NC45MzRhLjM3OC4zNzggMCAwMS0uMTg4LjMyNkw5LjkzIDIzLjk0OWEuMzE2LjMxNiAwIDAxLS4wNjYuMDI3Yy0uMDA4LjAwMi0uMDE2LjAwOC0uMDI0LjAxYS4zNDguMzQ4IDAgMDEtLjE5MiAwYy0uMDExLS4wMDItLjAyLS4wMDgtLjAzLS4wMTItLjAyLS4wMDgtLjA0Mi0uMDE0LS4wNjItLjAyNUwuNTMzIDE4Ljc1NWEuMzc2LjM3NiAwIDAxLS4xODktLjMyNlYyLjk3NGMwLS4wMzMuMDA1LS4wNjYuMDE0LS4wOTguMDAzLS4wMTIuMDEtLjAyLjAxNC0uMDMyYS4zNjkuMzY5IDAgMDEuMDIzLS4wNThjLjAwNC0uMDEzLjAxNS0uMDIyLjAyMy0uMDMzbC4wMzMtLjA0NWMuMDEyLS4wMS4wMjUtLjAxOC4wMzctLjAyNy4wMTQtLjAxMi4wMjctLjAyNC4wNDEtLjAzNEguNTNMNS4wNDMuMDVhLjM3NS4zNzUgMCAwMS4zNzUgMEw5LjkzIDIuNjQ3aC4wMDJjLjAxNS4wMS4wMjcuMDIxLjA0LjAzM2wuMDM4LjAyN2MuMDEzLjAxNC4wMi4wMy4wMzMuMDQ1LjAwOC4wMTEuMDIuMDIxLjAyNS4wMzMuMDEuMDIuMDE3LjAzOC4wMjQuMDU4LjAwMy4wMTEuMDEuMDIxLjAxMy4wMzIuMDEuMDMxLjAxNC4wNjQuMDE0LjA5OHY5LjY1MmwzLjc2LTIuMTY0VjUuNTI3YzAtLjAzMy4wMDQtLjA2Ni4wMTMtLjA5OC4wMDMtLjAxLjAxLS4wMi4wMTMtLjAzMmEuNDg3LjQ4NyAwIDAxLjAyNC0uMDU5Yy4wMDctLjAxMi4wMTgtLjAyLjAyNS0uMDMzLjAxMi0uMDE1LjAyMS0uMDMuMDMzLS4wNDMuMDEyLS4wMTIuMDI1LS4wMi4wMzctLjAyOC4wMTQtLjAxLjAyNi0uMDIzLjA0MS0uMDMyaC4wMDFsNC41MTMtMi41OThhLjM3NS4zNzUgMCAwMS4zNzUgMGw0LjUxMyAyLjU5OGMuMDE2LjAxLjAyNy4wMjEuMDQyLjAzMS4wMTIuMDEuMDI1LjAxOC4wMzYuMDI4LjAxMy4wMTQuMDIyLjAzLjAzNC4wNDQuMDA4LjAxMi4wMTkuMDIxLjAyNC4wMzMuMDExLjAyLjAxOC4wNC4wMjQuMDYuMDA2LjAxLjAxMi4wMjEuMDE1LjAzMnptLS43NCA1LjAzMlY2LjE3OWwtMS41NzguOTA4LTIuMTgyIDEuMjU2djQuMjgzem0tNC41MSA3Ljc1di00LjI4N2wtMi4xNDcgMS4yMjUtNi4xMjYgMy40OTh2NC4zMjV6TTEuMDkzIDMuNjI0djE0LjU4OGw4LjI3MyA0Ljc2MXYtNC4zMjVsLTQuMzIyLTIuNDQ1LS4wMDItLjAwM0g1LjA0Yy0uMDE0LS4wMS0uMDI1LS4wMjEtLjA0LS4wMzEtLjAxMS0uMDEtLjAyNC0uMDE4LS4wMzUtLjAyN2wtLjAwMS0uMDAyYy0uMDEzLS4wMTItLjAyMS0uMDI1LS4wMzEtLjA0LS4wMS0uMDExLS4wMjEtLjAyMi0uMDI4LS4wMzZoLS4wMDJjLS4wMDgtLjAxNC0uMDEzLS4wMzEtLjAyLS4wNDctLjAwNi0uMDE2LS4wMTQtLjAyNy0uMDE4LS4wNDNhLjQ5LjQ5IDAgMDEtLjAwOC0uMDU3Yy0uMDAyLS4wMTQtLjAwNi0uMDI3LS4wMDYtLjA0MVY1Ljc4OWwtMi4xOC0xLjI1N3pNNS4yMy44MUwxLjQ3IDIuOTc0bDMuNzYgMi4xNjQgMy43NTgtMi4xNjR6bTEuOTU2IDEzLjUwNWwyLjE4Mi0xLjI1NlYzLjYyNGwtMS41OC45MS0yLjE4MiAxLjI1NXY5LjQzNXptMTEuNTgxLTEwLjk1bC0zLjc2IDIuMTYzIDMuNzYgMi4xNjMgMy43NTktMi4xNjR6bS0uMzc2IDQuOTc4TDE2LjIxIDcuMDg3IDE0LjYzIDYuMTh2NC4yODNsMi4xODIgMS4yNTYgMS41OC45MDh6bS04LjY1IDkuNjU0bDUuNTE0LTMuMTQ4IDIuNzU2LTEuNTcyLTMuNzU3LTIuMTYzLTQuMzIzIDIuNDg5LTMuOTQxIDIuMjd6Ii8+PC9zdmc+" alt="" width="22" height="22"><span class="name">Laravel<small>Composer package, 0.1.0</small></span><span class="status">Shipped</span></div>
+          <div class="adapter is-next"><img src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+Lk5FVDwvdGl0bGU+PHBhdGggZD0iTTI0IDguNzdoLTIuNDY4djcuNTY1aC0xLjQyNVY4Ljc3aC0yLjQ2MlY3LjUzSDI0em0tNi44NTIgNy41NjVoLTQuODIxVjcuNTNoNC42M3YxLjI0aC0zLjIwNXYyLjQ5NGgyLjk1M3YxLjIzNGgtMi45NTN2Mi42MDRoMy4zOTZ6bS02LjcwOCAwSDguODgyTDQuNzggOS44NjNhMi44OTYgMi44OTYgMCAwIDEtLjI1OC0uNTFoLS4wMzZjLjAzMi4xODkuMDQ4LjU5Mi4wNDggMS4yMXY1Ljc3MkgzLjE1N1Y3LjUzaDEuNjU5bDMuOTY1IDYuMzJjLjE2Ny4yNjEuMjc1LjQ0Mi4zMjMuNTRoLjAyNGMtLjA0LS4yMzMtLjA2LS42MjktLjA2LTEuMTg1VjcuNTI5aDEuMzcyem0tOC43MDMtLjY5M2EuODY4LjgyOSAwIDAgMS0uODY5LjgyOS44NjguODI5IDAgMCAxLS44NjgtLjgzLjg2OC44MjkgMCAwIDEgLjg2OC0uODI4Ljg2OC44MjkgMCAwIDEgLjg2OS44MjlaIi8+PC9zdmc+" alt="" width="22" height="22"><span class="name">ASP.NET Core<small>middleware</small></span><span class="status">Next</span></div>
+          <div class="adapter is-next"><img src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RGphbmdvPC90aXRsZT48cGF0aCBkPSJNMTEuMTQ2IDBoMy45MjR2MTguMTY2Yy0yLjAxMy4zODItMy40OTEuNTM1LTUuMDk2LjUzNS00Ljc5MSAwLTcuMjg4LTIuMTY2LTcuMjg4LTYuMzIgMC00LjAwMiAyLjY1LTYuNiA2Ljc1My02LjYuNjM3IDAgMS4xMjEuMDUgMS43MDcuMjAzem0wIDkuMTQzYTMuODk0IDMuODk0IDAgMDAtMS4zMjUtLjIwNGMtMS45ODggMC0zLjEzNCAxLjIyMy0zLjEzNCAzLjM2NSAwIDIuMDkgMS4wOTYgMy4yMzYgMy4xMDkgMy4yMzYuNDMzIDAgLjc5LS4wMjUgMS4zNS0uMTAyVjkuMTQyek0yMS4zMTQgNi4wNnY5LjA5OGMwIDMuMTM0LS4yMjkgNC42MzgtLjkxNyA1LjkzNy0uNjM3IDEuMjQ5LTEuNDc4IDIuMDM5LTMuMjExIDIuOTA1bC0zLjY0NC0xLjczM2MxLjczMy0uODE1IDIuNTc0LTEuNTMgMy4xMDktMi42MjUuNTYxLTEuMTIxLjczOS0yLjQyMS43MzktNS44MzVWNi4wNTloMy45MjR6TTE3LjM5LjAyMWgzLjkyNHY0LjAyNkgxNy4zOXoiLz48L3N2Zz4=" alt="" width="22" height="22"><span class="name">Django<small>middleware</small></span><span class="status">Next</span></div>
+          <div class="adapter is-next"><img src="data:image/svg+xml;base64,PHN2ZyByb2xlPSJpbWciIHZpZXdCb3g9IjAgMCAyNCAyNCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48dGl0bGU+RXhwcmVzczwvdGl0bGU+PHBhdGggZD0iTTI0IDE4LjU4OGExLjUyOSAxLjUyOSAwIDAxLTEuODk1LS43MmwtMy40NS00Ljc3MS0uNS0uNjY3LTQuMDAzIDUuNDQ0YTEuNDY2IDEuNDY2IDAgMDEtMS44MDIuNzA4bDUuMTU4LTYuOTItNC43OTgtNi4yNTFhMS41OTUgMS41OTUgMCAwMTEuOS42NjZsMy41NzYgNC44MyAzLjU5Ni00LjgxYTEuNDM1IDEuNDM1IDAgMDExLjc4OC0uNjY4TDIxLjcwOCA3LjlsLTIuNTIyIDMuMjgzYS42NjYuNjY2IDAgMDAwIC45OTRsNC44MDQgNi40MTJ6TS4wMDIgMTEuNTc2bC40Mi0yLjA3NWMxLjE1NC00LjEwMyA1Ljg1OC01LjgxIDkuMDk0LTMuMjcgMS44OTUgMS40ODkgMi4zNjggMy41OTcgMi4yNzUgNS45NzNIMS4xMTZDLjk0MyAxNi40NDcgNC4wMDUgMTkuMDA5IDcuOTIgMTcuN2E0LjA3OCA0LjA3OCAwIDAwMi41ODItMi44NzZjLjIwNy0uNjY2LjU0OC0uNzggMS4xNzQtLjU4OGE1LjQxNyA1LjQxNyAwIDAxLTIuNTg5IDMuOTU3IDYuMjcyIDYuMjcyIDAgMDEtNy4zMDYtLjkzMyA2LjU3NSA2LjU3NSAwIDAxLTEuNjQtMy44NThjMC0uMjM1LS4wOC0uNDU1LS4xMzQtLjY2NkE4OC4zMyA4OC4zMyAwIDAxMCAxMS41Nzd6bTEuMTI3LS4yODZoOS42NTRjLS4wNi0zLjA3Ni0yLjAwMS01LjI1OC00LjU5LTUuMjc4LTIuODgyLS4wNC00Ljk0NCAyLjA5NC01LjA3MSA1LjI2NHoiLz48L3N2Zz4=" alt="" width="22" height="22"><span class="name">Express<small>Node.js middleware</small></span><span class="status">Next</span></div>
+        </div>
+        <div class="link" aria-hidden="true"><span>events</span></div>
+        <div class="daemon">
+          <h3>leesided<small>one Rust daemon over SQLite, bound to localhost</small></h3>
+          <ul>
+            <li><b>Rules</b> you can read, in enforce, shadow or monitor mode, answering on the request path.</li>
+            <li><b>Windside score</b>, a LightGBM model over 38 per-actor features, retrained from the labels you confirm.</li>
+            <li><b>Actors</b> stitched from session tags, credentials and fingerprints, with a passive tap adding each connection's TLS fingerprint.</li>
+            <li><b>The console</b> at <code>/windside</code> on your own domain: dashboard, review queue, actor pages, every stored column.</li>
+          </ul>
+        </div>
+        <div class="link" aria-hidden="true"><span>on the side</span></div>
+        <div class="side">
+          <h3>Muse Spark Open<small>Meta's open-weights model, via Baseten</small></h3>
+          <p>Labels, explanations and rule drafts with per-signal citations, every one checked against the stored turns before a person sees it. Never on the request path.</p>
+        </div>
+      </div>
+      <p class="engine-note">The adapter contract is small on purpose: method, route, status, timing, client shape, fingerprints from the proxy headers, and the hashes of anything that identifies a person. The three adapters marked next implement that contract against the same daemon, the same model and the same console; none of them is built yet, and the Laravel package is the one you can install today.</p>
+    </div>
+  </section>
+
   <section class="section" id="how">
     <div class="wrap">
       <h2>Three loops, <span class="dim">one judgement at a time.</span></h2>
@@ -185,17 +536,17 @@ footer a:hover { color: var(--ink); }
         <div class="loop">
           <h3>Every request</h3>
           <span class="cadence">milliseconds, on the request path</span>
-          <p>Rules you can read, plus a Windside score from a small classifier trained on your own traffic. Shadow mode scores without acting so you can watch it first; enforce mode rate-limits or blocks.</p>
+          <p>Rules you can read, plus a Windside score from a small classifier trained on your own traffic. Shadow mode scores without acting so you can watch it first; enforce mode rate-limits or blocks. Auto-blocking is built in and under your hand: it starts in monitor, every rule can be held at shadow, and one switch in the console turns enforcement on or off.</p>
         </div>
         <div class="loop">
           <h3>Every hour</h3>
           <span class="cadence">the assistant, off the request path</span>
-          <p>When something new shows up, Muse Spark reads the actor's recent turns and proposes a label, an explanation and sometimes a rule. Each signal it cites is checked against the turns, and a claim with no evidence is dropped before anyone sees it.</p>
+          <p>When something new shows up, Muse Spark Open, Meta's open-weights model, reads the actor's recent turns and proposes a label, an explanation and sometimes a rule. Each signal it cites is checked against the turns, and a claim with no evidence is struck out before anyone sees it.</p>
         </div>
         <div class="loop">
           <h3>Every week</h3>
           <span class="cadence">you, in the review queue</span>
-          <p>Confirm or reject with one key. Confirmed labels retrain the model, accepted drafts become rules, and rejected proposals teach the next prompt. Nothing learns without a person saying so.</p>
+          <p>Confirm or reject with one key. Confirmed labels retrain the model, accepted drafts become rules, and rejected proposals teach the next prompt. Nothing learns without a person saying so, and autopilot, off by default, can act on the decisive cases and ask you afterwards.</p>
         </div>
       </div>
     </div>
@@ -204,68 +555,61 @@ footer a:hover { color: var(--ink); }
   <section class="section" id="judgement">
     <div class="wrap">
       <h2>Every call, <span class="dim">shown with its evidence.</span></h2>
-      <p class="intro">A proposal in the review queue puts the model's score beside the rules, lists each signal with the turns it cites, strikes through the one that failed its check, and gives you three keys to decide.</p>
+      <p class="intro">A proposal from Muse Spark Open in the review queue puts the Windside score beside the rules, lists each signal with the turns it cites, strikes through the one that failed its check, and gives you three keys to decide.</p>
       <div class="shot">
-        <div class="frame"><img src="assets/console-review.png" width="1440" height="1180" alt="The review queue: five items waiting, the first selected; the detail shows a proposed malicious label at 0.93, a Windside score of 0.97 past the threshold, signals scanner_paths, high_404_rate and ua_inconsistent passing with cited turns, machine_cadence failed and struck through, and the last twenty turns with the cited ones highlighted." loading="lazy"></div>
+        <div class="frame"><img src="assets/console-review.png" width="1440" height="1180" alt="The review queue: five items waiting, the first selected; the detail shows a proposed malicious label at 0.93, a Windside score of 0.97 past the threshold, signals scanner_paths, high_404_rate and ua_inconsistent passing with cited turns, machine_cadence failed and struck through, and the last twenty turns with the cited ones highlighted." loading="eager"></div>
         <p class="caption">Sample data from the design build. The actor page behind the Open actor link shows identity bindings, client fingerprints, activity, the score's top features, labels, decisions and a Raw tab with every stored column.</p>
       </div>
     </div>
   </section>
 
-  <section class="section" id="parts">
+  <section class="section dark" id="muse">
     <div class="wrap">
-      <h2>Four parts, <span class="dim">one box.</span></h2>
-      <dl class="parts">
-        <dt>leeside-laravel<small>Composer package</small></dt>
-        <dd>Captures method, route, status, timing, client shape and fingerprints for every request. IPs, user agents and tokens are hashed with your key before anything leaves the app, so the store never holds them. Adds under a millisecond per request.</dd>
-        <dt>leesided<small>Rust daemon</small></dt>
-        <dd>Holds the rules, the scoring, the review queue and the console in one process over SQLite, bound to localhost. Your nginx serves <code>/windside</code> from the same server block as the app; a read-only viewer token lets you share the console without sharing the keys.</dd>
-        <dt>Windside<small>the classifier</small></dt>
-        <dd>A LightGBM model over 38 per-actor features: cadence, status mix, route spread, request shape, network neighbours. A passive tap adds each connection's TLS fingerprint, so a client that claims to be Chrome is checked against what its handshake says. Model 0.1.0 runs in shadow today.</dd>
-        <dt>The assistant<small>Muse Spark</small></dt>
-        <dd>Labels, explanations, classifications and rule drafts, each with per-signal citations and a daily budget. Off by default; one key turns it on, and every prompt change is measured against the last one before it ships.</dd>
-      </dl>
-    </div>
-  </section>
-
-  <section class="section" id="evals">
-    <div class="wrap">
-      <h2>Measured, <span class="dim">not promised.</span></h2>
-      <div class="evals">
-        <table>
-          <thead><tr><th>Eval</th><th>Rows</th><th>Agreement</th></tr></thead>
-          <tbody>
-            <tr><td>1</td><td class="num">10</td><td class="num">0.20</td></tr>
-            <tr><td>3</td><td class="num">142</td><td class="num">0.80</td></tr>
-            <tr><td>5</td><td class="num">156</td><td class="num">0.92</td></tr>
-            <tr class="now"><td>7</td><td class="num">148</td><td class="num">0.971 ± 0.009</td></tr>
-          </tbody>
-        </table>
+      <h2>Muse Spark Open,<br><span class="dim">on the side, and checked.</span></h2>
+      <div class="muse">
         <div>
-          <p>Agreement between the assistant's labels and a reviewed golden set, scored the way production scores: after the evidence checks, not before. Eval 7 is three runs over 148 rows; the spread is the run-to-run variation of the model at the margin.</p>
-          <p>Each prompt is content-addressed, so any two versions can be compared row by row before one replaces the other. The golden set comes from traffic to our own sample app; wider sets are the next step, and the numbers will move.</p>
+          <p>The assistant is Muse Spark Open, Meta's open-weights model, served through Baseten. It never sits on the request path. When an actor crosses a threshold, lands in the review queue, or shows a pattern Leeside hasn't seen, it reads the last turns and returns a label with a confidence, an explanation in plain words, and sometimes a rule draft, with every signal naming the turns it rests on.</p>
+          <p>Leeside then checks each citation against the stored turns. A signal with no evidence is struck out before anyone sees it, and a proposal with no surviving evidence is downgraded to unknown. What reaches you is only what the data supports, and the three keys that act on it write a label the next model is trained on.</p>
+          <p class="built">Built with Muse Spark Open, under the Muse Model License.</p>
         </div>
+        <div>
+          <table>
+            <thead><tr><th>Eval</th><th>Rows</th><th>Agreement</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td class="num">10</td><td class="num">0.20</td></tr>
+              <tr><td>3</td><td class="num">142</td><td class="num">0.80</td></tr>
+              <tr><td>5</td><td class="num">156</td><td class="num">0.92</td></tr>
+              <tr class="now"><td>7</td><td class="num">148</td><td class="num">0.971 ± 0.009</td></tr>
+            </tbody>
+          </table>
+          <p class="tablenote">Agreement with a reviewed golden set, scored the way production scores: after the evidence checks. Eval 7 is three runs over 148 rows; the spread is the run-to-run variation. Each prompt is content-addressed and compared row by row with the last before it ships. The set comes from traffic to our own sample app; wider sets are next.</p>
+        </div>
+      </div>
+      <div class="checks">
+        <div class="check"><b>Cites or it doesn't count</b><span>Every signal names the turns it rests on. A signal with no turns behind it is struck out, not trusted.</span></div>
+        <div class="check"><b>Cold starts say so</b><span>Under ten turns, the honest answer is unknown, unless a decisive signal like a forged webhook or an injection payload settles it.</span></div>
+        <div class="check"><b>Budgeted by default</b><span>Five hundred calls and five hundred thousand tokens a day per point, set in one env file, and off entirely without a key.</span></div>
       </div>
     </div>
   </section>
 
-  <section class="section" id="install">
+  <section class="section last" id="install">
     <div class="wrap">
       <h2>Install <span class="dim">on a box that already runs your app.</span></h2>
       <div class="steps">
-        <p class="lead">One line as root on Ubuntu 22.04 or 24.04. It installs the daemon and the tap, writes a root-only environment file, wires <code>/windside</code> into your app's nginx server block, and prints the Laravel steps once.</p>
+        <p class="lead">One line as root on Ubuntu 22.04, 24.04 or 26.04, x86_64 or ARM. It installs the daemon and the tap, writes a root-only environment file, wires <code>/windside</code> into your app's nginx server block, and prints the Laravel steps once.</p>
         <pre>curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash</pre>
-        <p>Then, in the app:</p>
-        <pre>composer require leeside/laravel
+        <p>Then, in the Laravel app:</p>
+        <pre>composer require 'leeside/laravel:@dev'
 # add the printed LEESIDE_* keys to .env; the provider registers its middleware</pre>
-        <p>You get two tokens: an admin token that stays on the box, and a viewer token for anyone who should see the console but change nothing. A Baseten key turns the assistant on; without one, rules and the Windside score still run.</p>
+        <p>You choose the admin password at install (12 characters or more, mixed); a generated viewer token lets anyone see the console and change nothing. Fresh installs start in monitor: the global mode and the install rules watch only, until you turn enforcement on from Settings in the console. A Baseten key turns the assistant on; without one, rules and the Windside score still run.</p>
       </div>
     </div>
   </section>
 
   <footer>
     <div class="wrap">
-      <span>MIT licensed. © 2026 MassvHalo Pvt Ltd. Built for the Meta Global AI Developer Hackathon.</span>
+      <span>MIT licensed. © 2026 MassvHalo Pvt Ltd. Built for the Meta Global AI Developer Hackathon. Built with Muse Spark Open.</span>
       <nav aria-label="Links">
         <a href="https://github.com/MassvHalo/Leeside">Source</a>
         <a href="https://github.com/MassvHalo/Leeside/releases">Releases</a>
@@ -276,14 +620,44 @@ footer a:hover { color: var(--ink); }
 </main>
 
 <script>
+(function () {
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.term [role="tab"]'));
+  function select(t, focus) {
+    tabs.forEach(function (x) {
+      var on = x === t;
+      x.classList.toggle('is-on', on);
+      x.setAttribute('aria-selected', on ? 'true' : 'false');
+      x.tabIndex = on ? 0 : -1;
+      var panel = document.getElementById(x.getAttribute('aria-controls'));
+      if (panel) panel.classList.toggle('is-on', on);
+    });
+    if (focus) t.focus();
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { select(t); });
+    t.addEventListener('keydown', function (e) {
+      var j = -1;
+      if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') j = 0;
+      else if (e.key === 'End') j = tabs.length - 1;
+      if (j >= 0) { e.preventDefault(); select(tabs[j], true); }
+    });
+  });
+})();
 document.querySelectorAll('[data-copy]').forEach(function (b) {
   b.addEventListener('click', function () {
     var t = b.getAttribute('data-copy');
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(t).then(function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); });
+    function done() { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); }
+    function select() {
+      var line = b.parentNode.querySelector('.line');
+      if (!line) return;
+      var r = document.createRange(); r.selectNodeContents(line);
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
     }
+    try { navigator.clipboard.writeText(t).then(done, select); } catch (e) { select(); }
   });
 });
 </script>
-</body>
-</html>
+
+</body></html>
