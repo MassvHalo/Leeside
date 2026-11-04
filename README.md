@@ -31,7 +31,7 @@ What's next: flip Windside from shadow to active after the shadow week,
 per-surface windows and fingerprint features for v3, and the designed console
 on the same data layer.
 
-Install on an Ubuntu 22.04 or 24.04 box that already hosts a Laravel app
+Install on an Ubuntu 22.04, 24.04 or 26.04 box that already hosts a Laravel app
 behind nginx:
 
 ```bash
@@ -44,10 +44,13 @@ before `curl` never reaches it. Swap in the app's domain.
 Turn enforcement on: fresh installs watch only; the global mode starts at monitor and the install rules start as shadow, so run both steps when you are ready for Leeside to act; PUT /mode {"mode":"monitor"} is the kill switch.
 
 ```bash
-source /etc/leeside/leesided.env
-curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer $LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
-for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.1:7390/rules/$(basename "$f" .json)" -H "Authorization: Bearer $LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d @"$f"; echo; done
+TOKEN=$(grep ^LEESIDED_API_TOKEN= /etc/leeside/leesided.env | cut -d= -f2-)
+curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
+for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.1:7390/rules/$(basename "$f" .json)" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d @"$f"; echo; done
 ```
+
+To change the admin password later, edit LEESIDED_API_TOKEN in
+/etc/leeside/leesided.env and restart leesided.
 
 The release ships `leesided` for x86_64 and aarch64; the installer picks
 the asset matching the box. Anything else builds from source.

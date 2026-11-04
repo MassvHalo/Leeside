@@ -256,7 +256,7 @@ fn layout(title: &str, active: &str, body: &str, prefix: &str, role: Option<Role
 
 pub fn login_page(next: &str, error: Option<&str>, prefix: &str) -> String {
     let mut body =
-        String::from("<h1>Log in to Windside</h1><p class=\"sub\">Operator or viewer token.</p>");
+        String::from("<h1>Log in to Windside</h1><p class=\"sub\">the admin password, or the viewer token for read-only access.</p>");
     if let Some(e) = error {
         let _ = write!(body, "<p class=\"error\">{}</p>", esc(e));
     }
@@ -264,7 +264,7 @@ pub fn login_page(next: &str, error: Option<&str>, prefix: &str) -> String {
         body,
         "<form class=\"login\" method=\"post\" action=\"{prefix}/login\">\
          <input type=\"hidden\" name=\"next\" value=\"{}\">\
-         <label>Token<br><input type=\"password\" name=\"token\" autofocus></label><br>\
+         <label>Password<br><input type=\"password\" name=\"token\" autofocus></label><br>\
          <input class=\"btn\" type=\"submit\" value=\"Log in\"></form>",
         esc(next),
     );

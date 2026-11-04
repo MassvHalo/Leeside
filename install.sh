@@ -67,8 +67,8 @@ bin_name() {
 }
 
 distro_ok() {
-    # distro_ok <ID> <VERSION_ID>; succeeds on Ubuntu 22.04/24.04.
-    if [ "$1" = "ubuntu" ] && { [ "$2" = "22.04" ] || [ "$2" = "24.04" ]; }; then
+    # distro_ok <ID> <VERSION_ID>; succeeds on Ubuntu 22.04/24.04/26.04.
+    if [ "$1" = "ubuntu" ] && { [ "$2" = "22.04" ] || [ "$2" = "24.04" ] || [ "$2" = "26.04" ]; }; then
         return 0
     fi
     return 1
@@ -78,7 +78,7 @@ check_distro() {
     [ -r /etc/os-release ] || die "no /etc/os-release; cannot tell the distro." "run on Ubuntu 22.04 or 24.04"
     # shellcheck disable=SC1091
     . /etc/os-release
-    distro_ok "${ID:-}" "${VERSION_ID:-}" || die "this is ${ID:-unknown} ${VERSION_ID:-unknown}; need Ubuntu 22.04 or 24.04." "run on Ubuntu 22.04 or 24.04"
+    distro_ok "${ID:-}" "${VERSION_ID:-}" || die "this is ${ID:-unknown} ${VERSION_ID:-unknown}; need Ubuntu 22.04, 24.04 or 26.04." "run on Ubuntu 22.04, 24.04 or 26.04"
 }
 
 check_www_data() {
@@ -86,9 +86,10 @@ check_www_data() {
 }
 
 apt_base() {
-    # $1 is VERSION_ID; the pcap package renamed in 24.04 (t64 transition).
+    # $1 is VERSION_ID; the pcap package renamed in 24.04 (t64 transition)
+    # and keeps the t64 name on 26.04 (confirmed on a 26.04 box).
     local pcap="libpcap0.8"
-    if [ "$1" = "24.04" ]; then pcap="libpcap0.8t64"; fi
+    if [ "$1" = "24.04" ] || [ "$1" = "26.04" ]; then pcap="libpcap0.8t64"; fi
     export DEBIAN_FRONTEND=noninteractive
     apt-get update || die "apt-get update failed." "check DNS and the apt sources, then rerun (the install is idempotent)"
     # shellcheck disable=SC2086
@@ -313,15 +314,68 @@ ask() {
 
 rand_hex() { openssl rand -hex 32 || die "openssl rand failed." "check the openssl install, then rerun"; }
 
+password_policy() {
+    # password_policy <candidate>; prints the first failing rule and
+    # returns 1, or returns 0 silently when the policy holds.
+    local pw="$1" rest
+    [ "${#pw}" -ge 12 ] || { echo "at least 12 characters"; return 1; }
+    case "$pw" in *[a-z]*) ;; *) echo "at least one lowercase letter"; return 1 ;; esac
+    case "$pw" in *[A-Z]*) ;; *) echo "at least one uppercase letter"; return 1 ;; esac
+    case "$pw" in *[0-9]*) ;; *) echo "at least one digit"; return 1 ;; esac
+    rest="${pw//[[:alnum:]]/}"
+    rest="${rest//[[:space:]]/}"
+    [ -n "$rest" ] || { echo "at least one symbol"; return 1; }
+    case "$pw" in *[[:space:]]*) echo "no whitespace"; return 1 ;; *) ;; esac
+    # systemd eats backslashes in env files (proven on 26.04), so the
+    # password cannot carry them; everything else passes through verbatim.
+    case "$pw" in *\\*) echo "no backslashes (the env file cannot carry them)"; return 1 ;; *) ;; esac
+    return 0
+}
+
+ask_password() {
+    # ask_password <varname>; the console admin password, typed twice.
+    # LEESIDE_ADMIN_PASSWORD wins when set; blank under --yes generates
+    # a 32-byte hex token and says so.
+    local var="$1" first second rule
+    if [ -n "${LEESIDE_ADMIN_PASSWORD:-}" ]; then
+        if rule="$(password_policy "$LEESIDE_ADMIN_PASSWORD")"; then
+            printf -v "$var" '%s' "$LEESIDE_ADMIN_PASSWORD"
+        else
+            die "LEESIDE_ADMIN_PASSWORD fails the policy: $rule." "pick one with $rule"
+        fi
+        return 0
+    fi
+    if [ "${YES:-0}" = "1" ]; then
+        printf -v "$var" '%s' "$(rand_hex)"
+        log "no admin password given; generated a 32-byte hex token instead."
+        return 0
+    fi
+    while true; do
+        read_answer first "Console admin password (at least 12 characters, with a lowercase, an uppercase, a digit and a symbol, no whitespace, no backslashes): " 1
+        if ! rule="$(password_policy "$first")"; then
+            log "that password fails the policy: $rule."
+            continue
+        fi
+        read_answer second "Repeat the password: " 1
+        if [ "$first" = "$second" ]; then
+            printf -v "$var" '%s' "$first"
+            return 0
+        fi
+        log "the two passwords do not match; try again."
+    done
+}
+
 write_env() {
-    # write_env <dir> <llm-key-or-empty>; writes the daemon env, mode 600.
-    # Prints the three generated secrets on one line (space-separated) for
-    # the once-only summary; the file is the record afterwards.
+    # write_env <dir> <llm-key-or-empty> [admin-password-or-empty];
+    # writes the daemon env, mode 600. Prints hash, api and viewer
+    # values on one line (space-separated) for the once-only summary;
+    # the file is the record afterwards.
     local dir="$1" llm_key="$2" mode="off"
     local hash_key api_token viewer_token
     if [ -n "$llm_key" ]; then mode="live"; fi
     hash_key="$(rand_hex)"
-    api_token="$(rand_hex)"
+    api_token="${3:-}"
+    [ -n "$api_token" ] || api_token="$(rand_hex)"
     viewer_token="$(rand_hex)"
     ( umask 077
     cat > "$dir/leesided.env" <<EOF
@@ -578,7 +632,7 @@ print_summary() {
     # Secrets print only on a fresh install; a re-run re-prints the
     # viewer token (read back from the kept env file) and points at the
     # file for the rest.
-    local domain="$1" hash_key="$2" api_token="$3" viewer_token="$4" fresh="$5"
+    local domain="$1" hash_key="$2" api_token="$3" viewer_token="$4" fresh="$5" pw_entered="${6:-1}"
     local url="http://127.0.0.1:7390/windside/"
     if [ -n "$domain" ]; then url="https://$domain/windside/"; fi
     cat <<EOF
@@ -587,20 +641,25 @@ print_summary() {
 Windside console: $url
 EOF
     if [ "$fresh" = "1" ]; then
+        local admin_line="Admin password: the one you entered"
+        if [ "$pw_entered" = "0" ]; then
+            admin_line="Admin password (generated, full console access): $api_token"
+        fi
         cat <<EOF
 Viewer token (read-only, safe to share): $viewer_token
 
-The next two lines print ONCE. Copy them now; afterwards they live
+The next lines print ONCE. Copy them now; afterwards they live
 only in $ENV_FILE (root-readable).
-Admin token (full console access): $api_token
+$admin_line
 Hash key (LEESIDE_HASH_KEY below): $hash_key
 EOF
     else
         cat <<EOF
 Viewer token (read-only, safe to share): $viewer_token
-Admin token and hash key unchanged; read them as root from $ENV_FILE.
+Admin password and hash key unchanged; read them as root from $ENV_FILE.
 EOF
     fi
+    echo "To change the admin password later, edit LEESIDED_API_TOKEN in $ENV_FILE and restart leesided (a change screen is a follow-up)."
     local rules_n=0 f rules_line
     for f in "$RULES_DIR"/*.json; do
         [ -f "$f" ] || continue
@@ -619,9 +678,9 @@ Rules: $rules_line.
 App-specific rules go through the overrides file when ready.
 GeoIP: $geoip_line.
 Turn enforcement on: fresh installs watch only; the global mode starts at monitor and the install rules start as shadow, so run both steps when you are ready for Leeside to act; PUT /mode {"mode":"monitor"} is the kill switch.
-  source $ENV_FILE
-  curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer \$LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
-  for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.1:7390/rules/\$(basename "\$f" .json)" -H "Authorization: Bearer \$LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d @"\$f"; echo; done
+  TOKEN=\$(grep ^LEESIDED_API_TOKEN= $ENV_FILE | cut -d= -f2-)
+  curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
+  for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.1:7390/rules/\$(basename "\$f" .json)" -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" -d @"\$f"; echo; done
 --------------------------------------------------------
 Laravel app steps (as the app user, in the app directory):
 
@@ -696,6 +755,8 @@ Installs leesided, the tap and Windside. Reads answers from the
 terminal unless --yes; every answer also has an env var:
 
     LEESIDE_BINARY        local binary; the box then never contacts the release (offline)
+    LEESIDE_ADMIN_PASSWORD
+                          console admin password (blank under --yes: generated)
     LEESIDE_DOMAIN        the app's domain (finds its nginx conf)
     LEESIDE_LLM_KEY       Baseten key (blank: the LLM stays off)
     LEESIDE_GEOIP_ACCOUNT MaxMind account id (blank: GeoIP skipped)
@@ -750,7 +811,7 @@ main() {
     log "rules: $(install_rules)."
     log "dashboard: $(install_ui)."
 
-    local domain llm_key geoip_account geoip_key
+    local domain llm_key geoip_account geoip_key admin_password
     if [ -f "$INSTALL_CONF" ]; then
         # shellcheck disable=SC1090
         . "$INSTALL_CONF"
@@ -762,7 +823,9 @@ main() {
         ask KEY_IN LEESIDE_LLM_KEY "Baseten key (blank: LLM off): " 1
         ask GEO_A LEESIDE_GEOIP_ACCOUNT "MaxMind account id (blank: skip GeoIP): " 0
         ask GEO_K LEESIDE_GEOIP_KEY "MaxMind licence key (blank: skip GeoIP): " 1
+        ask_password PASSWORD_IN
         domain="$DOMAIN_IN" llm_key="$KEY_IN" geoip_account="$GEO_A" geoip_key="$GEO_K"
+        admin_password="$PASSWORD_IN"
         printf 'SAVED_DOMAIN=%s\n' "$domain" > "$INSTALL_CONF" \
             || die "cannot write $INSTALL_CONF." "check disk space and permissions, then rerun"
         chmod 600 "$INSTALL_CONF" \
@@ -776,10 +839,11 @@ main() {
         chmod 600 "$INSTALL_CONF" 2>/dev/null || true
     fi
 
-    local hash_key="" api_token="" viewer_token=""
+    local hash_key="" api_token="" viewer_token="" pw_entered=1
     if [ "$fresh" = "1" ]; then
         log "== environment"
-        read -r hash_key api_token viewer_token <<< "$(write_env "$ENV_DIR" "$llm_key")"
+        if [ "$YES" = "1" ] && [ -z "${LEESIDE_ADMIN_PASSWORD:-}" ]; then pw_entered=0; fi
+        read -r hash_key api_token viewer_token <<< "$(write_env "$ENV_DIR" "$llm_key" "$admin_password")"
     else
         viewer_token="$(env_value "$ENV_FILE" LEESIDED_VIEWER_TOKEN)"
         [ -n "$viewer_token" ] || die "the kept $ENV_FILE has no LEESIDED_VIEWER_TOKEN." "add one (openssl rand -hex 32) and rerun"
@@ -810,7 +874,7 @@ main() {
     log "== nginx"
     setup_nginx "$domain"
 
-    print_summary "$domain" "$hash_key" "$api_token" "$viewer_token" "$fresh"
+    print_summary "$domain" "$hash_key" "$api_token" "$viewer_token" "$fresh" "$pw_entered"
 }
 
 if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

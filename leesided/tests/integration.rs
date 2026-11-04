@@ -4153,7 +4153,10 @@ async fn ui_login_round_trip() {
     let (st, _, body) = h.ui("GET", "/windside/login", None, None).await;
     assert_eq!(st, 200);
     assert!(body.contains("Log in to Windside"), "{body}");
-    assert!(body.contains("Operator or viewer token."), "{body}");
+    assert!(
+        body.contains("the admin password, or the viewer token for read-only access."),
+        "{body}"
+    );
     let (st, headers, body) = h.ui_login("wrong").await;
     assert_eq!(st, 401);
     assert!(body.contains("wrong token"), "{body}");
