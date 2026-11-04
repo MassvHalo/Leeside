@@ -398,6 +398,10 @@ b, strong { font-weight: 500; }
 /* The page body carries the page-head's padding; templates change
    classes only, so the wrapper lives in the layout. */
 .page { padding: 44px var(--page-pad) 0; min-width: 0; }
+/* The viewer banner: one thin muted line atop the content, no
+   control. The SPA renders the same class with the same
+   declarations; the text lives in VIEWER_BANNER here. */
+.viewer-banner { margin: 0; padding: 10px var(--space-5); background: var(--surface-1); border-bottom: 1px solid var(--line-strong); color: var(--text-2); font-size: var(--size-small); line-height: 17px; }
 .headline { margin-bottom: var(--space-2); }
 .subline { margin-bottom: var(--space-4); }
 .page > p { margin-bottom: var(--space-3); }
@@ -707,6 +711,10 @@ fn topbar(prefix: &str, role: Role) -> String {
     )
 }
 
+/// The viewer banner text, rendered once atop the content for the
+/// viewer role. The SPA carries the same line under the same class.
+const VIEWER_BANNER: &str = "Read-only viewer. Decisions and settings are the operator's.";
+
 fn layout(
     title: &str,
     active: &str,
@@ -715,12 +723,17 @@ fn layout(
     role: Role,
     shell: &Shell,
 ) -> String {
+    let banner = if role == Role::Viewer {
+        format!("<p class=\"viewer-banner\">{VIEWER_BANNER}</p>")
+    } else {
+        String::new()
+    };
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
          <title>{} · Windside</title>{FONTS}<style>{STYLE}</style></head>\
          <body><div class=\"frame\">{}{}\
-         <main class=\"content\"><div class=\"page\">{body}</div></main></div>{COPY_SCRIPT}</body></html>",
+         <main class=\"content\">{banner}<div class=\"page\">{body}</div></main></div>{COPY_SCRIPT}</body></html>",
         esc(title),
         topbar(prefix, role),
         sidebar(prefix, role, shell, active),

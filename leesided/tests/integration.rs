@@ -5376,6 +5376,33 @@ async fn ui_review_decide_writes_the_operator_label() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ui_viewer_banner_role_gated() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (_, headers, _) = h.ui_login("view-token").await;
+    let viewer = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/rules", Some(&viewer), None).await;
+    assert_eq!(st, 200);
+    let open = "<p class=\"viewer-banner\">";
+    let start = body.find(open).expect("viewer sees the banner");
+    let rest = &body[start + open.len()..];
+    let end = rest.find("</p>").expect("banner paragraph closes");
+    assert_eq!(
+        &rest[..end],
+        "Read-only viewer. Decisions and settings are the operator's."
+    );
+    assert!(!rest[..end].contains('<'), "banner carries no control");
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/rules", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    assert!(
+        !body.contains("<p class=\"viewer-banner\">"),
+        "admin never sees it"
+    );
+    h.running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_step4_pages_render() {
     let h = ui_harness(Some("op-token")).await;
     let (_, headers, _) = h.ui_login("op-token").await;

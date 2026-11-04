@@ -25,6 +25,7 @@
       </div>
     </aside>
     <main class="content">
+      <p v-if="role === 'viewer'" class="viewer-banner">Read-only viewer. Decisions and settings are the operator's.</p>
       <div v-if="disconnected" class="banner" role="status">Can't reach leesided. <template v-if="lastSeen !== null">This is what it last reported at <time class="time" data-field="app.last_seen">{{ fmtClock(lastSeen) }}</time>. </template>Retrying.</div>
       <div :class="disconnected ? 'content-dimmed' : ''">
       <template v-if="route.group === 'dashboard'">

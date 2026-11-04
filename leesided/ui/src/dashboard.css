@@ -112,6 +112,9 @@ kbd {
 /* ---------- Banner ---------- */
 .banner { padding: 10px var(--space-5); background: var(--surface-1); border-bottom: 1px solid var(--line-strong); color: var(--text-2); }
 .banner .time { color: var(--text); }
+/* The viewer banner: same class and declarations as the
+   server-rendered pages, so both show it identically. */
+.viewer-banner { margin: 0; padding: 10px var(--space-5); background: var(--surface-1); border-bottom: 1px solid var(--line-strong); color: var(--text-2); font-size: var(--size-small); line-height: 17px; }
 .content-dimmed { display: flex; flex-direction: column; opacity: 0.38; pointer-events: none; }
 
 /* ---------- Headline ---------- */

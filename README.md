@@ -28,6 +28,20 @@ Label-point evals (post-faithfulness agreement, as prod would score them):
 
 What's next: Windside active mode after the shadow week, per-surface windows and fingerprint features for v3, adapters for ASP.NET Core, Django and Express on the same engine, named users with passwords, editable assistant settings in the console, and a vendor-neutral TCP fingerprint in place of JA4T.
 
+## See it act
+
+The console is live and read-only at https://webapp.leeside.halowifi.com/windside with a viewer token. The dashboard shows the last day of the sample app's traffic: attacks stopped, actors waiting on a person, odd traffic watched. Opening an episode shows the evidence, the Windside score beside the rules, and for Muse Spark Open proposals each signal with the requests it cites.
+
+Viewer token: available in the demo video, or on request.
+
+To trigger it yourself, walk the venue ids the way a scraper would:
+
+```bash
+for i in $(seq 1 30); do curl -s -o /dev/null "https://webapp.leeside.halowifi.com/api/venues/$i"; done
+```
+
+Those ids match no route, so every hit lands as a 404; refreshing the console shows a new scored actor waiting on a person, under an episode titled "Someone scanned for weak spots". It touches only the public demo app, and the rule flagging it (http-404-scan) ships in every install.
+
 Install on an Ubuntu 22.04, 24.04 or 26.04 box that already hosts a Laravel app
 behind nginx:
 
