@@ -23,6 +23,7 @@ MODEL_DIR="/var/lib/leeside/windside-model"
 RULES_NAME="leesided-rules.tar.gz"
 RULES_DIR="/usr/local/bin/rules/install"
 RULES_SHA="/etc/leeside/rules.sha256"
+DATA_DIR="/usr/local/bin/data"
 LIB_DIR="/var/lib/leeside"
 RUN_DIR="/run/leeside"
 TMPFILES_ENTRY="/etc/tmpfiles.d/leeside.conf"
@@ -181,13 +182,22 @@ rules_current() {
 }
 
 apply_rules() {
-    # apply_rules <tarball> <sha-file> <want-sha>; verifies and extracts
-    # the generic install set where the default lookup finds it.
+    # apply_rules <tarball> <sha-file> <want-sha>; verifies and places
+    # the generic install set and the JA4 classes where each default
+    # lookup finds them.
     verify_sha256 "$1" "$2"
+    local stage
+    stage="$(mktemp -d)" || die "cannot make a temp dir." "check TMPDIR and disk space, then rerun"
+    tar -xzf "$1" -C "$stage" || die "cannot extract the rules tarball." "check disk space, then rerun"
+    [ -n "$(ls "$stage"/*.json 2>/dev/null)" ] || die "the rules tarball held no rules." "check the release asset, then rerun"
+    [ -f "$stage/data/ja4-classes.json" ] || die "the rules tarball held no JA4 classes." "check the release asset, then rerun"
     mkdir -p "$RULES_DIR" || die "cannot create $RULES_DIR." "check disk space and permissions, then rerun"
     rm -f "$RULES_DIR"/*.json
-    tar -xzf "$1" -C "$RULES_DIR" || die "cannot extract the rules tarball." "check disk space, then rerun"
-    [ -n "$(ls "$RULES_DIR"/*.json 2>/dev/null)" ] || die "the rules tarball held no rules." "check the release asset, then rerun"
+    cp "$stage"/*.json "$RULES_DIR"/ || die "cannot place the rules." "check disk space and permissions, then rerun"
+    mkdir -p "$DATA_DIR" || die "cannot create $DATA_DIR." "check disk space and permissions, then rerun"
+    install -m 0644 "$stage/data/ja4-classes.json" "$DATA_DIR/ja4-classes.json" \
+        || die "cannot place the JA4 classes." "check disk space and permissions, then rerun"
+    rm -rf "$stage"
     printf '%s\n' "$3" > "$RULES_SHA" || die "cannot write $RULES_SHA." "check disk space and permissions, then rerun"
     chmod 600 "$RULES_SHA" || die "cannot chmod $RULES_SHA." "check disk space and permissions, then rerun"
 }
@@ -471,6 +481,9 @@ setup_nginx() {
         conf="$(find_domain_conf /etc/nginx/sites-enabled "$1")"
     fi
     if [ -z "$conf" ]; then
+        if [ -z "$1" ] && [ "${YES:-0}" = "1" ]; then
+            log "WARNING: no domain given; the console is not wired into nginx."
+        fi
         log "nginx: no sites-enabled conf mentions ${1:-<no domain given>}."
         manual_nginx
         return 0
@@ -551,7 +564,7 @@ Laravel app steps (as the app user, in the app directory):
 
     git clone https://github.com/${GH_REPO} /opt/leeside   # or anywhere the app user can read
     composer config repositories.leeside '{"type":"path","url":"/opt/leeside/leeside-laravel","options":{"symlink":true}}'
-    composer require leeside/laravel
+    composer require 'leeside/laravel:@dev'
 
 Then in the app's .env:
 
@@ -577,6 +590,7 @@ uninstall() {
     systemctl daemon-reload || true
     rm -f "$BIN_PATH"
     rm -rf /usr/local/bin/rules
+    rm -rf "$RUN_DIR"
     if [ -n "$ENV_DIR" ] && [ "$ENV_DIR" = "/etc/leeside" ]; then rm -rf /etc/leeside; fi
     rm -f "$NGINX_SNIPPET" "$NGINX_ZONE" "$TMPFILES_ENTRY"
     # Take the include back out of every conf that has it.

@@ -116,7 +116,7 @@ abstract class SampleAppTestCase extends TestCase
         ))->middleware('web')->name('challenge.demo');
 
         $router->get('/up', fn () => new Response('ok'))->middleware('web')->name('up');
-        $router->get('/livewire/update', fn () => new Response('ok'))->middleware('web');
+        $router->post('/livewire/update', fn () => new Response('ok'))->middleware('web');
         $router->get('/plain', fn () => new Response('ok'));
     }
 

@@ -48,7 +48,7 @@ return [
     ],
 
     // Route names or URI fnmatch patterns that produce no event and no check.
-    'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],
+    'ignore' => ['up', 'telescope*', 'horizon*', '_debugbar*'],
 
     // Schema v2: the Leeside tag, a signed random id set on HTML pages of the
     // web surface. The host app must list the cookie in encryptCookies(except:).

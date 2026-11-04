@@ -37,7 +37,7 @@ class ProviderWiringTest extends TestCase
             $this->app['config']->get('leeside.capture.redact_params')
         );
         $this->assertSame(
-            ['up', 'telescope*', 'horizon*', '_debugbar*', 'livewire*'],
+            ['up', 'telescope*', 'horizon*', '_debugbar*'],
             $this->app['config']->get('leeside.ignore')
         );
     }

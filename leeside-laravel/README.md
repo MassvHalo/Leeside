@@ -11,7 +11,7 @@ requests, redacted and truncated `sample_query`/`body_slice` on unrouted,
 ## Install
 
 ```bash
-composer require leeside/laravel
+composer require 'leeside/laravel:@dev'
 php artisan vendor:publish --tag=leeside-config   # optional
 ```
 
@@ -101,6 +101,22 @@ middleware ahead of the gate also verifies whatever credential the request
 carried.
 An unverified credential the app answers 401 or 403 is recorded as
 `rejected`, which is what a credential-stuffing rule counts.
+
+## Livewire and Filament
+
+Panel routes use their own middleware stack and their own
+EncryptCookies, so the automatic group wiring does not reach them.
+In the panel provider, add both middleware to the panel's stack and
+list `_lsd` in that EncryptCookies except:
+
+```php
+use Leeside\Laravel\Middleware\GateTurn;
+use Leeside\Laravel\Middleware\TagTurn;
+->middleware([TagTurn::class, GateTurn::class])
+```
+
+This manual wiring is the documented path; picking panel stacks up
+automatically is a follow-up.
 
 ## Header order
 

@@ -35,8 +35,11 @@ Install on an Ubuntu 22.04 or 24.04 box that already hosts a Laravel app
 behind nginx:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash
+curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo LEESIDE_DOMAIN=example.com bash -s -- --yes
 ```
+
+Unattended form above: the variable goes before `bash`, since one
+before `curl` never reaches it. Swap in the app's domain.
 
 The release ships `leesided` for x86_64 and aarch64; the installer picks
 the asset matching the box. Anything else builds from source.

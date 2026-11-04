@@ -464,13 +464,20 @@ hosts.
 selectors), enforced by `generic_rules_parse_and_carry_no_route_names`.
 They are tarballed as `rules/leesided-rules.tar.gz` for the product
 installer, which verifies and extracts it where the default lookup finds
-it (`/usr/local/bin/rules/install`). `rules/install/` keeps the
+it (`/usr/local/bin/rules/install`), plus `data/ja4-classes.json` for the
+tap classifier (`/usr/local/bin/data/ja4-classes.json`, beside the
+binary, where `default_ja4_classes()` looks). `rules/install/` keeps the
 sample-app rules for the demo and the test suite. Rebuild after any
 edit, from `leesided/rules/`:
 
 ```bash
-tar --owner=0 --group=0 --mtime='2026-01-01' -cf - -C generic \
+rm -rf /tmp/rtb && mkdir -p /tmp/rtb/data
+cp generic/auth-burst-peer.json generic/credential-spray.json \
+  generic/http-404-scan.json generic/server-error-watch.json /tmp/rtb/
+cp ../data/ja4-classes.json /tmp/rtb/data/
+tar --owner=0 --group=0 --mtime='2026-01-01' -cf - -C /tmp/rtb \
   auth-burst-peer.json credential-spray.json http-404-scan.json server-error-watch.json \
+  data/ja4-classes.json \
   | gzip -n > leesided-rules.tar.gz
 sha256sum leesided-rules.tar.gz > leesided-rules.tar.gz.sha256
 ```

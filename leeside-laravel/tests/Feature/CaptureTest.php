@@ -196,10 +196,21 @@ class CaptureTest extends SampleAppTestCase
     public function test_ignored_routes_emit_nothing_and_skip_check(): void
     {
         $this->get('/up')->assertOk();
-        $this->get('/livewire/update')->assertOk();
 
         $this->assertSame([], $this->transport->events);
         $this->assertSame([], $this->rules->probes);
+    }
+
+    public function test_livewire_update_emits_a_turn(): void
+    {
+        // Livewire requests are the user's actions in Filament and
+        // Jetstream apps; ignoring them would hide every login failure.
+        $this->post('/livewire/update', ['components' => []])->assertOk();
+
+        $this->assertCount(1, $this->transport->events);
+        $event = $this->lastEvent();
+        $this->assertSame('POST', $event['verb']);
+        $this->assertSame(200, $event['status']);
     }
 
     public function test_disabled_package_emits_nothing(): void
