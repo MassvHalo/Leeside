@@ -556,8 +556,18 @@ fn sidebar(prefix: &str, role: Role, shell: &Shell, active: &str) -> String {
         &pill,
         &format!(
             "{}{}",
-            child("#/review", "Queue", "review-queue", current),
-            child("#/review/decided", "Decided", "review-decided", current),
+            child(
+                &format!("{prefix}/#/review"),
+                "Queue",
+                "review-queue",
+                current,
+            ),
+            child(
+                &format!("{prefix}/#/review/decided"),
+                "Decided",
+                "review-decided",
+                current,
+            ),
         ),
         open_group,
     );
@@ -643,9 +653,14 @@ fn sidebar(prefix: &str, role: Role, shell: &Shell, active: &str) -> String {
                 "",
                 &format!(
                     "{}{}{}",
-                    child("#/settings", "Status", "settings-status", current),
                     child(
-                        "#/settings/assistant",
+                        &format!("{prefix}/#/settings"),
+                        "Status",
+                        "settings-status",
+                        current,
+                    ),
+                    child(
+                        &format!("{prefix}/#/settings/assistant"),
                         "Assistant",
                         "settings-assistant",
                         current
@@ -669,7 +684,7 @@ fn sidebar(prefix: &str, role: Role, shell: &Shell, active: &str) -> String {
          <label class=\"jump\"><input type=\"text\" placeholder=\"Jump to actor id\" \
          aria-label=\"Jump to an actor by id prefix\"><kbd>/</kbd></label>\
          <nav class=\"nav\" aria-label=\"Sections\">\
-         <a class=\"nav-link\" href=\"#/\">{ICON_DASHBOARD}<span class=\"nav-label\">Dashboard</span></a>\
+         <a class=\"nav-link\" href=\"{prefix}/\">{ICON_DASHBOARD}<span class=\"nav-label\">Dashboard</span></a>\
          <div class=\"nav-section\">Daily</div>{review}{traffic}\
          <div class=\"nav-section\">Control</div>{protection}{intelligence}{settings}\
          </nav>\
@@ -756,7 +771,7 @@ pub fn login_page(next: &str, error: Option<&str>, prefix: &str) -> String {
     let mut body = String::from(
         "<div class=\"login-wrap\"><section class=\"panel login-panel\" aria-label=\"Log in\">\
          <h1 class=\"headline\">Log in to Windside.</h1>\
-         <p class=\"subline\">the admin password, or the viewer token for read-only access.</p>",
+         <p class=\"subline\">Your admin password, or the viewer token for read-only access.</p>",
     );
     if let Some(e) = error {
         let _ = write!(body, "<p class=\"error\">{}</p>", esc(e));

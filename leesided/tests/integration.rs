@@ -4527,7 +4527,7 @@ async fn ui_login_round_trip() {
     assert_eq!(st, 200);
     assert!(body.contains("Log in to Windside"), "{body}");
     assert!(
-        body.contains("the admin password, or the viewer token for read-only access."),
+        body.contains("Your admin password, or the viewer token for read-only access."),
         "{body}"
     );
     let (st, headers, body) = h.ui_login("wrong").await;
@@ -4658,9 +4658,10 @@ async fn ui_prefix_moves_routes_cookies_and_redirects() {
     // Pages link under the prefix.
     let (st, _, body) = h.ui("GET", "/ops/llm", Some(&cookie), None).await;
     assert_eq!(st, 200);
-    // The server sidebar mirrors the SPA's: hash links for the app
-    // routes, prefixed links for the server pages.
-    assert!(body.contains("href=\"#/review\""), "{body}");
+    // The server sidebar mirrors the SPA's, except the app routes
+    // carry the prefix so they load the SPA instead of dying as a
+    // bare hash off the app.
+    assert!(body.contains("href=\"/ops/#/review\""), "{body}");
     assert!(body.contains("href=\"/ops/settings\""), "{body}");
     // A `next` outside the prefix falls back under it.
     let (st, headers, _) = h

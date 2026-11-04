@@ -34,7 +34,7 @@
           <p class="crumb">Windside <span aria-hidden="true">&rsaquo;</span> <b>Dashboard</b></p>
           <h1 v-if="!summary" class="headline"></h1>
           <h1 v-else-if="summary.attacks === 0" class="headline">Watching.</h1>
-          <h1 v-else class="headline"><span class="headline-dim"><span data-field="summary.attacks">{{ fmtInt(summary.attacks) }}</span> attacks in <span data-field="summary.window">{{ summary.window }}</span>.</span> <span class="headline-rest"><span data-field="summary.stopped">{{ fmtInt(summary.stopped) }}</span> {{ stoppedWord }}.</span><span v-if="showTail" class="headline-tail">In shadow, Windside would have stopped <span data-field="summary.would_have_stopped">{{ fmtInt(summary.would_have_stopped) }}</span> more.</span></h1>
+          <h1 v-else class="headline"><span class="headline-dim"><span data-field="summary.attacks">{{ fmtInt(summary.attacks) }}</span> attacks in <span data-field="summary.window">{{ summary.window }}</span>.</span> <span class="headline-rest"><span data-field="summary.stopped">{{ fmtInt(summary.stopped) }}</span> {{ stoppedWord }}.</span><span v-if="showTail" class="headline-tail">Windside is in shadow; switched on, it would have stopped <span data-field="summary.would_have_stopped">{{ fmtInt(summary.would_have_stopped) }}</span> more.</span></h1>
           <div v-if="summary" class="subline-row"><span class="mode-chip" :data-mode="summary.mode"><span data-field="summary.mode">{{ summary.mode }}</span> mode</span><p v-if="summary.attacks === 0" class="subline"><span data-field="summary.requests">{{ fmtInt(summary.requests) }}</span> requests seen<template v-if="summary.fingerprinted !== null">, <span data-field="summary.fingerprinted">{{ summary.fingerprinted }}%</span> fingerprinted</template>, nothing hostile yet</p><p v-else class="subline"><span data-field="summary.waiting">{{ fmtInt(summary.waiting) }}</span> waiting on you.</p></div>
           <div v-if="summary && summary.attacks > 0" class="cta-row"><a v-if="summary.waiting > 0" class="cta cta-primary" href="#/review">Review what's waiting</a><a class="cta cta-ghost" :href="`${consolePrefix}/actors`">See all traffic</a></div>
         </header>
@@ -218,7 +218,7 @@ const role = computed(() => (summary.value ? summary.value.role : ''))
 const roleInitial = computed(() => (role.value ? role.value[0].toUpperCase() : ''))
 const mode = computed(() => (summary.value ? summary.value.mode : ''))
 const pending = computed(() => (summary.value ? summary.value.pending : 0))
-const stoppedWord = computed(() => (summary.value && summary.value.mode === 'shadow' ? 'stopped by rules' : 'stopped'))
+const stoppedWord = computed(() => (summary.value && summary.value.mode === 'shadow' ? 'stopped by Leeside' : 'stopped by Leeside'))
 const showTail = computed(
   () => summary.value !== null && summary.value.mode === 'shadow' && summary.value.would_have_stopped > 0,
 )
