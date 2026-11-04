@@ -466,6 +466,31 @@ async fn api_v1_status_gated_viewer_allowed() {
     assert!(v["uptime_s"].is_number(), "{v}");
     assert!(v["windside"]["mode"].is_string(), "{v}");
     assert!(v["rules"]["hash"].is_string(), "{v}");
+    // A shadow-capped install rule reports effective shadow even
+    // once the global mode is enforce.
+    let (st, _) = h
+        .http_as(
+            Some("op-token"),
+            "PUT",
+            "/mode",
+            Some(&json!({"mode": "enforce"})),
+        )
+        .await;
+    assert_eq!(st, 200);
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/status", Some(&viewer), None)
+        .await;
+    assert_eq!(st, 200);
+    let rule = v["rules_detail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "portal-otp-burst")
+        .cloned()
+        .unwrap();
+    assert_eq!(rule["state"], "active");
+    assert_eq!(rule["mode"], "shadow");
+    assert_eq!(rule["effective"], "shadow");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

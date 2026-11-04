@@ -115,13 +115,30 @@ pub async fn api_summary(
     Json(v).into_response()
 }
 
-/// The daemon's health JSON unchanged, session-gated for the
-/// Settings Status page (the browser cannot reach the local API).
+/// The daemon's health JSON plus one read-only per-rule modes
+/// list, session-gated for the Settings Status page (the browser
+/// cannot reach the local API).
 pub async fn api_status(State(e): State<Arc<Engine>>, headers: HeaderMap) -> Response {
     if let Err(r) = session_of(&e, &headers) {
         return *r;
     }
-    Json(e.health()).into_response()
+    let mut v = e.health();
+    let global = e.mode();
+    let detail: Vec<serde_json::Value> = e
+        .rules
+        .loaded()
+        .iter()
+        .map(|(r, m)| {
+            serde_json::json!({
+                "id": r.id,
+                "state": m.state.as_str(),
+                "mode": r.mode.as_str(),
+                "effective": global.min(r.mode).as_str(),
+            })
+        })
+        .collect();
+    v["rules_detail"] = serde_json::Value::Array(detail);
+    Json(v).into_response()
 }
 
 pub async fn api_episodes(

@@ -41,11 +41,12 @@ curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh 
 Unattended form above: the variable goes before `bash`, since one
 before `curl` never reaches it. Swap in the app's domain.
 
-Fresh installs start in global monitor: rules watch, nothing acts.
-Switch with the admin token from `/etc/leeside/leesided.env`:
+Turn enforcement on: fresh installs watch only; the global mode starts at monitor and the install rules start as shadow, so run both steps when you are ready for Leeside to act; PUT /mode {"mode":"monitor"} is the kill switch.
 
 ```bash
-source /etc/leeside/leesided.env && curl -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer $LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
+source /etc/leeside/leesided.env
+curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer $LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
+for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.1:7390/rules/$(basename "$f" .json)" -H "Authorization: Bearer $LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d @"$f"; echo; done
 ```
 
 The release ships `leesided` for x86_64 and aarch64; the installer picks

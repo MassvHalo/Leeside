@@ -27,7 +27,7 @@
         <div><dt>Global mode</dt><dd data-field="status.protection.global">{{ status.mode }}<template v-if="status.mode === 'monitor'"> — rules watch only; switch with PUT /mode</template></dd></div>
         <div><dt>Windside mode</dt><dd data-field="status.protection.windside">{{ status.windside.mode }}</dd></div>
         <div><dt>Enforce allowed</dt><dd data-field="status.protection.enforce">{{ status.enforce_allowed ? 'yes' : 'no' }}</dd></div>
-        <div><dt>Rules loaded</dt><dd data-field="status.protection.rules">{{ fmtInt(status.rules.loaded) }}</dd></div>
+        <div><dt>Rules loaded</dt><dd data-field="status.protection.rules">{{ rulesLine }}</dd></div>
         <div><dt>Ruleset hash</dt><dd class="mono-cell" data-field="status.protection.hash">{{ status.rules.hash }}</dd></div>
         <div><dt>Decisions active</dt><dd data-field="status.protection.decisions">{{ fmtInt(status.decisions) }}</dd></div>
       </dl>
@@ -80,6 +80,12 @@ import { fmtDur, fmtInt } from './fmt.js'
 const props = defineProps({
   status: { type: Object, default: null },
   assistantModel: { type: String, default: null },
+})
+
+const rulesLine = computed(() => {
+  if (!props.status) return ''
+  const each = (props.status.rules_detail || []).map((r) => `${r.id}: ${r.effective}`).join(' · ')
+  return each === '' ? `${fmtInt(props.status.rules.loaded)} loaded` : `${fmtInt(props.status.rules.loaded)} loaded — ${each}`
 })
 
 const tapLine = computed(() => {
