@@ -4658,7 +4658,10 @@ async fn ui_prefix_moves_routes_cookies_and_redirects() {
     // Pages link under the prefix.
     let (st, _, body) = h.ui("GET", "/ops/llm", Some(&cookie), None).await;
     assert_eq!(st, 200);
-    assert!(body.contains("href=\"/ops/review\""), "{body}");
+    // The server sidebar mirrors the SPA's: hash links for the app
+    // routes, prefixed links for the server pages.
+    assert!(body.contains("href=\"#/review\""), "{body}");
+    assert!(body.contains("href=\"/ops/settings\""), "{body}");
     // A `next` outside the prefix falls back under it.
     let (st, headers, _) = h
         .ui(

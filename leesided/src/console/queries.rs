@@ -2586,6 +2586,21 @@ pub struct ReviewFull {
 }
 
 impl Ctx<'_> {
+    /// The review queue's full length: the sidebar's pending pill,
+    /// the same count the dashboard summary reports.
+    pub fn review_pending(
+        &self,
+        thresholds: &std::collections::HashMap<String, f64>,
+    ) -> Result<i64, QueryError> {
+        let rows = crate::review::review_rows(self.conn(), usize::MAX, thresholds).map_err(
+            |e| match e {
+                crate::review::ReviewError::Sqlite(inner) => QueryError::Sqlite(inner),
+                e => QueryError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(e))),
+            },
+        )?;
+        Ok(rows.len() as i64)
+    }
+
     /// The review queue in the CLI's order: disagreements first,
     /// then uncertain, unlabelled proposals, and the rest. Each row
     /// carries the queue reason and the rule hits; decided rows leave

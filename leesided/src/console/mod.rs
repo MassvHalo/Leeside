@@ -295,6 +295,39 @@ fn csrf_ok(session: &Session, got: &str) -> bool {
     crate::api::same(got.as_bytes(), session.csrf.as_bytes())
 }
 
+/// The sidebar's live data: the review queue length, the Windside
+/// mode, and the request's hostname. Every logged-in page renders
+/// through this; the login and error pages use the slim shell.
+fn shell_of(e: &Engine, headers: &HeaderMap) -> Result<pages::Shell, Box<Response>> {
+    let pending = read(e, |ctx| ctx.review_pending(&thresholds(e)))?;
+    Ok(pages::Shell {
+        pending,
+        mode: e.windside.mode.as_str().to_string(),
+        host: host_of(headers),
+    })
+}
+
+/// The request's hostname as the SPA sees it: the Host header minus
+/// any port, so the sidebar's app switch matches byte for byte.
+fn host_of(headers: &HeaderMap) -> String {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if let Some(rest) = host.strip_prefix('[') {
+        // [v6]::port or bare [v6].
+        match rest.split_once(']') {
+            Some((ip, _)) => format!("[{ip}]"),
+            None => host.to_string(),
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h.to_string(),
+            _ => host.to_string(),
+        }
+    }
+}
+
 fn forbidden(e: &Engine) -> Response {
     page(
         StatusCode::FORBIDDEN,
@@ -409,9 +442,17 @@ pub async fn llm_list(
     let (calls, total) = or_return!(read(&e, |ctx| {
         Ok((ctx.llm_calls(page_no)?, ctx.llm_call_count()?))
     }));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::llm_list(&calls, page_no, total, session.role, &e.cfg.console_path),
+        pages::llm_list(
+            &calls,
+            page_no,
+            total,
+            session.role,
+            &e.cfg.console_path,
+            &shell,
+        ),
     )
 }
 
@@ -423,9 +464,16 @@ pub async fn llm_detail(
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
     let call = or_return!(read(&e, |ctx| ctx.llm_call(id)));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::llm_detail(&call, &session.csrf, session.role, &e.cfg.console_path),
+        pages::llm_detail(
+            &call,
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+            &shell,
+        ),
     )
 }
 
@@ -460,6 +508,7 @@ pub async fn jobs_list(
     let (jobs, total) = or_return!(read(&e, |ctx| {
         Ok((ctx.llm_jobs(status, page_no)?, ctx.llm_job_count(status)?))
     }));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::jobs_list(
@@ -470,6 +519,7 @@ pub async fn jobs_list(
             &session.csrf,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -679,6 +729,7 @@ pub async fn turn_detail(
         turn.ua_class.as_deref(),
     );
     let (features, scores) = or_return!(read(&e, |ctx| ctx.trace_features(&turn)));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::turn_detail(
@@ -689,6 +740,7 @@ pub async fn turn_detail(
             &thresholds(&e),
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -704,6 +756,7 @@ pub async fn trace_view(
     let idents = queries::idents_for_turn(&e.resolver, &turn);
     let now = store::now_s();
     let trace = or_return!(read(&e, |ctx| ctx.trace(&turn, &idents, now)));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::trace_view(
@@ -712,6 +765,7 @@ pub async fn trace_view(
             now,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -729,6 +783,7 @@ pub async fn actors_list(
         ctx.actors(page_no, now)?,
         ctx.actor_count()?
     ))));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::actors_list(
@@ -738,6 +793,7 @@ pub async fn actors_list(
             &thresholds(&e),
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -759,6 +815,7 @@ pub async fn actor_detail(
         detail.client.ja4.as_deref(),
         detail.client.ua_class.as_deref(),
     );
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::actor_detail_page(
@@ -769,6 +826,7 @@ pub async fn actor_detail(
             now,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -785,6 +843,7 @@ pub async fn clusters_list(
         ctx.clusters(page_no)?,
         ctx.cluster_count()?
     ))));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::clusters_list(
@@ -794,6 +853,7 @@ pub async fn clusters_list(
             &thresholds(&e),
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -809,6 +869,7 @@ pub async fn cluster_detail(
     let detail = or_return!(read(&e, |ctx| {
         ctx.cluster_detail(&key, q.page.unwrap_or(0), &thresholds(&e))
     }));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::cluster_detail_page(
@@ -817,6 +878,7 @@ pub async fn cluster_detail(
             &session.csrf,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -1147,6 +1209,7 @@ pub async fn actor_unblock(
 pub async fn review_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
     let rows = or_return!(read(&e, |ctx| ctx.review_queue(&thresholds(&e), 20)));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::review_list(
@@ -1155,6 +1218,7 @@ pub async fn review_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: 
             &session.csrf,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -1285,6 +1349,7 @@ pub async fn labels_list(
             ctx.label_sources()?,
         ))
     }));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::labels_list(
@@ -1296,6 +1361,7 @@ pub async fn labels_list(
             total,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -1304,6 +1370,7 @@ pub async fn rules_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
     let session = or_return!(require(&e, &headers, &uri));
     let now = store::now_s();
     let (rules, drafts) = or_return!(read(&e, |ctx| Ok((ctx.rules(now)?, ctx.rule_drafts()?))));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::rules_list(
@@ -1312,6 +1379,7 @@ pub async fn rules_list(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
             &session.csrf,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -1394,9 +1462,17 @@ pub async fn payloads_list(
         ctx.payload_patterns(page_no)?,
         ctx.payload_count()?
     ))));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::payloads_list(&rows, page_no, total, session.role, &e.cfg.console_path),
+        pages::payloads_list(
+            &rows,
+            page_no,
+            total,
+            session.role,
+            &e.cfg.console_path,
+            &shell,
+        ),
     )
 }
 
@@ -1408,9 +1484,10 @@ pub async fn payload_detail(
 ) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
     let row = or_return!(read(&e, |ctx| ctx.payload_detail(&hash)));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::payload_detail_page(&row, session.role, &e.cfg.console_path),
+        pages::payload_detail_page(&row, session.role, &e.cfg.console_path, &shell),
     )
 }
 
@@ -1443,6 +1520,7 @@ pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
         Ok(Err(err)) => (None, Some(err.to_string())),
         Err(err) => (None, Some(err.to_string())),
     };
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::model_page(
@@ -1457,15 +1535,22 @@ pub async fn model_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: U
             },
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
 
 pub async fn features_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::features_page(&queries::feature_table(), session.role, &e.cfg.console_path),
+        pages::features_page(
+            &queries::feature_table(),
+            session.role,
+            &e.cfg.console_path,
+            &shell,
+        ),
     )
 }
 
@@ -1555,6 +1640,7 @@ fn settings_view(e: &Engine) -> queries::SettingsView {
 
 pub async fn settings_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
     let session = or_return!(require(&e, &headers, &uri));
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
         pages::settings_page(
@@ -1562,6 +1648,7 @@ pub async fn settings_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri
             &session.csrf,
             session.role,
             &e.cfg.console_path,
+            &shell,
         ),
     )
 }
@@ -1650,9 +1737,15 @@ pub async fn settings_enforce(
         return forbidden(&e);
     }
     if f.confirm.as_deref() != Some("1") {
+        let shell = or_return!(shell_of(&e, &headers));
         return page(
             StatusCode::OK,
-            pages::settings_enforce_confirm(&session.csrf, session.role, &e.cfg.console_path),
+            pages::settings_enforce_confirm(
+                &session.csrf,
+                session.role,
+                &e.cfg.console_path,
+                &shell,
+            ),
         );
     }
     if e.set_mode(crate::rules::model::Mode::Enforce).is_err() {
@@ -1674,9 +1767,16 @@ pub async fn settings_enforce(
         of = rows.len(),
         "enforcement turned on from the console"
     );
+    let shell = or_return!(shell_of(&e, &headers));
     page(
         StatusCode::OK,
-        pages::settings_enforce_result(e.mode().as_str(), &rows, session.role, &e.cfg.console_path),
+        pages::settings_enforce_result(
+            e.mode().as_str(),
+            &rows,
+            session.role,
+            &e.cfg.console_path,
+            &shell,
+        ),
     )
 }
 
