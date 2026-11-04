@@ -6,6 +6,33 @@ permissive-first multi-licenses, satisfied without them: `r-efi`
 `nette/utils` (BSD-3-Clause OR GPL-2.0-only OR GPL-3.0-only,
 satisfied via BSD). No GPL-only or AGPL code anywhere below.
 
+## Notices
+
+- JA4 (TLS client fingerprint): FoxIO, LLC, BSD 3-Clause. The tap
+  implements the published specification. Notice: "JA4 is a
+  fingerprinting standard by FoxIO, LLC, licensed under BSD 3-Clause."
+- JA4T (TCP fingerprint): FoxIO License 1.1, patent pending.
+  Permitted for internal, academic and non-monetized use; a vendor
+  selling it needs an OEM licence from FoxIO. Leeside's current
+  build is non-commercial. Before any commercial use, JA4T is
+  replaced by a vendor-neutral TCP fingerprint of our own format or
+  an OEM licence is obtained. Reference:
+  https://github.com/FoxIO-LLC/ja4
+- data/ja4-classes.json: derived from the JA4 (TLS) column of
+  FoxIO's ja4plus-mapping.csv in the repository above, about 65
+  rows, no explicit licence on the file; to be regenerated from our
+  own tap captures post-submission.
+- GeoLite2: "This product includes GeoLite2 Data created by
+  MaxMind, available from https://www.maxmind.com." Leeside does
+  not redistribute the databases; each operator downloads them
+  under their own MaxMind account via geoipupdate. The EULA
+  requires prompt use of updated databases and destruction of old
+  ones within 30 days.
+- Muse Spark Open: Meta's open-weights model, used under the Muse
+  Model License (October 15, 2026) and its Usage Policy, served
+  through Baseten. Attribution per Section 2: "Built with Muse
+  Spark Open". Outputs are the operator's (Section 4).
+
 Provenance cut: 2026-11-03. Regenerate the dependency lists from
 the lock files when they move.
 

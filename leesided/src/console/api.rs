@@ -108,6 +108,10 @@ pub async fn api_summary(
     };
     let mut v = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
     v["role"] = serde_json::Value::String(session.role.as_str().to_string());
+    v["assistant"] = serde_json::json!({
+        "model": e.cfg.llm_model,
+        "mode": e.cfg.llm_mode.as_str(),
+    });
     Json(v).into_response()
 }
 

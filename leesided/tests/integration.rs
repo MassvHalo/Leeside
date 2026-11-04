@@ -511,6 +511,8 @@ async fn api_v1_empty_shapes_and_roles() {
     assert_eq!(v["tiles"]["reviews"]["agreed"], 0);
     assert_eq!(v["pending"], 0);
     assert_eq!(v["role"], "admin");
+    assert_eq!(v["assistant"]["model"], "meta-models/muse-spark-open-1026");
+    assert_eq!(v["assistant"]["mode"], "off");
     let (st, v) = h
         .ui_json(
             "GET",

@@ -15,12 +15,13 @@
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.2 L12 3 V7 C12 10 9.8 11.9 7 12.8 C4.2 11.9 2 10 2 7 V3 Z" fill="none"></path></svg><span class="nav-label">Protection</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Rules</a><a class="nav-link nav-child" href="#">Drafts</a><a class="nav-link nav-child" href="#">Decisions</a><a class="nav-link nav-child" href="#">Mode</a></details>
         <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.2" fill="none"></circle><circle cx="7" cy="7" r="2.2" fill="none"></circle></svg><span class="nav-label">Intelligence</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">Model</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">Evals</a><a class="nav-link nav-child" href="#">Fingerprints</a></details>
         <template v-if="role !== 'viewer'"><div class="nav-section">System</div>
-        <details class="nav-group"><summary class="nav-link"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">App</a><a class="nav-link nav-child" href="#">Surfaces</a><a class="nav-link nav-child" href="#">Redaction</a><a class="nav-link nav-child" href="#">Assistant</a><a class="nav-link nav-child" href="#">GeoIP</a><a class="nav-link nav-child" href="#">Access</a></details></template>
+        <details class="nav-group" :open="route.group === 'settings' ? true : null"><summary class="nav-link" :class="{ 'is-current': route.group === 'settings' }"><svg class="nav-icon" width="16" height="16" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 4 H12.5 M1.5 10 H12.5" fill="none"></path><circle cx="5" cy="4" r="1.6" fill="#0A0D12"></circle><circle cx="9.5" cy="10" r="1.6" fill="#0A0D12"></circle></svg><span class="nav-label">Settings</span><svg class="arrow" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8"></path></svg></summary><a class="nav-link nav-child" href="#">App</a><a class="nav-link nav-child" href="#">Surfaces</a><a class="nav-link nav-child" href="#">Redaction</a><a class="nav-link nav-child" :class="{ 'is-current': route.name === 'settings-assistant' }" href="#/settings/assistant" :aria-current="route.name === 'settings-assistant' ? 'page' : null">Assistant</a><a class="nav-link nav-child" href="#">GeoIP</a><a class="nav-link nav-child" href="#">Access</a></details></template>
       </nav>
       <div class="sidebar-foot">
         <button type="button" class="app-switch" aria-haspopup="menu"><span data-field="app.host">{{ host }}</span><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 L5 6.5 L8 3.5"></path></svg></button>
         <span v-if="disconnected" class="connection is-disconnected"><span>Not connected</span></span>
         <span v-else class="connection"><span>Connected, <span data-field="summary.mode">{{ mode }}</span></span></span>
+        <span class="connection attribution"><span>Built with Muse Spark Open</span></span>
       </div>
     </aside>
     <main class="content">
@@ -88,6 +89,11 @@
         @next="reviewNext"
         @decide="reviewDecide"
       />
+      <AssistantPanel
+        v-else-if="route.group === 'settings'"
+        :assistant="summary ? summary.assistant : null"
+        :is-operator="role !== 'viewer'"
+      />
       <ActorPanel
         v-else
         :actor="actor"
@@ -110,6 +116,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ActorPanel from './ActorPanel.vue'
+import AssistantPanel from './AssistantPanel.vue'
 import EpisodePanel from './EpisodePanel.vue'
 import ReviewPanel from './ReviewPanel.vue'
 import { fmtClock, fmtInt } from './fmt.js'
@@ -128,13 +135,15 @@ import {
 
 // Hash routes: '' or '#/' dashboard, '#/review' queue, '#/review/decided',
 // '#/review/{actor|cluster}/{id}' queue with a selected item,
-// '#/actors/{id}' and '#/actors/{id}/raw'. Unknown hashes fall back to the
-// dashboard; turn anchors use replaceState, never routing.
+// '#/actors/{id}' and '#/actors/{id}/raw', '#/settings/assistant'.
+// Unknown hashes fall back to the dashboard; turn anchors use
+// replaceState, never routing.
 function parseHash() {
   const h = window.location.hash.replace(/^#/, '')
   if (h === '' || h === '/') return { group: 'dashboard', name: 'dashboard', scope: null, id: null, actorId: null }
   if (h === '/review') return { group: 'review', name: 'review-queue', scope: null, id: null, actorId: null }
   if (h === '/review/decided') return { group: 'review', name: 'review-decided', scope: null, id: null, actorId: null }
+  if (h === '/settings/assistant') return { group: 'settings', name: 'settings-assistant', scope: null, id: null, actorId: null }
   const m = h.match(/^\/review\/(actor|cluster)\/(.+)$/)
   if (m) return { group: 'review', name: 'review-queue', scope: m[1], id: decodeURIComponent(m[2]), actorId: null }
   const raw = h.match(/^\/actors\/(.+)\/raw$/)
@@ -315,10 +324,20 @@ async function loadActor() {
   stopRetry()
 }
 
+async function loadAssistant() {
+  summary.value = await getSummary('24h')
+  nowS.value = Math.floor(Date.now() / 1000)
+  disconnected.value = false
+  everLoaded.value = true
+  lastSeen.value = nowS.value
+  stopRetry()
+}
+
 async function reload() {
   try {
     if (route.value.group === 'review') await loadReview()
     else if (route.value.group === 'actor') await loadActor()
+    else if (route.value.group === 'settings') await loadAssistant()
     else await loadDashboard()
   } catch (err) {
     if (err && err.message === 'logged out') return

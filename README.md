@@ -16,6 +16,8 @@ admin and read-only viewer sessions. The LLM tiers (Glimmer scoring, Spark
 reasoning) run asynchronously off a queue; the console's review queue and rule
 drafting are live.
 
+Built with Muse Spark Open.
+
 Label-point evals (post-faithfulness agreement, as prod would score them):
 
 | Eval | Rows | Agreement |
@@ -120,7 +122,11 @@ section of `docs/brief.md`.
 - `leesided`: next — implements the other end of both sockets exactly as the
   brief writes them.
 
-## License
+## Licensing
 
-`leeside/laravel` is MIT-licensed (see its `composer.json`), as is the repo
-root (see `LICENSE`).
+Leeside is MIT-licensed: `leeside/laravel` (see its `composer.json`) and
+the repo root (see `LICENSE`). Third-party notices live in
+`THIRD_PARTY.md`. Note the JA4T exception: FoxIO License 1.1, patent
+pending, permitted for this non-commercial build, to be replaced by a
+vendor-neutral TCP fingerprint or an OEM licence before any commercial
+use.

@@ -538,9 +538,14 @@ EOF
     if [ "$rules_n" -gt 0 ]; then
         rules_line="$rules_n generic rules in $RULES_DIR"
     fi
+    local geoip_line="skipped (no MaxMind account/key at install time)"
+    if [ -s "${GEOIP_DB:-/var/lib/GeoIP/GeoLite2-Country.mmdb}" ]; then
+        geoip_line="installed; the geoipupdate package refreshes them twice weekly on its own timer"
+    fi
     cat <<EOF
 Rules: $rules_line.
 App-specific rules go through the overrides file when ready.
+GeoIP: $geoip_line.
 --------------------------------------------------------
 Laravel app steps (as the app user, in the app directory):
 
