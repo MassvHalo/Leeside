@@ -95,8 +95,8 @@
             <td data-field="actor.binding.kind">{{ b.kind }}</td>
             <td data-field="actor.binding.value">{{ b.value }}</td>
             <td data-field="actor.binding.state">{{ bindingState(b) }}</td>
-            <td><time class="time" data-field="actor.binding.first">{{ fmtTime(b.first_seen) }}</time></td>
-            <td><time class="time" data-field="actor.binding.last">{{ fmtTime(b.last_seen) }}</time></td>
+            <td><time class="time" data-field="actor.binding.first">{{ fmtTime(Math.floor(b.first_seen / 1000000)) }}</time></td>
+            <td><time class="time" data-field="actor.binding.last">{{ fmtTime(Math.floor(b.last_seen / 1000000)) }}</time></td>
           </tr>
         </tbody>
       </table></div>
