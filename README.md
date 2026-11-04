@@ -36,6 +36,9 @@ behind nginx:
 curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash
 ```
 
+The release ships `leesided` for x86_64 and aarch64; the installer picks
+the asset matching the box. Anything else builds from source.
+
 ## How it works
 
 - `leeside/laravel` (the capture layer) emits a turn event per request —

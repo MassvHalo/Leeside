@@ -14,7 +14,7 @@ set -euo pipefail
 
 GH_REPO="MassvHalo/Leeside"
 RELEASE_BASE="https://github.com/${GH_REPO}/releases/latest/download"
-BIN_NAME="leesided-x86_64-linux"
+BIN_NAME="" # set in main from uname -m; see bin_name
 BIN_PATH="/usr/local/bin/leesided"
 ENV_DIR="/etc/leeside"
 ENV_FILE="/etc/leeside/leesided.env"
@@ -45,8 +45,20 @@ check_root() {
 }
 
 check_arch() {
-    # check_arch <uname -m>; the release carries one binary.
-    [ "$1" = "x86_64" ] || die "this CPU is $1; the release only ships x86_64." "install on an x86_64 box, or build from source: git clone https://github.com/${GH_REPO} && cd Leeside/leesided && cargo build --release"
+    # check_arch <uname -m>; the release carries x86_64 and aarch64 binaries.
+    case "$1" in
+        x86_64|aarch64) ;;
+        *) die "this CPU is $1; the release ships x86_64 and aarch64." "install on an x86_64 or aarch64 box, or build from source: git clone https://github.com/${GH_REPO} && cd Leeside/leesided && cargo build --release" ;;
+    esac
+}
+
+bin_name() {
+    # bin_name <uname -m>; prints the release asset for this CPU.
+    case "$1" in
+        x86_64) echo "leesided-x86_64-linux" ;;
+        aarch64) echo "leesided-aarch64-linux" ;;
+        *) return 1 ;;
+    esac
 }
 
 distro_ok() {
@@ -629,6 +641,7 @@ main() {
 
     check_root
     check_arch "$(uname -m)"
+    BIN_NAME="$(bin_name "$(uname -m)")"
     check_distro
     check_www_data
     # shellcheck disable=SC1091
