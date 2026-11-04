@@ -4,7 +4,7 @@ Save as `docs/llm.md` (replaces the earlier version; sections 4 and 8 are new or
 
 ## 1. The rule
 
-No request ever waits on a language model. The probe has a sub-millisecond budget and must answer the same way every time; an LLM call takes hundreds of milliseconds and may answer differently on the same input. Every LLM use is therefore a worker that reads from the store and writes to a table with its own source tag, consumed later by a person, the training job or a reviewed rule. Nothing an LLM produces changes a decision on its own.
+No request ever waits on a language model. The probe has a sub-millisecond budget and must answer the same way every time; an LLM call takes hundreds of milliseconds and may answer differently on the same input. Every LLM use is therefore a worker that reads from the store and writes to a table with its own source tag, consumed later by a person, the training job or a reviewed rule. Nothing an LLM produces changes a decision on its own, except through autopilot (section 9) when the operator enables it.
 
 ## 2. What it sees
 
@@ -188,3 +188,19 @@ Asked when a subject (actor or cluster) accumulates five operator-confirmed mali
 In schema mode the same request carries `"response_format": {"type": "json_schema", "json_schema": {"name": "<point>", "strict": true, "schema": {…}}}`.
 
 The response's `usage` block (prompt, completion and total tokens) goes to `llm_calls` and the per-point budget.
+
+## 9. Autopilot
+
+A proposal from the assistant becomes action only through a person's key — unless the operator opts into autopilot, which acts on the subset of proposals where the evidence is unambiguous. A person then reviews after the fact instead of before: every autopilot action stays in the review queue with the reason `autopilot_acted` ("blocked by autopilot, confirm or undo") until an operator label lands on it.
+
+Autopilot is off by default. `LEESIDED_ASSISTANT_AUTOPILOT` is `off`, `block` or `block+rules`; `LEESIDED_AUTOPILOT_MIN_CONFIDENCE` (default 0.9) and `LEESIDED_AUTOPILOT_BLOCK_HOURS` (default 24) set the gates. The env values seed the `settings` table; both switches and both thresholds are on the console's Settings page, and a console write applies at once without a restart. `/health` and the status route report the live values under `autopilot`.
+
+The three gates, evaluated when a label proposal lands after the faithfulness check, all required:
+
+1. The label is malicious and the confidence reaches the minimum.
+2. Every cited signal survived the check; none was struck.
+3. A decisive signal (`webhook_forgery`, `honeytoken_hit`, `attack_payload`) survives among them, or the subject's Windside score sits at or above its threshold.
+
+A proposal failing any gate goes to the queue exactly as today. A passing one, in block mode, writes an `assistant_auto` label and a subject block with rule `autopilot`, expiring after the block hours; cluster proposals take the label only, since decisions have no cluster scope. The global mode applies: under monitor or shadow the decision is recorded as would-act, not applied, like any rule. In block+rules mode the cluster's latest draft additionally goes active when it parses through the rule parser, capped at shadow with origin `autopilot` — never enforce. Every action writes one journal line (subject, confidence, the gate-(c) evidence, decision id). A manual `llm send` or re-send never acts, whatever the setting.
+
+"It's fine" on an autopilot item writes the operator label and lifts the block. The dashboard shows the episode as stopped with "Blocked by autopilot on \<signal\>; waiting for your confirmation".

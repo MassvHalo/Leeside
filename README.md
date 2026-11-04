@@ -52,6 +52,17 @@ for f in /usr/local/bin/rules/install/*.json; do curl -s -X PUT "http://127.0.0.
 To change the admin password later, edit LEESIDED_API_TOKEN in
 /etc/leeside/leesided.env and restart leesided.
 
+Both switches are also on the console's Settings page: Protection
+(the global mode selector, "Turn enforcement on", and the "Monitor
+only" kill switch) and Assistant (autopilot `off`, `block` or
+`block+rules` with its two thresholds, applied without a restart).
+Autopilot is off by default; when on, a label proposal acts on its
+own only past all three gates — malicious at or above the minimum
+confidence, every cited signal surviving the check, and a decisive
+signal (`webhook_forgery`, `honeytoken_hit`, `attack_payload`) or
+the score at or above its threshold — and stays in the review queue
+for confirmation. See `docs/llm.md` section 9.
+
 The release ships `leesided` for x86_64 and aarch64; the installer picks
 the asset matching the box. Anything else builds from source.
 
