@@ -560,7 +560,7 @@ Rules: $rules_line.
 App-specific rules go through the overrides file when ready.
 GeoIP: $geoip_line.
 Fresh installs start in global monitor: rules watch, nothing acts, until you switch it:
-  source $ENV_FILE && curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer \$LEESIDE_API_TOKEN" -d '{"mode":"enforce"}'
+  source $ENV_FILE && curl -s -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer \$LEESIDED_API_TOKEN" -H "Content-Type: application/json" -d '{"mode":"enforce"}'
 --------------------------------------------------------
 Laravel app steps (as the app user, in the app directory):
 
