@@ -19,9 +19,9 @@ satisfied via BSD). No GPL-only or AGPL code anywhere below.
   an OEM licence is obtained. Reference:
   https://github.com/FoxIO-LLC/ja4
 - data/ja4-classes.json: derived from the JA4 (TLS) column of
-  FoxIO's ja4plus-mapping.csv in the repository above, about 65
-  rows, no explicit licence on the file; to be regenerated from our
-  own tap captures post-submission.
+  FoxIO's ja4plus-mapping.csv in the repository above, 6
+  fingerprints (4 browser, 2 library), no explicit licence on the
+  file; to be regenerated from our own tap captures post-submission.
 - GeoLite2: "This product includes GeoLite2 Data created by
   MaxMind, available from https://www.maxmind.com." Leeside does
   not redistribute the databases; each operator downloads them

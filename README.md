@@ -41,6 +41,13 @@ curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh 
 Unattended form above: the variable goes before `bash`, since one
 before `curl` never reaches it. Swap in the app's domain.
 
+Fresh installs start in global monitor: rules watch, nothing acts.
+Switch with the admin token from `/etc/leeside/leesided.env`:
+
+```bash
+source /etc/leeside/leesided.env && curl -X PUT http://127.0.0.1:7390/mode -H "Authorization: Bearer $LEESIDE_API_TOKEN" -d '{"mode":"enforce"}'
+```
+
 The release ships `leesided` for x86_64 and aarch64; the installer picks
 the asset matching the box. Anything else builds from source.
 
