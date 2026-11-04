@@ -34,6 +34,7 @@ TMPFILES_ENTRY="/etc/tmpfiles.d/leeside.conf"
 NGINX_SNIPPET="/etc/nginx/snippets/windside.conf"
 NGINX_ZONE="/etc/nginx/conf.d/windside.conf"
 NGINX_INCLUDE="include snippets/windside.conf;"
+SITES_ENABLED="/etc/nginx/sites-enabled"
 DAEMON_UNIT="/etc/systemd/system/leesided.service"
 TAP_UNIT="/etc/systemd/system/leesided-tap.service"
 HEALTH_URL="http://127.0.0.1:7390/health"
@@ -291,11 +292,43 @@ read_answer() {
     local var="$1" prompt="$2" secret="$3" val
     [ -r /dev/tty ] || die "no terminal to ask $var." "rerun with --yes and the LEESIDE_* env vars (see --help)"
     if [ "$secret" = "1" ]; then
-        read -r -s -p "$prompt" val < /dev/tty || die "cannot read from the terminal." "rerun with --yes and the LEESIDE_* env vars"
-        printf '\n' >&2
-    else
-        read -r -p "$prompt" val < /dev/tty || die "cannot read from the terminal." "rerun with --yes and the LEESIDE_* env vars"
+        read_masked "$var" "$prompt"
+        return 0
     fi
+    read -r -p "$prompt" val < /dev/tty || die "cannot read from the terminal." "rerun with --yes and the LEESIDE_* env vars"
+    printf -v "$var" '%s' "$val"
+}
+
+read_masked() {
+    # read_masked <varname> <prompt>; secret entry with asterisk echo.
+    # Reads char by char: backspace erases one, Ctrl-U clears the line,
+    # Enter finishes. The value is never echoed in clear and never
+    # logged; prompts and asterisks go to stderr like read -p.
+    local var="$1" prompt="$2" val="" ch
+    [ -r /dev/tty ] || die "no terminal to ask $var." "rerun with --yes and the LEESIDE_* env vars (see --help)"
+    printf '%s' "$prompt" >&2
+    while IFS= read -r -s -n 1 ch < /dev/tty; do
+        case "$ch" in
+            "") break ;; # Enter
+            $'\177'|$'\b') # DEL or backspace: erase one
+                if [ -n "$val" ]; then
+                    val="${val%?}"
+                    printf '\b \b' >&2
+                fi
+                ;;
+            $'\025') # Ctrl-U: clear the line
+                while [ -n "$val" ]; do
+                    val="${val%?}"
+                    printf '\b \b' >&2
+                done
+                ;;
+            *)
+                val="$val$ch"
+                printf '*' >&2
+                ;;
+        esac
+    done
+    printf '\n' >&2
     printf -v "$var" '%s' "$val"
 }
 
@@ -365,6 +398,73 @@ ask_password() {
             return 0
         fi
         log "the two passwords do not match; try again."
+    done
+}
+
+ask_domain() {
+    # ask_domain <varname> [sitesdir]; the discovery-driven domain
+    # question. LEESIDE_DOMAIN wins when it matches a conf; a
+    # non-matching env domain is an error (interactive: fall through
+    # to the prompt; --yes: keep it, flag DOMAIN_BAD=2, the daemon
+    # still installs). Interactively one found name becomes the prompt
+    # default, several become a numbered list (a number or a typed
+    # name), none prints the unwired note first. Blank always skips
+    # the wiring.
+    local var="$1" dir="${2:-$SITES_ENABLED}" ans="" name="" i="" n=0 prompt=""
+    local -a names=()
+    DOMAIN_BAD=0
+    if [ -n "${LEESIDE_DOMAIN:-}" ]; then
+        if [ -n "$(find_domain_conf "$dir" "$LEESIDE_DOMAIN")" ]; then
+            printf -v "$var" '%s' "$LEESIDE_DOMAIN"
+            return 0
+        fi
+        domain_error "$dir" "$LEESIDE_DOMAIN" || true
+        if [ "${YES:-0}" = "1" ]; then
+            DOMAIN_BAD=2
+            printf -v "$var" '%s' "$LEESIDE_DOMAIN"
+            return 0
+        fi
+    elif [ "${YES:-0}" = "1" ]; then
+        printf -v "$var" '%s' ""
+        return 0
+    fi
+    mapfile -t names < <(discover_domains "$dir")
+    n="${#names[@]}"
+    prompt="App domain: "
+    if [ "$n" -eq 1 ]; then
+        prompt="App domain [${names[0]}]: "
+    elif [ "$n" -gt 1 ]; then
+        log "server names found in $dir:"
+        i=1
+        for name in "${names[@]}"; do
+            log "  $i) $name"
+            i=$((i + 1))
+        done
+        prompt="App domain (number or name): "
+    else
+        log "no server_name found in $dir; the console will not be wired into nginx unless you give a domain that matches a conf."
+    fi
+    while true; do
+        read_answer ans "$prompt" 0
+        if [ -z "$ans" ]; then
+            if [ "$n" -eq 1 ]; then ans="${names[0]}"; fi
+            printf -v "$var" '%s' "$ans"
+            return 0
+        fi
+        case "$ans" in
+            ''|*[!0-9]*|0) : ;;
+            *)
+                if [ "$ans" -ge 1 ] 2>/dev/null && [ "$ans" -le "$n" ] 2>/dev/null; then
+                    printf -v "$var" '%s' "${names[$((ans - 1))]}"
+                    return 0
+                fi
+                ;;
+        esac
+        if [ -n "$(find_domain_conf "$dir" "$ans")" ]; then
+            printf -v "$var" '%s' "$ans"
+            return 0
+        fi
+        domain_error "$dir" "$ans" || true
     done
 }
 
@@ -546,6 +646,48 @@ limit_req_zone \$binary_remote_addr zone=windside_login:1m rate=5r/m;
 EOF
 }
 
+discover_domains() {
+    # discover_domains <sitesdir>; each distinct server_name once, in
+    # first-seen order, skipping _ and localhost. Certbot's HTTP and
+    # HTTPS blocks name the same hosts, so the dedup counts them once.
+    local dir="$1" f
+    local -a files=()
+    for f in "$dir"/*; do
+        if [ -f "$f" ]; then files+=("$f"); fi
+    done
+    [ "${#files[@]}" -gt 0 ] || return 0
+    awk '
+        {
+            sub(/#.*/, "")
+            take = 0
+            for (i = 1; i <= NF; i++) {
+                if (!take) {
+                    if ($i == "server_name") take = 1
+                    continue
+                }
+                name = $i
+                done = (name ~ /;/)
+                gsub(/;/, "", name)
+                if (name != "" && name != "_" && name != "localhost" && !(name in seen)) {
+                    seen[name] = 1
+                    print name
+                }
+                if (done) take = 0
+            }
+        }
+    ' "${files[@]}"
+}
+
+domain_error() {
+    # domain_error <sitesdir> <domain>; the no-conf ERROR line.
+    # Always returns 1.
+    local dir="$1" domain="$2" found
+    found="$(discover_domains "$dir" | tr '\n' ' ')"
+    found="${found% }"
+    log "ERROR: no conf in $dir names $domain; found: ${found:-(none)}"
+    return 1
+}
+
 find_domain_conf() {
     # find_domain_conf <sites-enabled-dir> <domain>; prints the conf
     # whose server_name mentions the domain, or nothing.
@@ -601,11 +743,13 @@ backup_once() {
 
 setup_nginx() {
     # setup_nginx <domain-or-empty>; wires the console into nginx, or
-    # prints the by-hand step when the conf cannot be found.
+    # prints the by-hand step when the conf cannot be found. Sets
+    # NGINX_WIRED=1 only when the include actually landed.
+    NGINX_WIRED=0
     write_nginx_files
     local conf=""
     if [ -n "$1" ]; then
-        conf="$(find_domain_conf /etc/nginx/sites-enabled "$1")"
+        conf="$(find_domain_conf "$SITES_ENABLED" "$1")"
     fi
     if [ -z "$conf" ]; then
         if [ -z "$1" ] && [ "${YES:-0}" = "1" ]; then
@@ -624,6 +768,7 @@ setup_nginx() {
         log "Add this at http level (outside any server block) by hand: limit_req_zone \$binary_remote_addr zone=windside_login:1m rate=5r/m;"
     fi
     systemctl reload nginx || die "nginx reload failed." "run nginx -t and systemctl status nginx to see why"
+    NGINX_WIRED=1
     log "nginx: console proxied."
 }
 
@@ -637,6 +782,12 @@ inside the server block (both of them when the conf has an HTTP and an
 HTTPS server), then run: nginx -t && systemctl reload nginx
 The files $NGINX_SNIPPET and $NGINX_ZONE are already in place.
 EOF
+}
+
+effective_domain() {
+    # effective_domain <domain>; the domain counts for the summary
+    # URL only when the include actually landed in a conf.
+    if [ "${NGINX_WIRED:-0}" = "1" ]; then printf '%s' "$1"; else printf '%s' ""; fi
 }
 
 print_summary() {
@@ -831,9 +982,9 @@ main() {
     fi
     if [ "$fresh" = "1" ]; then
         log "== questions (blank is always a valid answer)"
-        ask DOMAIN_IN LEESIDE_DOMAIN "App domain (its nginx conf): " 0
+        ask_domain DOMAIN_IN
         ask KEY_IN LEESIDE_LLM_KEY "Baseten key (blank: LLM off): " 1
-        ask GEO_A LEESIDE_GEOIP_ACCOUNT "MaxMind account id (blank: skip GeoIP): " 0
+        ask GEO_A LEESIDE_GEOIP_ACCOUNT "MaxMind account id (blank: skip GeoIP): " 1
         ask GEO_K LEESIDE_GEOIP_KEY "MaxMind licence key (blank: skip GeoIP): " 1
         ask_password PASSWORD_IN
         domain="$DOMAIN_IN" llm_key="$KEY_IN" geoip_account="$GEO_A" geoip_key="$GEO_K"
@@ -847,6 +998,11 @@ main() {
         llm_key=""
         geoip_account="${LEESIDE_GEOIP_ACCOUNT:-}"; geoip_key="${LEESIDE_GEOIP_KEY:-}"
         if [ -n "${LEESIDE_DOMAIN:-}" ]; then domain="$LEESIDE_DOMAIN"; fi
+        DOMAIN_BAD=0
+        if [ -n "$domain" ] && [ -z "$(find_domain_conf "$SITES_ENABLED" "$domain")" ]; then
+            domain_error "$SITES_ENABLED" "$domain" || true
+            DOMAIN_BAD=2
+        fi
         printf 'SAVED_DOMAIN=%s\n' "$domain" > "$INSTALL_CONF" 2>/dev/null || true
         chmod 600 "$INSTALL_CONF" 2>/dev/null || true
     fi
@@ -886,7 +1042,8 @@ main() {
     log "== nginx"
     setup_nginx "$domain"
 
-    print_summary "$domain" "$hash_key" "$api_token" "$viewer_token" "$fresh" "$pw_entered"
+    print_summary "$(effective_domain "$domain")" "$hash_key" "$api_token" "$viewer_token" "$fresh" "$pw_entered"
+    exit "${DOMAIN_BAD:-0}"
 }
 
 if [ -z "${BASH_SOURCE[0]:-}" ] || [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
