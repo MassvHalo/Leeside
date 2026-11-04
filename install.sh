@@ -588,6 +588,19 @@ insert_include() {
     rm -f "$tmp"
 }
 
+backup_once() {
+    # backup_once <file>; copies to <file>.pre-leeside only when no
+    # backup exists yet, so a re-run never overwrites the original
+    # with the already-patched file. Uninstall leaves the backup.
+    if [ -f "$1.pre-leeside" ]; then
+        log "backup $1.pre-leeside already exists; kept."
+        return 0
+    fi
+    cp "$1" "$1.pre-leeside" \
+        || die "cannot back up $1." "check disk space and permissions, then rerun"
+    log "nginx conf backed up to $1.pre-leeside."
+}
+
 setup_nginx() {
     # setup_nginx <domain-or-empty>; wires the console into nginx, or
     # prints the by-hand step when the conf cannot be found.
@@ -605,9 +618,7 @@ setup_nginx() {
         return 0
     fi
     conf="$(readlink -f "$conf")"
-    cp "$conf" "$conf.pre-leeside" \
-        || die "cannot back up $conf." "check disk space and permissions, then rerun"
-    log "nginx conf backed up to $conf.pre-leeside."
+    backup_once "$conf"
     insert_include "$conf"
     nginx -t || die "nginx -t failed after the include." "restore $conf.pre-leeside over $conf, run nginx -t, and add the line by hand (see below)"
     if ! nginx -T 2>/dev/null | grep -q "zone=windside_login"; then
