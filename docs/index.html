@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leeside</title>
+<meta name="description" content="Leeside is a request-security layer for Laravel: a Composer package, a Rust daemon, a small classifier trained on your own traffic, and a console at /windside that explains every call it makes.">
+<meta property="og:title" content="Leeside">
+<meta property="og:description" content="The lee side of your Laravel app. Request security that scores every actor, explains every call, and asks a person before it learns.">
+<meta property="og:image" content="https://massvhalo.github.io/Leeside/brand/leeside-social-1280x640.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="brand/leeside-icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;300&family=Inter:wght@400;500&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+:root {
+  --windward: #0F141C;
+  --windward-2: #151B25;
+  --lee: #EDF0F4;
+  --lee-2: #FFFFFF;
+  --ink: #141A22;
+  --ink-2: #4A5563;
+  --ink-3: #6B7786;
+  --mist: #E8ECF1;
+  --mist-2: #AEB7C2;
+  --mist-3: #8E98A6;
+  --line-dark: #232B37;
+  --line-light: #D5DBE3;
+  --accent: #FF7F5C;
+  --accent-deep: #E8613C;
+  --display: "Outfit", "Albert Sans", "Helvetica Neue", Arial, sans-serif;
+  --body: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --measure: 62ch;
+  --gutter: clamp(20px, 4vw, 56px);
+  --col: 1080px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--lee); color: var(--ink); font: 400 17px/1.6 var(--body); -webkit-font-smoothing: antialiased; }
+a { color: inherit; text-decoration: none; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.wrap { max-width: var(--col); margin: 0 auto; padding: 0 var(--gutter); }
+h1, h2, h3 { font-family: var(--display); font-weight: 300; letter-spacing: -0.015em; margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: var(--measure); }
+.dim { color: var(--mist-3); }
+.lee .dim { color: var(--ink-3); }
+
+/* Windward: the dark hero */
+.windward { position: relative; z-index: 1; color: var(--mist); }
+.windward::before { content: ""; position: absolute; inset: 0 0 var(--overlap) 0; background: var(--windward); z-index: -1; }
+.wind { position: absolute; left: 0; top: 0; width: 100%; height: 180px; pointer-events: none; }
+@media (max-width: 700px) { .wind { height: 96px; } }
+@media (prefers-reduced-motion: no-preference) {
+  .wind g { animation: arrive 1.4s ease-out both; }
+  @keyframes arrive { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: none; } }
+}
+.nav { position: relative; display: flex; align-items: center; justify-content: space-between; padding: 28px 0 0; }
+.brand { display: inline-flex; align-items: center; gap: 12px; font-family: var(--display); font-weight: 300; font-size: 26px; letter-spacing: -0.02em; line-height: 1; }
+.brand svg { width: 26px; height: 26px; }
+.brand .lee-part { color: var(--mist-3); }
+.brand .dot { color: var(--accent); }
+.nav-links { display: flex; gap: 28px; font-size: 15px; color: var(--mist-2); }
+.nav-links a:hover { color: var(--mist); }
+.hero { position: relative; padding: clamp(72px, 11vw, 150px) 0 0; }
+.hero h1 { font-weight: 200; font-size: clamp(44px, 7.2vw, 96px); line-height: 1.02; max-width: 12ch; }
+.hero .lede { margin-top: 28px; font-size: clamp(17px, 1.6vw, 21px); line-height: 1.55; color: var(--mist-2); max-width: 58ch; }
+.install { margin-top: 40px; display: inline-flex; align-items: stretch; max-width: 100%; border: 1px solid var(--line-dark); border-radius: 10px; background: var(--windward-2); }
+.install code { display: block; padding: 14px 18px; font: 400 14.5px/1.5 var(--mono); color: var(--mist); overflow-x: auto; white-space: nowrap; }
+.install code .cmd { color: var(--mist-3); }
+.install button { border: 0; border-left: 1px solid var(--line-dark); background: transparent; color: var(--mist-2); padding: 0 16px; font: 500 13px var(--body); cursor: pointer; }
+.install button:hover { color: var(--mist); }
+.hero-links { margin-top: 22px; display: flex; flex-wrap: wrap; gap: 8px 28px; font-size: 15px; color: var(--mist-2); }
+.hero-links a { border-bottom: 1px solid var(--line-dark); padding-bottom: 2px; }
+.hero-links a:hover { color: var(--mist); border-color: var(--mist-3); }
+.shot-hero { position: relative; z-index: 2; margin-top: clamp(56px, 7vw, 96px); }
+:root { --overlap: clamp(120px, 20vw, 300px); }
+.windward { padding-bottom: 0; }
+.shot-hero .frame { margin-bottom: 0; }
+.shot-hero { margin-bottom: calc(-1 * var(--overlap)); }
+.lee > .section:first-child { padding-top: calc(var(--overlap) + clamp(64px, 9vw, 128px)); }
+
+/* Frames hold screenshots */
+.frame { border: 1px solid var(--line-light); border-radius: 12px; overflow: hidden; background: #0D1015; box-shadow: 0 30px 80px -30px rgba(15, 20, 28, 0.45); }
+.windward .frame { border-color: #2A3340; }
+.frame img { display: block; width: 100%; height: auto; }
+.caption { margin-top: 14px; font-size: 14px; color: var(--ink-3); max-width: 70ch; }
+
+/* The lee: light body */
+.lee { background: var(--lee); }
+.section { padding: clamp(64px, 9vw, 128px) 0 0; }
+.section:last-of-type { padding-bottom: clamp(64px, 9vw, 128px); }
+.section h2 { font-size: clamp(30px, 3.6vw, 46px); line-height: 1.1; max-width: 18ch; }
+.section > .wrap > p.intro { margin-top: 22px; font-size: 18px; color: var(--ink-2); }
+.loops { margin-top: 48px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border-top: 1px solid var(--line-light); }
+.loop { padding: 28px 28px 0 0; border-top: 1px solid transparent; }
+.loop + .loop { border-left: 1px solid var(--line-light); padding-left: 28px; }
+.loop h3 { font-size: 22px; line-height: 1.2; }
+.loop .cadence { display: block; margin-top: 6px; font-size: 14px; color: var(--ink-3); }
+.loop p { margin-top: 16px; font-size: 16px; color: var(--ink-2); }
+.parts { margin-top: 48px; display: grid; grid-template-columns: 220px 1fr; row-gap: 28px; column-gap: 32px; border-top: 1px solid var(--line-light); padding-top: 28px; }
+.parts dt { font-family: var(--display); font-weight: 300; font-size: 24px; line-height: 1.2; }
+.parts dt small { display: block; font-family: var(--body); font-size: 14px; color: var(--ink-3); margin-top: 4px; }
+.parts dd { margin: 0; color: var(--ink-2); max-width: 64ch; }
+.shot { margin-top: 48px; }
+.evals { margin-top: 40px; display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 40px; align-items: start; }
+table { border-collapse: collapse; width: 100%; font-size: 16px; }
+th, td { text-align: left; padding: 12px 0; border-bottom: 1px solid var(--line-light); }
+th { font-weight: 500; color: var(--ink-3); font-size: 14px; }
+td.num { font-family: var(--mono); font-size: 15px; }
+tr.now td { font-weight: 500; }
+tr.now td.num:last-child { color: var(--accent-deep); }
+.evals p { color: var(--ink-2); }
+.evals p + p { margin-top: 14px; }
+.steps { margin-top: 36px; display: grid; gap: 22px; max-width: 760px; }
+.steps pre { margin: 0; padding: 16px 18px; border: 1px solid var(--line-light); border-radius: 10px; background: var(--lee-2); font: 400 14px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.steps p { color: var(--ink-2); }
+.steps .lead { color: var(--ink); }
+footer { border-top: 1px solid var(--line-light); padding: 36px 0 56px; font-size: 14px; color: var(--ink-3); }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 32px; justify-content: space-between; align-items: center; }
+footer nav { display: flex; gap: 24px; }
+footer a:hover { color: var(--ink); }
+
+@media (max-width: 860px) {
+  .loops { grid-template-columns: 1fr; }
+  .loop + .loop { border-left: 0; border-top: 1px solid var(--line-light); padding-left: 0; }
+  .parts { grid-template-columns: 1fr; row-gap: 8px; }
+  .parts dd { margin-bottom: 20px; }
+  .evals { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .nav-links { gap: 18px; font-size: 14px; }
+  .install { display: flex; }
+  .install code { font-size: 13px; }
+}
+</style>
+</head>
+<body>
+
+<header class="windward">
+  <svg class="wind" viewBox="0 0 1440 180" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" x2="1300" y1="0" y2="0"><stop offset="0" stop-color="#AEB7C2"/><stop offset="1" stop-color="#AEB7C2" stop-opacity="0"/></linearGradient></defs><g stroke-width="1" stroke-linecap="round" vector-effect="non-scaling-stroke"><line x1="0" y1="10" x2="979" y2="10" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.27"/><line x1="0" y1="27" x2="1080" y2="27" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.29"/><line x1="0" y1="39" x2="1142" y2="39" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.22"/><line x1="180" y1="53" x2="1289" y2="53" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.24"/><line x1="0" y1="70" x2="807" y2="70" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.24"/><line x1="90" y1="82" x2="596" y2="82" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.22"/><line x1="0" y1="97" x2="1000" y2="97" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.37"/><line x1="180" y1="108" x2="529" y2="108" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.21"/><line x1="0" y1="117" x2="1012" y2="117" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.23"/><line x1="0" y1="128" x2="516" y2="128" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.26"/><line x1="260" y1="140" x2="1377" y2="140" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.34"/><line x1="0" y1="152" x2="927" y2="152" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.23"/><line x1="0" y1="167" x2="242" y2="167" stroke="url(#g)" vector-effect="non-scaling-stroke" stroke-opacity="0.27"/></g></svg>
+  <div class="wrap">
+    <nav class="nav" aria-label="Site">
+      <a class="brand" href="#top" id="top" aria-label="Leeside, home">
+        <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h6.2M3 12h8M3 16h5" stroke="#E8ECF1" stroke-width="2.2"/><path d="M14.2 3.6c4.3 1.4 6.8 4.6 6.8 8.4s-2.5 7-6.8 8.4" stroke="#FF7F5C" stroke-width="2.2"/></svg>
+        <span><span class="lee-part">lee</span>side<span class="dot">.</span></span>
+      </a>
+      <div class="nav-links">
+        <a href="#how">How it works</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/MassvHalo/Leeside">GitHub</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <h1><span class="dim">The lee side of</span><br>your Laravel app.</h1>
+      <p class="lede">Leeside is a request-security layer for Laravel. A Composer package captures the shape of every request, a Rust daemon judges it in under a millisecond, and a console at <code>/windside</code> on your own domain explains every call it makes.</p>
+      <div class="install">
+        <code id="oneliner"><span class="cmd">$</span> curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash</code>
+        <button type="button" data-copy="curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash">Copy</button>
+      </div>
+      <div class="hero-links">
+        <a href="https://github.com/MassvHalo/Leeside">Read the source</a>
+        <a href="https://github.com/MassvHalo/Leeside/releases/latest">Latest release</a>
+        <a href="#judgement">See a judgement</a>
+      </div>
+    </section>
+
+    <div class="shot-hero">
+      <div class="frame"><img src="assets/console-dashboard.png" width="1440" height="1264" alt="The Windside dashboard: a headline reading 8 attacks in 24 hours, 3 stopped by rules; a traffic histogram with stopped, waiting and watched markers; a list of episodes with one selected and its story in four steps." loading="eager"></div>
+    </div>
+  </div>
+</header>
+
+<main class="lee">
+  <section class="section" id="how">
+    <div class="wrap">
+      <h2>Three loops, <span class="dim">one judgement at a time.</span></h2>
+      <p class="intro">Fast decisions happen on every request. Slow, expensive thinking happens on the side, and nothing new is learned until a person agrees.</p>
+      <div class="loops">
+        <div class="loop">
+          <h3>Every request</h3>
+          <span class="cadence">milliseconds, on the request path</span>
+          <p>Rules you can read, plus a Windside score from a small classifier trained on your own traffic. Shadow mode scores without acting so you can watch it first; enforce mode rate-limits or blocks.</p>
+        </div>
+        <div class="loop">
+          <h3>Every hour</h3>
+          <span class="cadence">the assistant, off the request path</span>
+          <p>When something new shows up, Muse Spark reads the actor's recent turns and proposes a label, an explanation and sometimes a rule. Each signal it cites is checked against the turns, and a claim with no evidence is dropped before anyone sees it.</p>
+        </div>
+        <div class="loop">
+          <h3>Every week</h3>
+          <span class="cadence">you, in the review queue</span>
+          <p>Confirm or reject with one key. Confirmed labels retrain the model, accepted drafts become rules, and rejected proposals teach the next prompt. Nothing learns without a person saying so.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="judgement">
+    <div class="wrap">
+      <h2>Every call, <span class="dim">shown with its evidence.</span></h2>
+      <p class="intro">A proposal in the review queue puts the model's score beside the rules, lists each signal with the turns it cites, strikes through the one that failed its check, and gives you three keys to decide.</p>
+      <div class="shot">
+        <div class="frame"><img src="assets/console-review.png" width="1440" height="1180" alt="The review queue: five items waiting, the first selected; the detail shows a proposed malicious label at 0.93, a Windside score of 0.97 past the threshold, signals scanner_paths, high_404_rate and ua_inconsistent passing with cited turns, machine_cadence failed and struck through, and the last twenty turns with the cited ones highlighted." loading="lazy"></div>
+        <p class="caption">Sample data from the design build. The actor page behind the Open actor link shows identity bindings, client fingerprints, activity, the score's top features, labels, decisions and a Raw tab with every stored column.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="parts">
+    <div class="wrap">
+      <h2>Four parts, <span class="dim">one box.</span></h2>
+      <dl class="parts">
+        <dt>leeside-laravel<small>Composer package</small></dt>
+        <dd>Captures method, route, status, timing, client shape and fingerprints for every request. IPs, user agents and tokens are hashed with your key before anything leaves the app, so the store never holds them. Adds under a millisecond per request.</dd>
+        <dt>leesided<small>Rust daemon</small></dt>
+        <dd>Holds the rules, the scoring, the review queue and the console in one process over SQLite, bound to localhost. Your nginx serves <code>/windside</code> from the same server block as the app; a read-only viewer token lets you share the console without sharing the keys.</dd>
+        <dt>Windside<small>the classifier</small></dt>
+        <dd>A LightGBM model over 38 per-actor features: cadence, status mix, route spread, request shape, network neighbours. A passive tap adds each connection's TLS fingerprint, so a client that claims to be Chrome is checked against what its handshake says. Model 0.1.0 runs in shadow today.</dd>
+        <dt>The assistant<small>Muse Spark</small></dt>
+        <dd>Labels, explanations, classifications and rule drafts, each with per-signal citations and a daily budget. Off by default; one key turns it on, and every prompt change is measured against the last one before it ships.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="section" id="evals">
+    <div class="wrap">
+      <h2>Measured, <span class="dim">not promised.</span></h2>
+      <div class="evals">
+        <table>
+          <thead><tr><th>Eval</th><th>Rows</th><th>Agreement</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td class="num">10</td><td class="num">0.20</td></tr>
+            <tr><td>3</td><td class="num">142</td><td class="num">0.80</td></tr>
+            <tr><td>5</td><td class="num">156</td><td class="num">0.92</td></tr>
+            <tr class="now"><td>7</td><td class="num">148</td><td class="num">0.971 ± 0.009</td></tr>
+          </tbody>
+        </table>
+        <div>
+          <p>Agreement between the assistant's labels and a reviewed golden set, scored the way production scores: after the evidence checks, not before. Eval 7 is three runs over 148 rows; the spread is the run-to-run variation of the model at the margin.</p>
+          <p>Each prompt is content-addressed, so any two versions can be compared row by row before one replaces the other. The golden set comes from traffic to our own sample app; wider sets are the next step, and the numbers will move.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="install">
+    <div class="wrap">
+      <h2>Install <span class="dim">on a box that already runs your app.</span></h2>
+      <div class="steps">
+        <p class="lead">One line as root on Ubuntu 22.04 or 24.04. It installs the daemon and the tap, writes a root-only environment file, wires <code>/windside</code> into your app's nginx server block, and prints the Laravel steps once.</p>
+        <pre>curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo bash</pre>
+        <p>Then, in the app:</p>
+        <pre>composer require leeside/laravel
+# add the printed LEESIDE_* keys to .env; the provider registers its middleware</pre>
+        <p>You get two tokens: an admin token that stays on the box, and a viewer token for anyone who should see the console but change nothing. A Baseten key turns the assistant on; without one, rules and the Windside score still run.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <span>MIT licensed. © 2026 MassvHalo Pvt Ltd. Built for the Meta Global AI Developer Hackathon.</span>
+      <nav aria-label="Links">
+        <a href="https://github.com/MassvHalo/Leeside">Source</a>
+        <a href="https://github.com/MassvHalo/Leeside/releases">Releases</a>
+        <a href="https://github.com/MassvHalo/Leeside/blob/master/README.md">README</a>
+      </nav>
+    </div>
+  </footer>
+</main>
+
+<script>
+document.querySelectorAll('[data-copy]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var t = b.getAttribute('data-copy');
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(t).then(function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); });
+    }
+  });
+});
+</script>
+</body>
+</html>
