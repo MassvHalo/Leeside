@@ -24,6 +24,10 @@ RULES_NAME="leesided-rules.tar.gz"
 RULES_DIR="/usr/local/bin/rules/install"
 RULES_SHA="/etc/leeside/rules.sha256"
 DATA_DIR="/usr/local/bin/data"
+UI_NAME="leeside-ui.tar.gz"
+UI_DIR="/var/www/leeside-ui"
+UI_SHA="/etc/leeside/ui.sha256"
+UI_OWNER="www-data"
 LIB_DIR="/var/lib/leeside"
 RUN_DIR="/run/leeside"
 TMPFILES_ENTRY="/etc/tmpfiles.d/leeside.conf"
@@ -223,6 +227,61 @@ install_rules() {
     apply_rules "$tmp/rules.tar.gz" "$tmp/sha256" "$want"
     rm -rf "$tmp"
     echo "changed"
+}
+
+ui_current() {
+    # ui_current <want-sha>; true when the published dashboard matches
+    # and actually holds an index.
+    [ -f "$UI_SHA" ] || return 1
+    [ "$(cat "$UI_SHA")" = "$1" ] || return 1
+    [ -f "$UI_DIR/index.html" ] || return 1
+    return 0
+}
+
+apply_ui() {
+    # apply_ui <tarball> <sha-file> <want-sha>; verifies and publishes
+    # the dashboard where serve_dist reads it.
+    verify_sha256 "$1" "$2"
+    local stage
+    stage="$(mktemp -d)" || die "cannot make a temp dir." "check TMPDIR and disk space, then rerun"
+    tar -xzf "$1" -C "$stage" || die "cannot extract the UI tarball." "check disk space, then rerun"
+    [ -f "$stage/index.html" ] || die "the UI tarball held no index.html." "check the release asset, then rerun"
+    rm -rf "${UI_DIR:?}" || die "cannot clear $UI_DIR." "check disk space and permissions, then rerun"
+    mkdir -p "$UI_DIR" || die "cannot create $UI_DIR." "check disk space and permissions, then rerun"
+    cp -r "$stage"/. "$UI_DIR"/ || die "cannot publish the dashboard." "check disk space and permissions, then rerun"
+    chown -R "$UI_OWNER:$UI_OWNER" "$UI_DIR" \
+        || die "cannot chown $UI_DIR to $UI_OWNER." "check the $UI_OWNER user exists, then rerun"
+    rm -rf "$stage"
+    printf '%s\n' "$3" > "$UI_SHA" || die "cannot write $UI_SHA." "check disk space and permissions, then rerun"
+    chmod 600 "$UI_SHA" || die "cannot chmod $UI_SHA." "check disk space and permissions, then rerun"
+}
+
+install_ui() {
+    # Downloads, verifies and publishes the dashboard. Prints
+    # "changed", "kept", or the offline skip. A local binary means an
+    # offline box: the release is never contacted.
+    if [ -n "${LEESIDE_BINARY:-}" ]; then
+        echo "skipped (LEESIDE_BINARY set: offline mode, the release is never contacted)"
+        return 0
+    fi
+    local tmp want
+    tmp="$(mktemp -d)" || die "cannot make a temp dir." "check TMPDIR and disk space, then rerun"
+    download "${RELEASE_BASE}/${UI_NAME}.sha256" "$tmp/sha256"
+    want="$(awk '{print $1}' "$tmp/sha256")"
+    if ui_current "$want"; then
+        rm -rf "$tmp"
+        echo "kept"
+        return 0
+    fi
+    download "${RELEASE_BASE}/${UI_NAME}" "$tmp/ui.tar.gz"
+    apply_ui "$tmp/ui.tar.gz" "$tmp/sha256" "$want"
+    rm -rf "$tmp"
+    echo "changed"
+}
+
+remove_ui() {
+    # Takes the published dashboard back out.
+    rm -rf "${UI_DIR:?}"
 }
 
 read_answer() {
@@ -594,6 +653,7 @@ uninstall() {
     systemctl daemon-reload || true
     rm -f "$BIN_PATH"
     rm -rf /usr/local/bin/rules
+    remove_ui
     rm -rf "$RUN_DIR"
     if [ -n "$ENV_DIR" ] && [ "$ENV_DIR" = "/etc/leeside" ]; then rm -rf /etc/leeside; fi
     rm -f "$NGINX_SNIPPET" "$NGINX_ZONE" "$TMPFILES_ENTRY"
@@ -684,10 +744,11 @@ main() {
     bin_state="$(install_binary)"
     log "binary: $bin_state."
 
-    log "== directories, model and rules"
+    log "== directories, model, rules and dashboard"
     make_dirs
     log "model: $(install_model)."
     log "rules: $(install_rules)."
+    log "dashboard: $(install_ui)."
 
     local domain llm_key geoip_account geoip_key
     if [ -f "$INSTALL_CONF" ]; then
