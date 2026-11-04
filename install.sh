@@ -482,9 +482,7 @@ setup_geoip() {
     apt-get install -y geoipupdate \
         || die "apt-get install geoipupdate failed." "run it by hand to see the conflict, then rerun"
     if [ -f /etc/GeoIP.conf ]; then
-        cp /etc/GeoIP.conf /etc/GeoIP.conf.pre-leeside \
-            || die "cannot back up /etc/GeoIP.conf." "check disk space and permissions, then rerun"
-        log "existing /etc/GeoIP.conf backed up to /etc/GeoIP.conf.pre-leeside."
+        backup_once /etc/GeoIP.conf
     fi
     cat > /etc/GeoIP.conf <<EOF || die "cannot write /etc/GeoIP.conf." "check disk space and permissions, then rerun"
 # Written by the Leeside installer.
@@ -598,7 +596,7 @@ backup_once() {
     fi
     cp "$1" "$1.pre-leeside" \
         || die "cannot back up $1." "check disk space and permissions, then rerun"
-    log "nginx conf backed up to $1.pre-leeside."
+    log "backed up $1 to $1.pre-leeside."
 }
 
 setup_nginx() {
