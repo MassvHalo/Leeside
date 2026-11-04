@@ -41,7 +41,7 @@ On a fresh Ubuntu 22.04/24.04 box with a Laravel app behind nginx:
 1. Install: `curl -sSL https://raw.githubusercontent.com/MassvHalo/Leeside/master/install.sh | sudo LEESIDE_DOMAIN=example.com bash -s -- --yes`.
 2. `systemctl is-active leesided` → `active`; `curl -sf http://127.0.0.1:7390/health`.
 3. Log in at `https://example.com/windside/login` with the viewer
-   token from the summary. The dashboard renders — not "Dashboard
+   token from the summary. The dashboard renders, not "Dashboard
    not published". That 503 was the R-1 blocker; the installer now
    ships the UI asset.
 4. Open Settings › Status: five panels, no login loop.

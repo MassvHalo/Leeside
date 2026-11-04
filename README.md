@@ -9,12 +9,11 @@ request path.
 
 ## Status
 
-Deployed on `webapp.leeside.halowifi.com`: the capture package, the Rust
-engine with deterministic rules, the Windside classifier (model 0.1.0) scoring
-in shadow, the passive TLS tap, and the Windside console at `/windside/` with
-admin and read-only viewer sessions. The LLM tiers (Glimmer scoring, Spark
-reasoning) run asynchronously off a queue; the console's review queue and rule
-drafting are live.
+Deployed on webapp.leeside.halowifi.com: the capture package, the Rust engine with deterministic rules, the Windside classifier (model 0.1.0) scoring in shadow, the passive TLS tap, and the Windside console at /windside with the dashboard, review queue, actor pages, status and controls, admin and read-only viewer sessions. Muse Spark Open, Meta's open-weights model, labels, explains and drafts rules asynchronously, off the request path, with every citation checked against the stored turns; autopilot (off by default) acts on the decisive subset and asks afterwards.
+
+Release v0.1.1 installs on a fresh Ubuntu box with one line (below). Proven today on a throwaway Ubuntu 24.04 box running the Filament demo app we did not write: install, dashboard, "Turn enforcement on" from the console, and 429s from the eleventh failed Livewire login.
+
+Landing page: https://massvhalo.github.io/Leeside/ · Release: https://github.com/MassvHalo/Leeside/releases/latest · Demo video: <link to be added before submission>
 
 Built with Muse Spark Open.
 
@@ -27,9 +26,7 @@ Label-point evals (post-faithfulness agreement, as prod would score them):
 | 5 | 156 | 0.92 |
 | 7 | 148 | 0.971 ± 0.009 |
 
-What's next: flip Windside from shadow to active after the shadow week,
-per-surface windows and fingerprint features for v3, and the designed console
-on the same data layer.
+What's next: Windside active mode after the shadow week, per-surface windows and fingerprint features for v3, adapters for ASP.NET Core, Django and Express on the same engine, named users with passwords, editable assistant settings in the console, and a vendor-neutral TCP fingerprint in place of JA4T.
 
 Install on an Ubuntu 22.04, 24.04 or 26.04 box that already hosts a Laravel app
 behind nginx:
@@ -57,10 +54,10 @@ Both switches are also on the console's Settings page: Protection
 only" kill switch) and Assistant (autopilot `off`, `block` or
 `block+rules` with its two thresholds, applied without a restart).
 Autopilot is off by default; when on, a label proposal acts on its
-own only past all three gates — malicious at or above the minimum
+own only past all three gates: malicious at or above the minimum
 confidence, every cited signal surviving the check, and a decisive
 signal (`webhook_forgery`, `honeytoken_hit`, `attack_payload`) or
-the score at or above its threshold — and stays in the review queue
+the score at or above its threshold. It stays in the review queue
 for confirmation. See `docs/llm.md` section 9.
 
 The release ships `leesided` for x86_64 and aarch64; the installer picks
@@ -68,13 +65,16 @@ the asset matching the box. Anything else builds from source.
 
 ## How it works
 
-- `leeside/laravel` (the capture layer) emits a turn event per request —
-  shapes and hashes only, never values — over a Unix datagram socket, and
+- `leeside/laravel` (the capture layer) emits a turn event per request,
+  shapes and hashes only, never values, over a Unix datagram socket, and
   gates the `web` and `api` groups on a verdict read from a Unix stream
   socket within milliseconds, failing open on every failure.
 - `leesided` (the Rust engine) ingests the events, serves the check from
   rules and the Windside classifier, and queues conversations for the Glimmer
   and Spark model tiers.
+- The Windside console at `/windside`, served by the daemon through the
+  app's nginx server block: dashboard, review queue, actor pages, status
+  and controls; viewer sessions see everything and change nothing.
 - `leeside-sample` is a portal-shaped demo app that produces real
   session-shaped events, measures the package's overhead, and proves no PII
   leaves the app.
@@ -144,7 +144,7 @@ section of `docs/brief.md`.
 - Capture package: done to the brief; `composer test` green, tap shows all
   three traffic acts, PII grep empty, added latency under 1 ms.
 - Sample app: deployed; this working copy is never served.
-- `leesided`: next — implements the other end of both sockets exactly as the
+- `leesided`: next, implements the other end of both sockets exactly as the
   brief writes them.
 
 ## Licensing
