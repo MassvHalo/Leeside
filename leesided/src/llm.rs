@@ -10,8 +10,12 @@
 //! URL or key disables every worker. Dry never probes (a probe is a
 //! request) and builds prompt-mode wire format.
 
-use crate::config::LlmMode;
+use crate::config::{AutopilotMode, LlmMode};
+use crate::rules::compile::State as RuleState;
+use crate::rules::decisions::Decision;
 use crate::rules::features;
+use crate::rules::model::{Action, Mode, OriginKind, Rule, Scope};
+use crate::rules::windows::key16;
 use crate::store::{now_s, StoreError};
 use crate::tap::classes::{Class, Ja4Classes};
 use rusqlite::{params, Connection};
@@ -1480,7 +1484,8 @@ fn write_proposal(
 /// is dropped and the whole failed list is logged on the call row;
 /// the label is kept when at least one surviving signal sits on its
 /// side, else the proposal lands as `unknown` with the reason kept.
-/// Shared by the worker and `send`.
+/// Shared by the worker and `send`; only the worker passes autopilot,
+/// so a manual `send` or re-send never acts.
 #[allow(clippy::too_many_arguments)]
 fn land_label_proposal(
     conn: &Connection,
@@ -1492,6 +1497,7 @@ fn land_label_proposal(
     call_id: i64,
     now: i64,
     honeytoken_routes: &[String],
+    autopilot: Option<AutopilotCtx>,
 ) -> Result<(), LlmError> {
     let mut p = validate_label(v).map_err(LlmError::Validate)?;
     let failed = apply_faithfulness(envelope, &mut p, honeytoken_routes);
@@ -1510,7 +1516,11 @@ fn land_label_proposal(
             ],
         )?;
     }
-    write_proposal(conn, scope, subject_id, meta, &p, call_id, now)
+    write_proposal(conn, scope, subject_id, meta, &p, call_id, now)?;
+    if let Some(a) = autopilot {
+        maybe_autopilot(conn, scope, subject_id, meta, &p, &failed, call_id, now, &a)?;
+    }
+    Ok(())
 }
 
 /// The faithfulness verdict shared by the landing path and `llm
@@ -1541,6 +1551,226 @@ pub fn apply_faithfulness(
         p.label = "unknown".to_string();
     }
     failed
+}
+
+// ---------- Autopilot (docs/llm.md section 9) ----------
+
+/// The `settings` rows autopilot reads at every landing: the env
+/// seeds them at open, a console write wins afterwards. The drain
+/// reads them from its own connection, so a console write applies
+/// without a restart.
+pub const SETTING_AUTOPILOT: &str = "autopilot";
+pub const SETTING_AUTOPILOT_MIN_CONFIDENCE: &str = "autopilot_min_confidence";
+pub const SETTING_AUTOPILOT_BLOCK_HOURS: &str = "autopilot_block_hours";
+
+/// Gate (c)'s decisive signals: one surviving citation of any of
+/// these already decided the golden cold rows.
+pub const DECISIVE_SIGNALS: [&str; 3] = ["webhook_forgery", "honeytoken_hit", "attack_payload"];
+
+/// What the gates need, resolved when the proposal lands: the
+/// settings values plus the subject's surface threshold. `None` at
+/// the land call (send, re-send) means autopilot never acts.
+pub(crate) struct AutopilotCtx {
+    pub mode: AutopilotMode,
+    pub min_confidence: f64,
+    pub block_hours: u64,
+    pub global: Mode,
+    pub threshold: f64,
+}
+
+fn setting(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// The autopilot context for this landing, or `None` when off. Off,
+/// absent and unparseable all mean off: autopilot fails closed. The
+/// thresholds stay lenient (defaults on garbage) since they only
+/// tighten or loosen a gate that already passed `off`.
+pub(crate) fn autopilot_ctx(conn: &Connection, threshold: f64) -> Option<AutopilotCtx> {
+    let mode = match setting(conn, SETTING_AUTOPILOT).as_deref() {
+        Some("block") => AutopilotMode::Block,
+        Some("block+rules") => AutopilotMode::BlockRules,
+        _ => return None,
+    };
+    let min_confidence = setting(conn, SETTING_AUTOPILOT_MIN_CONFIDENCE)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|c| (0.0..=1.0).contains(c))
+        .unwrap_or(0.9);
+    let block_hours = setting(conn, SETTING_AUTOPILOT_BLOCK_HOURS)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|h| *h > 0)
+        .unwrap_or(24);
+    let global = setting(conn, "mode")
+        .and_then(|v| Mode::parse(&v))
+        .unwrap_or(Mode::Monitor);
+    Some(AutopilotCtx {
+        mode,
+        min_confidence,
+        block_hours,
+        global,
+        threshold,
+    })
+}
+
+/// The three gates, evaluated when a proposal lands after the
+/// faithfulness check. All three must pass: (a) malicious at or
+/// above the minimum confidence, (b) every cited signal survived,
+/// none struck, (c) a decisive signal among the survivors or the
+/// subject's score at or above its threshold. A failed gate leaves
+/// the proposal in the queue exactly as today.
+///
+/// The action, in block mode: an `assistant_auto` label plus a
+/// subject block with rule `autopilot`, through the same row shape
+/// an operator block takes (the daemon's sweep picks the row up into
+/// the live set). Cluster proposals take the label only: decisions
+/// have no cluster scope and no check-path key. In block+rules mode
+/// the subject's latest draft additionally goes active, capped at
+/// shadow, when it parses.
+#[allow(clippy::too_many_arguments)]
+fn maybe_autopilot(
+    conn: &Connection,
+    scope: &str,
+    subject_id: &str,
+    meta: &LabelMeta,
+    p: &LabelProposal,
+    failed: &[String],
+    call_id: i64,
+    now: i64,
+    a: &AutopilotCtx,
+) -> Result<(), LlmError> {
+    if p.label != "malicious" || p.confidence < a.min_confidence {
+        return Ok(());
+    }
+    if !failed.is_empty() {
+        return Ok(());
+    }
+    let decisive: Vec<&str> = p
+        .signals
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| DECISIVE_SIGNALS.contains(n))
+        .collect();
+    let gate_c = if !decisive.is_empty() {
+        decisive.join(",")
+    } else if let Some(score) = meta.score {
+        if score < a.threshold {
+            return Ok(());
+        }
+        format!("score {score:.2} >= {:.2}", a.threshold)
+    } else {
+        return Ok(());
+    };
+    let signals_json =
+        serde_json::to_string(&p.signal_names()).unwrap_or_else(|_| "[]".to_string());
+    let cited_json = serde_json::to_string(&p.cited_union()).unwrap_or_else(|_| "[]".to_string());
+    conn.execute(
+        "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, \
+         kind, note, created_at, signals, cited_turns) \
+         VALUES (?1, ?2, ?3, ?4, 'malicious', 'assistant_auto', ?5, NULL, ?6, ?7, ?8, ?9)",
+        params![
+            scope,
+            subject_id,
+            meta.surface,
+            meta.window_end_ts,
+            p.confidence,
+            format!(
+                "autopilot acted at confidence {:.2} ({gate_c}) [llm_call:{call_id}]",
+                p.confidence
+            ),
+            now,
+            signals_json,
+            cited_json,
+        ],
+    )?;
+    let decision_id = if scope == "actor" {
+        match key16(subject_id) {
+            Some(key) => {
+                let d = Decision {
+                    scope: Scope::Actor,
+                    key,
+                    action: Action::Block,
+                    mode: a.global,
+                    rule: std::sync::Arc::from("autopilot"),
+                    rule_version: 0,
+                    created_at: now,
+                    expires_at: now + (a.block_hours * 3600) as i64,
+                };
+                crate::store::upsert_decision(conn, &d)?;
+                format!("actor:{subject_id}")
+            }
+            None => {
+                tracing::warn!(
+                    subject = %format!("{scope}:{subject_id}"),
+                    "autopilot label written, subject id is not a block key"
+                );
+                "none".to_string()
+            }
+        }
+    } else {
+        "none (cluster takes the label only)".to_string()
+    };
+    if a.mode == AutopilotMode::BlockRules && scope == "cluster" {
+        activate_draft(conn, subject_id, now)?;
+    }
+    tracing::info!(
+        subject = %format!("{scope}:{subject_id}"),
+        confidence = p.confidence,
+        gate = %gate_c,
+        decision = %decision_id,
+        "autopilot acted"
+    );
+    Ok(())
+}
+
+/// Block+rules mode: the cluster's latest draft goes active when it
+/// parses through `Rule::parse`, capped at shadow, origin
+/// `autopilot`. One autopilot rule per id: a repeat landing versions
+/// nothing. An unparseable draft (or none) skips silently; the label
+/// and block above already landed.
+fn activate_draft(conn: &Connection, cluster_key: &str, now: i64) -> Result<(), LlmError> {
+    let draft: Option<String> = conn
+        .query_row(
+            "SELECT rule FROM rule_drafts WHERE cluster_key = ?1 \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![cluster_key],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(text) = draft else {
+        return Ok(());
+    };
+    let mut rule = match Rule::parse(&text, now) {
+        Ok(r) => r,
+        Err(errors) => {
+            tracing::warn!(
+                cluster = %cluster_key,
+                errors = %errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "),
+                "autopilot draft rejected"
+            );
+            return Ok(());
+        }
+    };
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM rules WHERE id = ?1 AND origin_kind = 'autopilot'",
+            params![rule.id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    rule.mode = rule.mode.min(Mode::Shadow);
+    rule.origin.kind = OriginKind::Autopilot;
+    let reason = format!("autopilot on cluster {cluster_key}");
+    crate::store::write_rule(conn, &rule, RuleState::Active, "autopilot", Some(&reason))?;
+    tracing::info!(id = %rule.id, "autopilot rule activated");
+    Ok(())
 }
 
 fn input_summary(subject: &Subject, meta: &LabelMeta) -> String {
@@ -2594,6 +2824,13 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
             let v: serde_json::Value = serde_json::from_str(&parsed)?;
             match &built {
                 Built::Label(envelope, meta) => {
+                    // The surface threshold, 0.5 when the manifest names
+                    // none: the same default the review queue uses.
+                    let threshold = meta
+                        .surface
+                        .as_deref()
+                        .and_then(|s| ctx.thresholds.get(s).copied())
+                        .unwrap_or(0.5);
                     land_label_proposal(
                         &conn,
                         &scope,
@@ -2604,6 +2841,7 @@ pub fn drain_once(db: &Path, ctx: &DrainCtx) -> Result<(DrainOutcome, DrainMode)
                         call_id,
                         now,
                         &ctx.exec.honeytoken_routes,
+                        autopilot_ctx(&conn, threshold),
                     )?;
                     // Explanations are not tied to proposals: the score
                     // writer asks on crossings and swings (docs/llm.md 8.2).
@@ -2802,6 +3040,7 @@ pub fn send_point(
                     call_id,
                     now,
                     &honeytokens,
+                    None,
                 )
             };
             (e, summary, Box::new(write))
@@ -3950,6 +4189,531 @@ mod tests {
             failed.as_deref(),
             Some(r#"["scanner_paths","machine_cadence"]"#)
         );
+    }
+
+    // ---------- autopilot ----------
+
+    const ACTOR_HEX: &str = "aabbccddeeff0011";
+
+    /// The fixture's actor `aa` is not a block key, so autopilot
+    /// tests seed their own 16-hex actor with the same three turns.
+    fn seed_hex_actor(conn: &Connection, id: &str, score: f64) {
+        conn.execute(
+            "INSERT INTO actors (id, opened_us, last_us, turns) VALUES (?1, 1000, 9000, 3)",
+            params![id],
+        )
+        .unwrap();
+        for (i, route) in ["/", "/venues/1", "/wp-login.php"].iter().enumerate() {
+            let ts_us = 1_000_000 + i as i64 * 1_000_000;
+            conn.execute(
+                "INSERT INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+                 latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, dropped_since_last, \
+                 ip_hash, ts_ms, turn_id, actor_id, cluster_key, surface, ua_class, flags, \
+                 credential_status, tag_status, ja4, asn, country) \
+                 VALUES ('sx', ?1, ?2, 'px', 'anon', 'GET', ?3, 200, 1.0, 0, 0, '[]', 'html', '[]', \
+                 'u', 0, 'i', ?4, ?5, ?6, 'cc', 'web', 'chromium', '[\"browser_no_sec_fetch\"]', \
+                 NULL, 'valid', NULL, 16509, 'US')",
+                params![
+                    ts_us,
+                    ts_us as f64 / 1e6,
+                    route,
+                    ts_us / 1000,
+                    format!("x{i}"),
+                    id
+                ],
+            )
+            .unwrap();
+        }
+        let vector = serde_json::to_string(&vec![1.0f32; 38]).unwrap();
+        conn.execute(
+            "INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) \
+             VALUES ('actor', ?1, 'x2', 3000000, 2, ?2, 'web', 0)",
+            params![id, vector],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) \
+             VALUES ('actor', ?1, 'x2', 'web', 3000000, ?2, '0.1.0', \
+             '[{\"name\":\"turns_held\",\"path_gain\":1.5}]')",
+            params![id, score],
+        )
+        .unwrap();
+    }
+
+    fn seed_settings(conn: &Connection, mode: &str, conf: &str, hours: &str, global: &str) {
+        for (k, v) in [
+            (SETTING_AUTOPILOT, mode),
+            (SETTING_AUTOPILOT_MIN_CONFIDENCE, conf),
+            (SETTING_AUTOPILOT_BLOCK_HOURS, hours),
+            ("mode", global),
+        ] {
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                params![k, v],
+            )
+            .unwrap();
+        }
+    }
+
+    fn land_direct(
+        db: &Path,
+        scope: &str,
+        id: &str,
+        proposal: &str,
+        honeytokens: &[String],
+        autopilot: Option<AutopilotCtx>,
+    ) -> i64 {
+        let conn = Connection::open(db).unwrap();
+        let subject = Subject {
+            scope: scope.to_string(),
+            id: id.to_string(),
+        };
+        let thresholds = HashMap::from([("web".to_string(), 0.5)]);
+        let now = now_s();
+        let (envelope, meta) = build_label_envelope(
+            &conn,
+            &Ja4Classes::default(),
+            &subject,
+            &thresholds,
+            now * 1_000_000,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(proposal).unwrap();
+        land_label_proposal(
+            &conn,
+            scope,
+            id,
+            &envelope,
+            &meta,
+            &v,
+            7,
+            now,
+            honeytokens,
+            autopilot,
+        )
+        .unwrap();
+        now
+    }
+
+    fn auto_ctx(threshold: f64) -> AutopilotCtx {
+        auto_ctx_global(threshold, Mode::Enforce)
+    }
+
+    fn auto_ctx_global(threshold: f64, global: Mode) -> AutopilotCtx {
+        AutopilotCtx {
+            mode: AutopilotMode::Block,
+            min_confidence: 0.9,
+            block_hours: 24,
+            global,
+            threshold,
+        }
+    }
+
+    fn auto_label(conn: &Connection) -> Option<(String, f64, String, String)> {
+        conn.query_row(
+            "SELECT label, confidence, signals, note FROM labels WHERE source = 'assistant_auto'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok()
+    }
+
+    fn decisions(conn: &Connection) -> Vec<(String, String, String, String, String, i64, i64)> {
+        conn.prepare("SELECT scope, key, action, mode, rule, created_at, expires_at FROM decisions")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    const HONEY_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.95,"reason":"Hit the hidden trap.","signals":[{"name":"honeytoken_hit","turns":[2]}]}"#;
+    const BENIGN_PROPOSAL: &str =
+        r#"{"label":"benign","confidence":0.99,"reason":"Looks human.","signals":[]}"#;
+    const LOW_CONF_PROPOSAL: &str = r#"{"label":"malicious","confidence":0.5,"reason":"Wordlist path hit.","signals":[{"name":"scanner_paths","turns":[2]}]}"#;
+
+    #[test]
+    fn autopilot_gate_a_rejects_a_benign_label() {
+        let db = tmp_db("auto-benign");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            BENIGN_PROPOSAL,
+            &[],
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "the proposal still lands for the queue");
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn autopilot_gate_a_rejects_low_confidence() {
+        let db = tmp_db("auto-conf");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            LOW_CONF_PROPOSAL,
+            &[],
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn autopilot_gate_b_rejects_a_struck_signal() {
+        let db = tmp_db("auto-struck");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        // scanner_paths survives but high_404_rate is struck: one
+        // struck signal fails the gate even though the label stands.
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            MIXED_PROPOSAL,
+            &[],
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        let label: String = conn
+            .query_row(
+                "SELECT label FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(label, "malicious");
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn autopilot_gate_c_rejects_without_decisive_or_score() {
+        let db = tmp_db("auto-gatec");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        // scanner_paths survives but is not decisive, and 0.91 sits
+        // below the 0.99 threshold: gate (c) fails.
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            FAITHFUL_PROPOSAL,
+            &[],
+            Some(auto_ctx(0.99)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn autopilot_acts_on_a_decisive_signal() {
+        let db = tmp_db("auto-decisive");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        let honey = vec!["/wp-login.php".to_string()];
+        let now = land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            HONEY_PROPOSAL,
+            &honey,
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        let (label, conf, signals, note) = auto_label(&conn).expect("assistant_auto label");
+        assert_eq!(label, "malicious");
+        assert_eq!(conf, 0.95);
+        assert_eq!(signals, r#"["honeytoken_hit"]"#);
+        assert!(note.contains("honeytoken_hit"), "{note}");
+        let ds = decisions(&conn);
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].0, "actor");
+        assert_eq!(ds[0].1, ACTOR_HEX);
+        assert_eq!(ds[0].2, "block");
+        assert_eq!(ds[0].3, "enforce");
+        assert_eq!(ds[0].4, "autopilot");
+        assert_eq!(ds[0].6, now + 24 * 3600);
+    }
+
+    #[test]
+    fn autopilot_acts_on_the_score_arm() {
+        let db = tmp_db("auto-score");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        // No decisive signal, but 0.91 clears the 0.5 threshold.
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            FAITHFUL_PROPOSAL,
+            &[],
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        let (_, _, signals, note) = auto_label(&conn).expect("assistant_auto label");
+        assert_eq!(signals, r#"["scanner_paths"]"#);
+        assert!(note.contains("score 0.91"), "{note}");
+        assert_eq!(decisions(&conn).len(), 1);
+    }
+
+    #[test]
+    fn autopilot_shadow_global_records_would_act() {
+        let db = tmp_db("auto-shadow");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+        }
+        // The gates pass, but the global mode is shadow: the decision
+        // row carries shadow, so the sticky answer observes like any
+        // shadow rule instead of acting.
+        let honey = vec!["/wp-login.php".to_string()];
+        land_direct(
+            &db,
+            "actor",
+            ACTOR_HEX,
+            HONEY_PROPOSAL,
+            &honey,
+            Some(auto_ctx_global(0.5, Mode::Shadow)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert!(auto_label(&conn).is_some());
+        let ds = decisions(&conn);
+        assert_eq!(ds.len(), 1);
+        assert_eq!(ds[0].3, "shadow");
+    }
+
+    #[test]
+    fn autopilot_cluster_takes_the_label_only() {
+        let db = tmp_db("auto-cluster");
+        fixture(&db);
+        let honey = vec!["/wp-login.php".to_string()];
+        land_direct(
+            &db,
+            "cluster",
+            "cc",
+            HONEY_PROPOSAL,
+            &honey,
+            Some(auto_ctx(0.5)),
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert!(auto_label(&conn).is_some());
+        assert!(
+            decisions(&conn).is_empty(),
+            "decisions have no cluster scope"
+        );
+    }
+
+    #[test]
+    fn autopilot_ctx_fails_closed() {
+        let db = tmp_db("auto-ctx");
+        fixture(&db);
+        let conn = Connection::open(&db).unwrap();
+        assert!(autopilot_ctx(&conn, 0.5).is_none(), "absent rows are off");
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('autopilot', 'block')",
+            [],
+        )
+        .unwrap();
+        let a = autopilot_ctx(&conn, 0.5).expect("block with defaults");
+        assert_eq!(a.min_confidence, 0.9);
+        assert_eq!(a.block_hours, 24);
+        assert_eq!(a.global, Mode::Monitor);
+        conn.execute(
+            "UPDATE settings SET value = 'block+rules' WHERE key = 'autopilot'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('autopilot_min_confidence', '0.75')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('autopilot_block_hours', '48')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('mode', 'enforce')",
+            [],
+        )
+        .unwrap();
+        let a = autopilot_ctx(&conn, 0.5).expect("block+rules");
+        assert_eq!(a.mode, AutopilotMode::BlockRules);
+        assert_eq!(a.min_confidence, 0.75);
+        assert_eq!(a.block_hours, 48);
+        assert_eq!(a.global, Mode::Enforce);
+        conn.execute(
+            "UPDATE settings SET value = 'nonsense' WHERE key = 'autopilot'",
+            [],
+        )
+        .unwrap();
+        assert!(autopilot_ctx(&conn, 0.5).is_none(), "garbage mode is off");
+    }
+
+    #[test]
+    fn autopilot_none_acts_like_send() {
+        let db = tmp_db("auto-none");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+            // Even with the store saying block, a None context (send,
+            // re-send) never acts.
+            seed_settings(&conn, "block", "0.9", "24", "enforce");
+        }
+        let honey = vec!["/wp-login.php".to_string()];
+        land_direct(&db, "actor", ACTOR_HEX, HONEY_PROPOSAL, &honey, None);
+        let conn = Connection::open(&db).unwrap();
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn drain_applies_autopilot_from_settings() {
+        let db = tmp_db("auto-drain");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+            seed_settings(&conn, "block", "0.9", "24", "enforce");
+            assert!(
+                enqueue_label(&conn, "actor", ACTOR_HEX, "scorer", now_s(), 500, 500_000).unwrap()
+            );
+        }
+        let (url, _) = mock_server(vec![(200, completion(HONEY_PROPOSAL))]);
+        let mut exec = exec_for(&url, LlmMode::Live);
+        exec.honeytoken_routes = vec!["/wp-login.php".to_string()];
+        let ctx = drain_ctx(exec, Some(JsonMode::Prompt), Some(false));
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let (_, conf, _, _): (String, f64, String, String) =
+            auto_label(&conn).expect("assistant_auto label");
+        assert_eq!(conf, 0.95);
+        let ds = decisions(&conn);
+        assert_eq!(ds.len(), 1);
+        assert_eq!(
+            (ds[0].2.as_str(), ds[0].3.as_str(), ds[0].4.as_str()),
+            ("block", "enforce", "autopilot")
+        );
+    }
+
+    #[test]
+    fn drain_without_settings_changes_nothing() {
+        let db = tmp_db("auto-drain-off");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_hex_actor(&conn, ACTOR_HEX, 0.91);
+            assert!(
+                enqueue_label(&conn, "actor", ACTOR_HEX, "scorer", now_s(), 500, 500_000).unwrap()
+            );
+        }
+        let (url, _) = mock_server(vec![(200, completion(HONEY_PROPOSAL))]);
+        let mut exec = exec_for(&url, LlmMode::Live);
+        exec.honeytoken_routes = vec!["/wp-login.php".to_string()];
+        let ctx = drain_ctx(exec, Some(JsonMode::Prompt), Some(false));
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM labels WHERE source = 'llm_proposed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(auto_label(&conn).is_none());
+        assert!(decisions(&conn).is_empty());
+    }
+
+    #[test]
+    fn drain_block_rules_activates_a_shadow_rule() {
+        let db = tmp_db("auto-rules");
+        fixture(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            seed_settings(&conn, "block+rules", "0.9", "24", "enforce");
+            // The draft says enforce; autopilot caps it at shadow.
+            let draft = include_str!("../rules/install/portal-otp-burst.json");
+            conn.execute(
+                "INSERT INTO rule_drafts (cluster_key, rule, reason, parse_ok, parse_error, call_id, created_at) \
+                 VALUES ('cc', ?1, 'r', 1, NULL, 7, 1)",
+                params![draft],
+            )
+            .unwrap();
+            assert!(
+                enqueue_label(&conn, "cluster", "cc", "scorer", now_s(), 500, 500_000).unwrap()
+            );
+        }
+        let (url, _) = mock_server(vec![(200, completion(HONEY_PROPOSAL))]);
+        let mut exec = exec_for(&url, LlmMode::Live);
+        exec.honeytoken_routes = vec!["/wp-login.php".to_string()];
+        let ctx = drain_ctx(exec, Some(JsonMode::Prompt), Some(false));
+        let (out, _) = drain_once(&db, &ctx).unwrap();
+        assert!(matches!(out, DrainOutcome::Done { .. }));
+        let conn = Connection::open(&db).unwrap();
+        let rule: (String, String, String, String) = conn
+            .query_row(
+                "SELECT id, state, mode, origin_kind FROM rules WHERE id = 'portal-otp-burst'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rule.1, "active");
+        assert_eq!(rule.2, "shadow", "capped, never enforce");
+        assert_eq!(rule.3, "autopilot");
+        assert!(auto_label(&conn).is_some(), "the label lands too");
     }
 
     #[test]

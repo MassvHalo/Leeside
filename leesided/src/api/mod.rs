@@ -93,6 +93,20 @@ pub fn router(engine: Arc<Engine>) -> Router {
         .route(&u("/payloads/{hash}"), get(crate::console::payload_detail))
         .route(&u("/model"), get(crate::console::model_page))
         .route(&u("/features"), get(crate::console::features_page))
+        .route(&u("/settings"), get(crate::console::settings_page))
+        .route(&u("/settings/mode"), post(crate::console::settings_mode))
+        .route(
+            &u("/settings/enforce"),
+            post(crate::console::settings_enforce),
+        )
+        .route(
+            &u("/settings/monitor"),
+            post(crate::console::settings_monitor),
+        )
+        .route(
+            &u("/settings/autopilot"),
+            post(crate::console::settings_autopilot),
+        )
         .route(&u("/api/v1/summary"), get(crate::console::api::api_summary))
         .route(
             &u("/api/v1/episodes"),
@@ -436,10 +450,15 @@ async fn unblock(
     let scope = Scope::parse(&scope)
         .ok_or_else(|| bad_request("scope must be session, peer, principal or credential"))?;
     let key = key16(&key).ok_or_else(|| bad_request("key must be 16 hex"))?;
-    if !e.decisions.remove(scope, key) {
+    if !e.decisions.contains(scope, key) {
         return Err(StoreError::NotFound.into());
     }
+    // The row goes first, the mirror entry after: the sweep merges
+    // autopilot rows it finds in the store, so the reverse order could
+    // resurrect the block being lifted.
     e.store.send(StoreOp::DecisionDelete { scope, key });
+    e.store.flush().await;
+    e.decisions.remove(scope, key);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

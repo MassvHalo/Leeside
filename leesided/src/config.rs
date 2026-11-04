@@ -54,6 +54,14 @@ pub struct Config {
     /// `off`, `dry` or `live` (default `off`). Dry builds the full
     /// request and logs it with a null response; live sends.
     pub llm_mode: LlmMode,
+    /// `off`, `block` or `block+rules` (default `off`): whether a label
+    /// proposal that passes all three gates acts on its own (docs/llm.md
+    /// section 9). Seeds the settings table; a console write wins after.
+    pub autopilot: AutopilotMode,
+    /// Gate (a): the proposal's confidence must reach this (default 0.9).
+    pub autopilot_min_confidence: f64,
+    /// Autopilot blocks expire after this many hours (default 24).
+    pub autopilot_block_hours: u64,
     /// Per-point daily budgets in calls and tokens.
     pub llm_daily_calls: u32,
     pub llm_daily_tokens: u32,
@@ -194,6 +202,36 @@ impl LlmMode {
     }
 }
 
+/// What autopilot may do with a gated label proposal. Block writes
+/// the label and the block; block+rules additionally activates a
+/// drafted rule for the subject, capped at shadow. Default off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutopilotMode {
+    #[default]
+    Off,
+    Block,
+    BlockRules,
+}
+
+impl AutopilotMode {
+    pub fn parse(s: &str) -> Option<AutopilotMode> {
+        match s {
+            "off" => Some(AutopilotMode::Off),
+            "block" => Some(AutopilotMode::Block),
+            "block+rules" => Some(AutopilotMode::BlockRules),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AutopilotMode::Off => "off",
+            AutopilotMode::Block => "block",
+            AutopilotMode::BlockRules => "block+rules",
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -221,6 +259,9 @@ impl Default for Config {
             llm_model_classify: None,
             llm_model_draft: None,
             llm_mode: LlmMode::Off,
+            autopilot: AutopilotMode::Off,
+            autopilot_min_confidence: 0.9,
+            autopilot_block_hours: 24,
             llm_daily_calls: 500,
             llm_daily_tokens: 500_000,
             app_id: DEFAULT_APP.to_string(),
@@ -366,6 +407,28 @@ impl Config {
             cfg.llm_mode = LlmMode::parse(&v)
                 .unwrap_or_else(|| panic!("LEESIDED_LLM_MODE: off, dry or live, not {v}"));
         }
+        if let Ok(v) = std::env::var("LEESIDED_ASSISTANT_AUTOPILOT") {
+            cfg.autopilot = AutopilotMode::parse(&v).unwrap_or_else(|| {
+                panic!("LEESIDED_ASSISTANT_AUTOPILOT: off, block or block+rules, not {v}")
+            });
+        }
+        if let Ok(v) = std::env::var("LEESIDED_AUTOPILOT_MIN_CONFIDENCE") {
+            let c: f64 = v
+                .parse()
+                .unwrap_or_else(|_| panic!("LEESIDED_AUTOPILOT_MIN_CONFIDENCE: not a number: {v}"));
+            if !(0.0..=1.0).contains(&c) {
+                panic!("LEESIDED_AUTOPILOT_MIN_CONFIDENCE: 0 to 1, not {v}");
+            }
+            cfg.autopilot_min_confidence = c;
+        }
+        if let Ok(v) = std::env::var("LEESIDED_AUTOPILOT_BLOCK_HOURS") {
+            cfg.autopilot_block_hours = v
+                .parse()
+                .unwrap_or_else(|_| panic!("LEESIDED_AUTOPILOT_BLOCK_HOURS: not a number: {v}"));
+            if cfg.autopilot_block_hours == 0 {
+                panic!("LEESIDED_AUTOPILOT_BLOCK_HOURS: at least 1, not {v}");
+            }
+        }
         if let Ok(v) = std::env::var("LEESIDED_LLM_DAILY_CALLS") {
             cfg.llm_daily_calls = v
                 .parse()
@@ -463,6 +526,22 @@ mod tests {
         assert!(v6.matches(ip("2001:db8::1")));
         assert!(!v6.matches(ip("2001:db9::1")));
         assert!(!v6.matches(ip("10.1.2.3")));
+    }
+
+    #[test]
+    fn autopilot_mode_round_trips() {
+        for (s, m) in [
+            ("off", AutopilotMode::Off),
+            ("block", AutopilotMode::Block),
+            ("block+rules", AutopilotMode::BlockRules),
+        ] {
+            assert_eq!(AutopilotMode::parse(s), Some(m));
+            assert_eq!(m.as_str(), s);
+        }
+        assert_eq!(AutopilotMode::parse("bogus"), None);
+        assert_eq!(AutopilotMode::default(), AutopilotMode::Off);
+        assert_eq!(Config::default().autopilot_min_confidence, 0.9);
+        assert_eq!(Config::default().autopilot_block_hours, 24);
     }
 
     #[test]

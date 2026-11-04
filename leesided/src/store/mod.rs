@@ -4,6 +4,8 @@
 
 mod writer;
 
+pub(crate) use writer::{upsert_decision, write_rule};
+
 use crate::rules::compile::State;
 use crate::rules::decisions::Decision;
 use crate::rules::model::{Mode, Rule, ValidationError};
@@ -253,6 +255,12 @@ pub enum StoreOp {
         ack: oneshot::Sender<Result<u32, StoreError>>,
     },
     ModeSet(Mode),
+    /// Any other `settings` row (autopilot): the env value seeds it at
+    /// open, a console write wins afterwards.
+    SettingSet {
+        key: String,
+        value: String,
+    },
     ActorUpsert(ActorRow),
     BindingUpsert(BindingRow),
     BindingDelete {
@@ -732,6 +740,32 @@ impl Store {
                 })
                 .ok();
             Ok(v.and_then(|s| Mode::parse(&s)))
+        })
+    }
+
+    /// Any `settings` row (autopilot, health): `None` when unset, so the
+    /// caller falls back to the env seed or the default.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.with_reader(|c| {
+            Ok(c.query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .ok())
+        })
+    }
+
+    /// (count, max updated_at) of the `rules` table: the sweep reloads
+    /// the compiled set only when this moves, so a rule written by a
+    /// drain lands without a reload every minute.
+    pub fn rules_fingerprint(&self) -> Result<(i64, i64), StoreError> {
+        self.with_reader(|c| {
+            c.query_row(
+                "SELECT count(*), coalesce(max(updated_at), 0) FROM rules",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
         })
     }
 

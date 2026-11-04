@@ -98,6 +98,13 @@ impl Decisions {
         self.map.remove(&(scope, key)).is_some()
     }
 
+    /// Mirror membership ignoring expiry: lift paths check this for the
+    /// 404, delete the store row, then remove, so the sweep's autopilot
+    /// merge never resurrects a lifted block.
+    pub fn contains(&self, scope: Scope, key: u64) -> bool {
+        self.map.contains_key(&(scope, key))
+    }
+
     /// Drop expired entries; returns their keys so the store can be told.
     pub fn sweep(&self, now_s: i64) -> Vec<(Scope, u64)> {
         let gone: Vec<(Scope, u64)> = self

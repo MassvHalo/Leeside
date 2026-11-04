@@ -250,6 +250,7 @@ pub enum OriginKind {
     Install,
     Operator,
     Spark,
+    Autopilot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

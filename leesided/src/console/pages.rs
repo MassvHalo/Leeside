@@ -9,7 +9,7 @@
 use super::queries::{
     ActorDetail, ActorRow, Call, CallRow, ClusterDetail, ClusterRow, DecisionView, DraftView,
     FeatureRowView, Job, LabelRef, ModelView, Outcome, PayloadRow, ReviewFull, RuleView, ScoreView,
-    TapInfo, Trace, TraceProposal, Turn, TurnLite,
+    SettingsView, TapInfo, Trace, TraceProposal, Turn, TurnLite,
 };
 use super::Role;
 use std::collections::HashMap;
@@ -228,6 +228,7 @@ fn nav(prefix: &str, active: &str) -> String {
         ("/payloads", "Payloads"),
         ("/model", "Windside model"),
         ("/features", "Features"),
+        ("/settings", "Settings"),
     ] {
         let on = if active == suffix {
             " class=\"on\""
@@ -2243,6 +2244,153 @@ pub fn features_page(table: &[(String, String)], role: Role, prefix: &str) -> St
     }
     body.push_str("</table>");
     layout("Features", "/features", &body, prefix, Some(role))
+}
+
+pub fn settings_page(v: &SettingsView, csrf: &str, role: Role, prefix: &str) -> String {
+    let mut body = String::from("<h1>Settings</h1>");
+    // Protection panel: the global mode and the two big buttons.
+    let _ = write!(
+        body,
+        "<h2>Protection</h2><dl class=\"kv\">\
+         <dt>Global mode</dt><dd>{}</dd>\
+         <dt>Enforcement</dt><dd>{}</dd></dl>",
+        mono(&v.mode),
+        if v.enforce_allowed {
+            "allowed".to_string()
+        } else {
+            "pinned off by LEESIDED_ENFORCE=false".to_string()
+        },
+    );
+    if role == Role::Admin {
+        let _ = write!(
+            body,
+            "<form class=\"inline\" method=\"post\" action=\"{prefix}/settings/mode\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <label>Global mode <select name=\"mode\">\
+             <option value=\"monitor\"{}>monitor</option>\
+             <option value=\"shadow\"{}>shadow</option>\
+             <option value=\"enforce\"{}>enforce</option>\
+             </select></label> \
+             <button class=\"btn\" type=\"submit\">Set mode</button></form>",
+            selected(&v.mode, "monitor"),
+            selected(&v.mode, "shadow"),
+            selected(&v.mode, "enforce"),
+        );
+        let _ = write!(
+            body,
+            "<form class=\"inline\" method=\"post\" action=\"{prefix}/settings/enforce\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <button class=\"btn\" type=\"submit\">Turn enforcement on</button></form> \
+             <form class=\"inline\" method=\"post\" action=\"{prefix}/settings/monitor\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <button class=\"btn\" type=\"submit\">Monitor only</button></form>\
+             <p class=\"sub\">Turn enforcement on sets the global mode to enforce and \
+             promotes the install rules to their file ceilings. Monitor only is the \
+             kill switch: it sets the global mode back to monitor.</p>",
+        );
+    }
+    // Assistant panel: autopilot and its thresholds.
+    let _ = write!(
+        body,
+        "<h2>Assistant</h2><dl class=\"kv\">\
+         <dt>Autopilot</dt><dd>{}</dd>\
+         <dt>Minimum confidence</dt><dd class=\"mono\">{}</dd>\
+         <dt>Block hours</dt><dd class=\"mono\">{}</dd></dl>",
+        mono(&v.autopilot),
+        esc(&v.min_confidence),
+        esc(&v.block_hours),
+    );
+    if role == Role::Admin {
+        let _ = write!(
+            body,
+            "<form class=\"inline\" method=\"post\" action=\"{prefix}/settings/autopilot\">\
+             <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+             <label>Autopilot <select name=\"autopilot\">\
+             <option value=\"off\"{}>off</option>\
+             <option value=\"block\"{}>block</option>\
+             <option value=\"block+rules\"{}>block+rules</option>\
+             </select></label> \
+             <label>Minimum confidence \
+             <input name=\"min_confidence\" size=\"6\" value=\"{}\"></label> \
+             <label>Block hours <input name=\"block_hours\" size=\"6\" value=\"{}\"></label> \
+             <button class=\"btn\" type=\"submit\">Save assistant</button></form>\
+             <p class=\"sub\">Applies at once, no restart. Off by default.</p>",
+            selected(&v.autopilot, "off"),
+            selected(&v.autopilot, "block"),
+            selected(&v.autopilot, "block+rules"),
+            esc(&v.min_confidence),
+            esc(&v.block_hours),
+        );
+    }
+    // Env-file rows, read-only and masked where secret.
+    body.push_str(
+        "<h2>Environment</h2>\
+         <p class=\"sub\">Read-only: edit the env file and restart leesided to change these.</p>\
+         <dl class=\"kv\">",
+    );
+    for (name, display) in &v.env {
+        let _ = write!(body, "<dt>{}</dt><dd>{}</dd>", mono(name), mono(display));
+    }
+    body.push_str("</dl>");
+    layout("Settings", "/settings", &body, prefix, Some(role))
+}
+
+fn selected(current: &str, option: &str) -> &'static str {
+    if current == option {
+        " selected"
+    } else {
+        ""
+    }
+}
+
+/// The "Turn enforcement on" confirmation step: the operator sees
+/// what the button does before it happens.
+pub fn settings_enforce_confirm(csrf: &str, role: Role, prefix: &str) -> String {
+    let body = format!(
+        "<h1>Turn enforcement on?</h1>\
+         <p>This sets the global mode to enforce and promotes every install rule \
+         to the mode its file names. Rules start acting on the next probe.</p>\
+         <form class=\"inline\" method=\"post\" action=\"{prefix}/settings/enforce\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <input type=\"hidden\" name=\"confirm\" value=\"1\">\
+         <button class=\"btn\" type=\"submit\">Yes, turn enforcement on</button></form> \
+         <a href=\"{prefix}/settings\">Cancel</a>",
+    );
+    layout(
+        "Confirm enforcement",
+        "/settings",
+        &body,
+        prefix,
+        Some(role),
+    )
+}
+
+/// What "Turn enforcement on" did, per rule: promoted, skipped, or failed.
+pub fn settings_enforce_result(
+    mode: &str,
+    rows: &[(String, Result<String, String>)],
+    role: Role,
+    prefix: &str,
+) -> String {
+    let mut body = format!(
+        "<h1>Enforcement on</h1><p>Global mode is now {}.</p>\
+         <table><tr><th>Rule</th><th>Result</th></tr>",
+        mono(mode),
+    );
+    for (id, r) in rows {
+        let cell = match r {
+            Ok(detail) => format!("{} {}", chip("promoted", "good"), esc(detail)),
+            Err(e) => format!("{} {}", chip("failed", "bad"), esc(e)),
+        };
+        let _ = write!(body, "<tr><td>{}</td><td>{cell}</td></tr>", mono(id));
+    }
+    body.push_str("</table>");
+    let _ = write!(
+        body,
+        "<p><a href=\"{prefix}/settings\">Back to Settings</a> · \
+         <a href=\"{prefix}/rules\">Rules</a></p>"
+    );
+    layout("Enforcement on", "/settings", &body, prefix, Some(role))
 }
 
 #[cfg(test)]

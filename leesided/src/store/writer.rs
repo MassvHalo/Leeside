@@ -392,6 +392,13 @@ pub(super) fn run(mut conn: Connection, rx: Receiver<StoreOp>, unjoined: Arc<Ato
                             params![mode.as_str()],
                         )?;
                     }
+                    StoreOp::SettingSet { key, value } => {
+                        tx.execute(
+                            "INSERT INTO settings (key, value) VALUES (?1, ?2) \
+                             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            params![key, value],
+                        )?;
+                    }
                     StoreOp::Flush(ack) => flushes.push(ack),
                     StoreOp::Shutdown(ack) => {
                         flushes.push(ack);
@@ -652,8 +659,11 @@ fn insert_close(tx: &Transaction, c: &Closed) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn upsert_decision(tx: &Transaction, d: &Decision) -> Result<(), StoreError> {
-    tx.execute(
+/// Shared with the LLM drain, which writes autopilot decisions on its
+/// own connection: `&Transaction` coerces to `&Connection` at the
+/// writer's call sites.
+pub(crate) fn upsert_decision(conn: &Connection, d: &Decision) -> Result<(), StoreError> {
+    conn.execute(
         "INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
          ON CONFLICT(scope, key) DO UPDATE SET action = excluded.action, mode = excluded.mode, \
@@ -685,8 +695,9 @@ fn upsert_stat(tx: &Transaction, r: &StatRow) -> Result<(), StoreError> {
 }
 
 /// Validate, bump the version, append to `rule_versions`, upsert `rules`.
-fn write_rule(
-    tx: &Transaction,
+/// Shared with the LLM drain for autopilot rule writes.
+pub(crate) fn write_rule(
+    conn: &Connection,
     rule: &Rule,
     state: State,
     changed_by: &str,
@@ -698,7 +709,7 @@ fn write_rule(
         return Err(StoreError::Invalid(errors));
     }
     let body = serde_json::to_string(rule)?;
-    let prev: Option<(u32, i64)> = tx
+    let prev: Option<(u32, i64)> = conn
         .query_row(
             "SELECT version, created_at FROM rules WHERE id = ?1",
             params![rule.id],
@@ -707,7 +718,7 @@ fn write_rule(
         .ok();
     let version = prev.map_or(1, |(v, _)| v + 1);
     let created_at = prev.map_or(now, |(_, c)| c);
-    tx.execute(
+    conn.execute(
         "INSERT INTO rule_versions (id, version, state, body, changed_by, reason, changed_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
@@ -720,7 +731,7 @@ fn write_rule(
             now
         ],
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO rules (id, version, state, mode, action, origin_kind, body, expires_at, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(id) DO UPDATE SET version = excluded.version, state = excluded.state, \
@@ -748,5 +759,6 @@ fn origin_kind(rule: &Rule) -> &'static str {
         OriginKind::Install => "install",
         OriginKind::Operator => "operator",
         OriginKind::Spark => "spark",
+        OriginKind::Autopilot => "autopilot",
     }
 }

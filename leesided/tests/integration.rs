@@ -1065,6 +1065,379 @@ async fn api_v1_review_decide_and_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_panels_write_and_persist() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/settings", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    assert!(body.contains("Protection"), "{body}");
+    assert!(body.contains("Assistant"), "{body}");
+    assert!(body.contains("Environment"), "{body}");
+    assert!(body.contains("Turn enforcement on"), "{body}");
+    assert!(body.contains("••••oken"), "api token masked: {body}");
+    assert!(!body.contains("op-token"), "no secret in the page");
+    // Seeded from the default config: off, 0.9, 24.
+    let (st, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["autopilot"]["mode"], "off");
+    assert_eq!(v["autopilot"]["min_confidence"], 0.9);
+    assert_eq!(v["autopilot"]["block_hours"], 24);
+    let csrf = ui_csrf(&body);
+    // Bad values 422 with the field named.
+    for form in [
+        format!("csrf={csrf}&autopilot=bogus&min_confidence=0.9&block_hours=24"),
+        format!("csrf={csrf}&autopilot=block&min_confidence=2&block_hours=24"),
+        format!("csrf={csrf}&autopilot=block&min_confidence=0.9&block_hours=0"),
+    ] {
+        let (st, _, _) = h
+            .ui(
+                "POST",
+                "/windside/settings/autopilot",
+                Some(&admin),
+                Some(&form),
+            )
+            .await;
+        assert_eq!(st, 422, "{form}");
+    }
+    // The write applies at once and shows on health and status.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/windside/settings/autopilot",
+            Some(&admin),
+            Some(&format!(
+                "csrf={csrf}&autopilot=block%2Brules&min_confidence=0.85&block_hours=48"
+            )),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (st, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["autopilot"]["mode"], "block+rules");
+    assert_eq!(v["autopilot"]["min_confidence"], 0.85);
+    assert_eq!(v["autopilot"]["block_hours"], 48);
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/status", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["autopilot"]["mode"], "block+rules");
+    // The mode selector and the kill switch.
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/windside/settings/mode",
+            Some(&admin),
+            Some(&format!("csrf={csrf}&mode=shadow")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (_, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(v["mode"], "shadow");
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/windside/settings/monitor",
+            Some(&admin),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 303);
+    let (_, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(v["mode"], "monitor");
+    // Across a restart the console write wins over the env seed.
+    let h = h.restart().await;
+    let (st, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["autopilot"]["mode"], "block+rules");
+    assert_eq!(v["autopilot"]["min_confidence"], 0.85);
+    assert_eq!(v["autopilot"]["block_hours"], 48);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_enforce_promotes_install_rules() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let rules_dir = dir.join("rules");
+    std::fs::create_dir_all(&rules_dir).unwrap();
+    // An install file naming enforce, under the generic rule's id.
+    let mut file = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/rules/install/portal-otp-burst.json"
+    ))
+    .unwrap();
+    file = file.replacen("portal-otp-burst", "auth-burst-peer", 1);
+    std::fs::write(rules_dir.join("auth-burst-peer.json"), file).unwrap();
+    let cfg = Config {
+        socket_dir: dir.clone(),
+        db: dir.join("leesided.sqlite"),
+        api: "127.0.0.1:0".parse().unwrap(),
+        enforce: true,
+        rules_dir,
+        socket_mode: 0o600,
+        socket_gid: None,
+        api_token: Some("op-token".to_string()),
+        console_path: "/windside".to_string(),
+        hash_key: Some("test-key".into()),
+        ..Config::default()
+    };
+    let engine = Engine::open(cfg).await.expect("engine open");
+    let running = serve(engine.clone()).await.expect("serve");
+    let h = Harness {
+        dir,
+        engine,
+        running,
+    };
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let (st, _, body) = h.ui("GET", "/windside/settings", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    let csrf = ui_csrf(&body);
+    // The first post asks for confirmation; nothing changes.
+    let (st, _, body) = h
+        .ui(
+            "POST",
+            "/windside/settings/enforce",
+            Some(&admin),
+            Some(&format!("csrf={csrf}")),
+        )
+        .await;
+    assert_eq!(st, 200);
+    assert!(body.contains("Turn enforcement on?"), "{body}");
+    let (_, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(v["mode"], "monitor");
+    // Confirmed: the mode flips and the rule takes its file ceiling.
+    let (st, _, body) = h
+        .ui(
+            "POST",
+            "/windside/settings/enforce",
+            Some(&admin),
+            Some(&format!("csrf={csrf}&confirm=1")),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.contains("promoted"), "{body}");
+    assert!(body.contains("auth-burst-peer"), "{body}");
+    let (_, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(v["mode"], "enforce");
+    let (st, v) = h
+        .ui_json("GET", "/windside/api/v1/status", Some(&admin), None)
+        .await;
+    assert_eq!(st, 200, "{v}");
+    let rule = v["rules_detail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "auth-burst-peer")
+        .expect("the promoted rule in status");
+    assert_eq!(rule["mode"], "enforce");
+    assert_eq!(rule["effective"], "enforce");
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_benign_lifts_the_block() {
+    let h = ui_console_harness(Some("op-token"), Some("view-token"), "/windside", None, &[]).await;
+    let (_, headers, _) = h.ui_login("op-token").await;
+    let admin = ui_cookie(&headers);
+    let now = leesided::store::now_s();
+    let ts_us = now * 1_000_000;
+    let db = h.dir.join("leesided.sqlite");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO actors (id, opened_us, last_us, turns) VALUES ('fedcba9876543210', 0, {ts_us}, 1); \
+             INSERT INTO turns (turn_id, session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id, surface) VALUES \
+             ('t1', 's1', {ts_us}, {now}, 'p1', 'anon', 'GET', 'home', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'fedcba9876543210', 'web'); \
+             INSERT INTO feature_vectors (scope, key, turn_id, ts_us, version, vector, surface, clock_anomalies) VALUES \
+             ('actor', 'fedcba9876543210', 't1', {ts_us}, 2, '[0.0]', 'web', 0); \
+             INSERT INTO scores (scope, scope_id, turn_id, surface, ts_us, score, model_version, top3) VALUES \
+             ('actor', 'fedcba9876543210', 't1', 'web', {ts_us}, 0.9, '0.1.0', '[]');",
+        ))
+        .unwrap();
+    let decide = "/windside/api/v1/review/actor/fedcba9876543210/decision";
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            decide,
+            Some(&admin),
+            Some(&json!({"decision": "confirm", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["blocked"], true);
+    // "It's fine" writes benign and lifts: the row and the mirror agree.
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            decide,
+            Some(&admin),
+            Some(&json!({"decision": "benign", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["label"], "benign");
+    assert_eq!(v["lifted"], true);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM decisions WHERE scope = 'actor' AND key = 'fedcba9876543210'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+    assert!(h
+        .engine
+        .decisions
+        .get(
+            leesided::rules::model::Scope::Actor,
+            0xfedcba9876543210,
+            leesided::store::now_s()
+        )
+        .is_none());
+    // The console form lifts the same way: re-block, then decide benign.
+    let (st, v) = h
+        .ui_json(
+            "POST",
+            decide,
+            Some(&admin),
+            Some(&json!({"decision": "confirm", "window_end_ts": ts_us})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}");
+    // The session's CSRF token, from a page that always renders forms.
+    let (st, _, body) = h.ui("GET", "/windside/settings", Some(&admin), None).await;
+    assert_eq!(st, 200);
+    let csrf = ui_csrf(&body);
+    let (st, _, _) = h
+        .ui(
+            "POST",
+            "/windside/review/decide",
+            Some(&admin),
+            Some(&format!(
+                "csrf={csrf}&scope_id=fedcba9876543210&window_end_ts={ts_us}&verdict=benign"
+            )),
+        )
+        .await;
+    assert_eq!(st, 303, "{body}");
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM decisions WHERE scope = 'actor' AND key = 'fedcba9876543210'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_merges_autopilot_decisions_and_rules() {
+    let h = ui_console_harness(Some("op-token"), None, "/windside", None, &[]).await;
+    let now = leesided::store::now_s();
+    let db = h.dir.join("leesided.sqlite");
+    let file = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/rules/install/portal-otp-burst.json"
+    ))
+    .unwrap()
+    .replacen("portal-otp-burst", "sweep-test-rule", 1)
+    .replacen("\"mode\": \"enforce\"", "\"mode\": \"shadow\"", 1)
+    .replacen("\"kind\": \"install\"", "\"kind\": \"autopilot\"", 1);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) VALUES \
+             ('actor', 'aaaaaaaaaaaaaaaa', 'block', 'enforce', 'autopilot', 0, {now}, {exp}); \
+             INSERT INTO rules (id, version, state, mode, action, origin_kind, body, expires_at, created_at, updated_at) VALUES \
+             ('sweep-test-rule', 1, 'active', 'shadow', 'rate_limit', 'autopilot', '{body}', NULL, {now}, {now});",
+            exp = now + 3600,
+            body = file.replace('\'', "''"),
+        ))
+        .unwrap();
+    assert!(h
+        .engine
+        .decisions
+        .get(
+            leesided::rules::model::Scope::Actor,
+            0xaaaaaaaaaaaaaaaa,
+            now
+        )
+        .is_none());
+    assert!(!h
+        .engine
+        .rules
+        .loaded()
+        .iter()
+        .any(|(r, _)| r.id == "sweep-test-rule"));
+    h.engine.sweep().await;
+    let d = h
+        .engine
+        .decisions
+        .get(
+            leesided::rules::model::Scope::Actor,
+            0xaaaaaaaaaaaaaaaa,
+            now,
+        )
+        .expect("the merged block");
+    assert_eq!(d.rule.as_ref(), "autopilot");
+    assert_eq!(d.expires_at, now + 3600);
+    assert!(
+        h.engine
+            .rules
+            .loaded()
+            .iter()
+            .any(|(r, _)| r.id == "sweep-test-rule"
+                && r.mode == leesided::rules::model::Mode::Shadow),
+        "the sweep loads the new rule"
+    );
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn env_seeds_autopilot_when_no_console_write() {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("leesided-it-{n}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("rules-empty")).unwrap();
+    let cfg = Config {
+        socket_dir: dir.clone(),
+        db: dir.join("leesided.sqlite"),
+        api: "127.0.0.1:0".parse().unwrap(),
+        rules_dir: dir.join("rules-empty"),
+        api_token: Some("t".to_string()),
+        autopilot: leesided::config::AutopilotMode::Block,
+        autopilot_min_confidence: 0.8,
+        autopilot_block_hours: 12,
+        ..Config::default()
+    };
+    let engine = Engine::open(cfg).await.expect("engine open");
+    let running = serve(engine.clone()).await.expect("serve");
+    let h = Harness {
+        dir,
+        engine,
+        running,
+    };
+    let (st, v) = h.http_as(None, "GET", "/health", None).await;
+    assert_eq!(st, 200);
+    assert_eq!(v["autopilot"]["mode"], "block");
+    assert_eq!(v["autopilot"]["min_confidence"], 0.8);
+    assert_eq!(v["autopilot"]["block_hours"], 12);
+    h.running.abort();
+    h.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ui_dist_served_from_console_dir() {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("leesided-it-{}-{n}", std::process::id()));
@@ -4209,6 +4582,7 @@ async fn ui_viewer_reads_but_cannot_mutate() {
         "/windside/model",
         "/windside/features",
         "/windside/payloads",
+        "/windside/settings",
     ] {
         let (st, _, body) = h.ui("GET", path, Some(&cookie), None).await;
         assert_eq!(st, 200, "{path}");
@@ -4240,6 +4614,13 @@ async fn ui_viewer_reads_but_cannot_mutate() {
         ),
         ("/windside/rules/abc/enable", "csrf=x"),
         ("/windside/rules/abc/disable", "csrf=x"),
+        ("/windside/settings/mode", "csrf=x&mode=monitor"),
+        ("/windside/settings/enforce", "csrf=x&confirm=1"),
+        ("/windside/settings/monitor", "csrf=x"),
+        (
+            "/windside/settings/autopilot",
+            "csrf=x&autopilot=block&min_confidence=0.9&block_hours=24",
+        ),
     ] {
         let (st, _, _) = h.ui("POST", path, Some(&cookie), Some(form)).await;
         assert_eq!(st, 403, "POST {path}");

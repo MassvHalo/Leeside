@@ -1121,7 +1121,7 @@ pub async fn actor_unblock(
             );
         }
     };
-    if !e.decisions.remove(crate::rules::model::Scope::Actor, key) {
+    if !e.decisions.contains(crate::rules::model::Scope::Actor, key) {
         return page(
             StatusCode::NOT_FOUND,
             pages::error_page(
@@ -1132,11 +1132,15 @@ pub async fn actor_unblock(
             ),
         );
     }
+    // The row goes first, the mirror entry after: the sweep merges
+    // autopilot rows it finds in the store, so the reverse order could
+    // resurrect the block being lifted.
     e.store.send(StoreOp::DecisionDelete {
         scope: crate::rules::model::Scope::Actor,
         key,
     });
     e.store.flush().await;
+    e.decisions.remove(crate::rules::model::Scope::Actor, key);
     Redirect::to(&format!("{}/actors/{}", e.cfg.console_path, ids[0])).into_response()
 }
 
@@ -1232,7 +1236,25 @@ pub async fn review_decide(
         daily_calls: llm_budgets(&e).0,
         daily_tokens: llm_budgets(&e).1,
     }));
+    // "It's fine" lifts the block: an autopilot action the operator
+    // rejects must stop answering, not wait out its expiry. The row
+    // goes first, the mirror entry after, like every lift.
+    let lift = if f.verdict == "benign" {
+        crate::rules::windows::key16(&detail.head.id)
+    } else {
+        None
+    }
+    .filter(|k| e.decisions.contains(crate::rules::model::Scope::Actor, *k));
+    if let Some(k) = lift {
+        e.store.send(StoreOp::DecisionDelete {
+            scope: crate::rules::model::Scope::Actor,
+            key: k,
+        });
+    }
     e.store.flush().await;
+    if let Some(k) = lift {
+        e.decisions.remove(crate::rules::model::Scope::Actor, k);
+    }
     Redirect::to(&format!("{}/review", e.cfg.console_path)).into_response()
 }
 
@@ -1445,4 +1467,365 @@ pub async fn features_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri
         StatusCode::OK,
         pages::features_page(&queries::feature_table(), session.role, &e.cfg.console_path),
     )
+}
+
+// ---------- settings ----------
+
+/// A secret for display: the last four characters behind bullets,
+/// nothing recognisable. Char-safe.
+fn masked(v: &str) -> String {
+    let tail: String = v
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("••••{tail}")
+}
+
+fn opt_display(v: Option<&str>, secret: bool) -> String {
+    match v {
+        None => "unset".to_string(),
+        Some(s) if secret => masked(s),
+        Some(s) => s.to_string(),
+    }
+}
+
+fn settings_view(e: &Engine) -> queries::SettingsView {
+    let get = |key: &str| e.store.get_setting(key).unwrap_or(None);
+    let cfg = &e.cfg;
+    queries::SettingsView {
+        mode: e.mode().as_str().to_string(),
+        enforce_allowed: cfg.enforce,
+        autopilot: get(crate::llm::SETTING_AUTOPILOT).unwrap_or_else(|| "off".to_string()),
+        min_confidence: get(crate::llm::SETTING_AUTOPILOT_MIN_CONFIDENCE)
+            .unwrap_or_else(|| "0.9".to_string()),
+        block_hours: get(crate::llm::SETTING_AUTOPILOT_BLOCK_HOURS)
+            .unwrap_or_else(|| "24".to_string()),
+        env: vec![
+            (
+                "LEESIDED_ENFORCE".to_string(),
+                if cfg.enforce { "on" } else { "off" }.to_string(),
+            ),
+            (
+                "LEESIDED_LLM_URL".to_string(),
+                opt_display(cfg.llm_url.as_deref(), false),
+            ),
+            ("LEESIDED_LLM_MODEL".to_string(), cfg.llm_model.clone()),
+            (
+                "LEESIDED_LLM_MODE".to_string(),
+                cfg.llm_mode.as_str().to_string(),
+            ),
+            (
+                "LEESIDED_LLM_KEY".to_string(),
+                opt_display(cfg.llm_key.as_deref(), true),
+            ),
+            (
+                "LEESIDED_WINDSIDE_MODEL".to_string(),
+                cfg.windside_model
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "unset".to_string()),
+            ),
+            (
+                "LEESIDED_WINDSIDE_MODE".to_string(),
+                cfg.windside_mode.as_str().to_string(),
+            ),
+            (
+                "LEESIDED_API_TOKEN".to_string(),
+                opt_display(cfg.api_token.as_deref(), true),
+            ),
+            (
+                "LEESIDED_VIEWER_TOKEN".to_string(),
+                opt_display(cfg.viewer_token.as_deref(), true),
+            ),
+            (
+                "LEESIDED_HASH_KEY".to_string(),
+                opt_display(cfg.hash_key.as_deref(), true),
+            ),
+            (
+                "LEESIDED_RULES_DIR".to_string(),
+                cfg.rules_dir.display().to_string(),
+            ),
+        ],
+    }
+}
+
+pub async fn settings_page(State(e): State<Arc<Engine>>, headers: HeaderMap, uri: Uri) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    page(
+        StatusCode::OK,
+        pages::settings_page(
+            &settings_view(&e),
+            &session.csrf,
+            session.role,
+            &e.cfg.console_path,
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct ModeForm {
+    csrf: String,
+    mode: String,
+}
+
+pub async fn settings_mode(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(f): Form<ModeForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden(&e);
+    }
+    let Some(mode) = crate::rules::model::Mode::parse(&f.mode) else {
+        return page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            pages::error_page(
+                422,
+                "Bad mode",
+                &format!("mode must be monitor, shadow or enforce, not {}", f.mode),
+                &e.cfg.console_path,
+            ),
+        );
+    };
+    if e.set_mode(mode).is_err() {
+        return page(
+            StatusCode::CONFLICT,
+            pages::error_page(
+                409,
+                "Enforcement pinned off",
+                "LEESIDED_ENFORCE=false pins the global mode below enforce",
+                &e.cfg.console_path,
+            ),
+        );
+    }
+    tracing::info!(by = "console", mode = mode.as_str(), "global mode set");
+    Redirect::to(&format!("{}/settings", e.cfg.console_path)).into_response()
+}
+
+pub async fn settings_monitor(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(f): Form<CsrfForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden(&e);
+    }
+    // Monitor is never pinned: the kill switch always works.
+    let _ = e.set_mode(crate::rules::model::Mode::Monitor);
+    tracing::info!(by = "console", "kill switch: global mode set to monitor");
+    Redirect::to(&format!("{}/settings", e.cfg.console_path)).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct EnforceForm {
+    csrf: String,
+    confirm: Option<String>,
+}
+
+pub async fn settings_enforce(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(f): Form<EnforceForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden(&e);
+    }
+    if f.confirm.as_deref() != Some("1") {
+        return page(
+            StatusCode::OK,
+            pages::settings_enforce_confirm(&session.csrf, session.role, &e.cfg.console_path),
+        );
+    }
+    if e.set_mode(crate::rules::model::Mode::Enforce).is_err() {
+        return page(
+            StatusCode::CONFLICT,
+            pages::error_page(
+                409,
+                "Enforcement pinned off",
+                "LEESIDED_ENFORCE=false pins the global mode below enforce",
+                &e.cfg.console_path,
+            ),
+        );
+    }
+    let rows = promote_install_rules(&e).await;
+    let promoted = rows.iter().filter(|(_, r)| r.is_ok()).count();
+    tracing::info!(
+        by = "console",
+        promoted,
+        of = rows.len(),
+        "enforcement turned on from the console"
+    );
+    page(
+        StatusCode::OK,
+        pages::settings_enforce_result(e.mode().as_str(), &rows, session.role, &e.cfg.console_path),
+    )
+}
+
+/// The README's promote loop as a console action: every `*.json` in
+/// the install directory is written over the installed rule of the
+/// same id, so each rule takes its file's mode as its ceiling.
+/// Files that do not parse, ids with no installed rule, and retired
+/// rules are reported, not written.
+async fn promote_install_rules(e: &Engine) -> Vec<(String, Result<String, String>)> {
+    let mut paths: Vec<_> = match std::fs::read_dir(&e.cfg.rules_dir) {
+        Ok(rd) => rd
+            .filter_map(|en| en.ok().map(|en| en.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .collect(),
+        Err(err) => {
+            return vec![(
+                "(rules dir)".to_string(),
+                Err(format!("cannot read: {err}")),
+            )];
+        }
+    };
+    paths.sort();
+    let mut out = Vec::with_capacity(paths.len());
+    for path in paths {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(err) => {
+                out.push((name, Err(format!("cannot read: {err}"))));
+                continue;
+            }
+        };
+        let rule: crate::rules::model::Rule = match serde_json::from_str(&text) {
+            Ok(r) => r,
+            Err(err) => {
+                out.push((name, Err(format!("not a rule: {err}"))));
+                continue;
+            }
+        };
+        let id = rule.id.clone();
+        let row = match e.store.load_rule(&id) {
+            Ok(r) => r,
+            Err(err) => {
+                out.push((id, Err(format!("store read failed: {err}"))));
+                continue;
+            }
+        };
+        let Some(row) = row else {
+            out.push((
+                id,
+                Err("no installed rule with this id; skipped".to_string()),
+            ));
+            continue;
+        };
+        if row.state == crate::rules::compile::State::Retired {
+            out.push((id, Err("rule is retired; skipped".to_string())));
+            continue;
+        }
+        let ceiling = rule.mode.as_str().to_string();
+        match e
+            .write_rule(
+                rule,
+                row.state,
+                "console",
+                Some("promoted to file ceiling".into()),
+            )
+            .await
+        {
+            Ok(version) => out.push((id, Ok(format!("v{version}, mode {ceiling}")))),
+            Err(err) => out.push((id, Err(format!("rejected: {err}")))),
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+pub struct AutopilotForm {
+    csrf: String,
+    autopilot: String,
+    min_confidence: String,
+    block_hours: String,
+}
+
+pub async fn settings_autopilot(
+    State(e): State<Arc<Engine>>,
+    headers: HeaderMap,
+    uri: Uri,
+    Form(f): Form<AutopilotForm>,
+) -> Response {
+    let session = or_return!(require(&e, &headers, &uri));
+    if let Err(r) = require_admin(&e, &session) {
+        return *r;
+    }
+    if !csrf_ok(&session, &f.csrf) {
+        return forbidden(&e);
+    }
+    let bad = |detail: &str| {
+        page(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            pages::error_page(422, "Bad autopilot value", detail, &e.cfg.console_path),
+        )
+    };
+    if crate::config::AutopilotMode::parse(&f.autopilot).is_none() {
+        return bad(&format!(
+            "autopilot must be off, block or block+rules, not {}",
+            f.autopilot
+        ));
+    }
+    let conf: f64 = match f.min_confidence.trim().parse() {
+        Ok(c) if (0.0..=1.0).contains(&c) => c,
+        _ => {
+            return bad(&format!(
+                "minimum confidence must be 0 to 1, not {}",
+                f.min_confidence
+            ));
+        }
+    };
+    let hours: u64 = match f.block_hours.trim().parse() {
+        Ok(h) if h > 0 => h,
+        _ => {
+            return bad(&format!(
+                "block hours must be at least 1, not {}",
+                f.block_hours
+            ));
+        }
+    };
+    for (key, value) in [
+        (crate::llm::SETTING_AUTOPILOT, f.autopilot.clone()),
+        (
+            crate::llm::SETTING_AUTOPILOT_MIN_CONFIDENCE,
+            conf.to_string(),
+        ),
+        (crate::llm::SETTING_AUTOPILOT_BLOCK_HOURS, hours.to_string()),
+    ] {
+        e.store.send(StoreOp::SettingSet {
+            key: key.to_string(),
+            value,
+        });
+    }
+    e.store.flush().await;
+    tracing::info!(
+        by = "console",
+        autopilot = %f.autopilot,
+        min_confidence = conf,
+        block_hours = hours,
+        "autopilot settings written"
+    );
+    Redirect::to(&format!("{}/settings", e.cfg.console_path)).into_response()
 }

@@ -75,6 +75,9 @@ pub struct Engine {
     pub migration_version: i64,
     /// The inspector's sessions (docs/inspector.md).
     pub console: crate::console::Console,
+    /// The `rules` fingerprint the compiled set was built from: the
+    /// sweep reloads only when it moves (autopilot rule writes).
+    rules_seen: Mutex<(i64, i64)>,
 }
 
 /// What `WINDSIDE_MODEL` gave: the loaded model, or the refusal reason
@@ -332,6 +335,35 @@ impl Engine {
         if !cfg.enforce && mode == Mode::Enforce {
             mode = Mode::Monitor;
         }
+        // The env seeds the autopilot rows only when no console write
+        // has landed: a stored value always wins over the seed.
+        let seeds = [
+            (
+                crate::llm::SETTING_AUTOPILOT,
+                cfg.autopilot.as_str().to_string(),
+            ),
+            (
+                crate::llm::SETTING_AUTOPILOT_MIN_CONFIDENCE,
+                cfg.autopilot_min_confidence.to_string(),
+            ),
+            (
+                crate::llm::SETTING_AUTOPILOT_BLOCK_HOURS,
+                cfg.autopilot_block_hours.to_string(),
+            ),
+        ];
+        let mut seeded = false;
+        for (key, value) in &seeds {
+            if store.get_setting(key)?.is_none() {
+                store.send(StoreOp::SettingSet {
+                    key: key.to_string(),
+                    value: value.clone(),
+                });
+                seeded = true;
+            }
+        }
+        if seeded {
+            store.flush().await;
+        }
         let hasher = cfg.hash_key.as_deref().map(crate::hash::Hasher::new);
         if hasher.is_none() {
             tracing::warn!("LEESIDED_HASH_KEY unset: ip_hash and net_hash stay null");
@@ -359,6 +391,7 @@ impl Engine {
             geoip = !enrich.is_empty(),
             "engine open"
         );
+        let rules_seen = store.rules_fingerprint()?;
         let engine = Arc::new(Engine {
             cfg,
             symbols,
@@ -380,6 +413,7 @@ impl Engine {
             llm,
             migration_version,
             console: crate::console::Console::default(),
+            rules_seen: Mutex::new(rules_seen),
         });
         let replayed = engine.replay_windows(now_us - 24 * 3_600 * 1_000_000)?;
         if replayed > 0 {
@@ -1219,13 +1253,51 @@ impl Engine {
         self.resolver.key("conn", &format!("{ip}:{port}"))
     }
 
-    /// The 60 s sweep: expired decisions, idle windows, expired rules.
+    /// The 60 s sweep: autopilot rows merged into the live set,
+    /// expired decisions, idle windows, expired rules.
     pub async fn sweep(&self) {
         let now_s = store::now_s();
         let now_ms = now_s as u64 * 1000;
         self.conns.sweep(now_ms);
+        // Autopilot lands through the drain's own connection, so its
+        // rows reach the store ahead of the live set: merge live
+        // `autopilot` rows the mirror lacks, and refresh ones a repeat
+        // landing extended. Every other writer is mirror-first, so only
+        // autopilot rows merge. Lift paths delete the row before
+        // removing the mirror entry, so a merge never resurrects a
+        // lifted block. The merge runs ahead of the expiry sweep so a
+        // refreshed row is never swept as expired.
+        match self.store.load_decisions(now_s) {
+            Ok(live) => {
+                for d in live {
+                    if d.rule.as_ref() != "autopilot" {
+                        continue;
+                    }
+                    let stale = self
+                        .decisions
+                        .get(d.scope, d.key, now_s)
+                        .is_none_or(|m| d.created_at > m.created_at);
+                    if stale {
+                        self.decisions.insert(d);
+                    }
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "decision merge failed"),
+        }
         for (scope, key) in self.decisions.sweep(now_s) {
             self.store.send(StoreOp::DecisionDelete { scope, key });
+        }
+        // Same for block+rules writes: reload only when the table moved.
+        match self.store.rules_fingerprint() {
+            Ok(fp) => {
+                if fp != *self.rules_seen.lock() {
+                    match self.rules.load() {
+                        Ok(()) => *self.rules_seen.lock() = fp,
+                        Err(e) => tracing::error!(error = %e, "rule reload failed"),
+                    }
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "rules fingerprint failed"),
         }
         for closed in self.windows.sweep(now_ms) {
             self.store.send(StoreOp::ConversationClose(closed));
@@ -1337,6 +1409,25 @@ impl Engine {
         }
     }
 
+    /// The `/health` autopilot fragment: the settings rows, with the
+    /// seed-or-default fallback the gates use. The status route inherits
+    /// it through `health()`.
+    fn autopilot_health(&self) -> serde_json::Value {
+        let get = |key: &str| self.store.get_setting(key).unwrap_or(None);
+        let mode = get(crate::llm::SETTING_AUTOPILOT).unwrap_or_else(|| "off".to_string());
+        let min_confidence: f64 = get(crate::llm::SETTING_AUTOPILOT_MIN_CONFIDENCE)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.9);
+        let block_hours: u64 = get(crate::llm::SETTING_AUTOPILOT_BLOCK_HOURS)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
+        serde_json::json!({
+            "mode": mode,
+            "min_confidence": min_confidence,
+            "block_hours": block_hours,
+        })
+    }
+
     /// The `/health` LLM fragment: mode, JSON mode, and per-point
     /// daily call and token totals from the call log.
     fn llm_health(&self) -> serde_json::Value {
@@ -1391,6 +1482,7 @@ impl Engine {
             "schema_versions": SCHEMA_VERSIONS,
             "features_version": features::VERSION,
             "migration_version": self.migration_version,
+            "autopilot": self.autopilot_health(),
             "windside": {
                 "mode": self.windside.mode.as_str(),
                 "model_version": self.windside.loaded.as_ref().map(|l| l.manifest.model_version.clone()),

@@ -44,6 +44,7 @@ pub enum WhyInQueue {
     Uncertain,
     UnlabelledProposal,
     Score,
+    AutopilotActed,
 }
 
 impl WhyInQueue {
@@ -55,11 +56,15 @@ impl WhyInQueue {
             WhyInQueue::Uncertain => "uncertain",
             WhyInQueue::UnlabelledProposal => "unlabelled_proposal",
             WhyInQueue::Score => "score",
+            WhyInQueue::AutopilotActed => "autopilot_acted",
         }
     }
 
     fn tier(self) -> u8 {
         match self {
+            // An autopilot action awaiting confirmation sorts above
+            // everything, but it is agreement, not disagreement.
+            WhyInQueue::AutopilotActed => 0,
             WhyInQueue::RuleBelowThreshold
             | WhyInQueue::ObserveBelowThreshold
             | WhyInQueue::AboveThresholdNoRule => 1,
@@ -81,6 +86,7 @@ impl WhyInQueue {
             WhyInQueue::Uncertain => "score uncertain",
             WhyInQueue::UnlabelledProposal => "proposal unconfirmed",
             WhyInQueue::Score => "scored low, nothing fired",
+            WhyInQueue::AutopilotActed => "blocked by autopilot, confirm or undo",
         }
     }
 
@@ -335,13 +341,16 @@ pub fn review_rows(
         if operator_ts > 0 && operator_ts >= proposal_ts.max(last_hit) {
             continue;
         }
+        let auto_ts = latest_label_ts(conn, &scope, &scope_id, "assistant_auto")?;
         let threshold = surface
             .as_deref()
             .and_then(|s| thresholds.get(s).copied())
             .unwrap_or(0.5);
         let has_rule = !rule_hits.is_empty();
         let has_observe = !observe_hits.is_empty();
-        let why = if has_rule && score < threshold {
+        let why = if auto_ts > 0 && auto_ts > operator_ts {
+            WhyInQueue::AutopilotActed
+        } else if has_rule && score < threshold {
             WhyInQueue::RuleBelowThreshold
         } else if has_observe && score < threshold {
             WhyInQueue::ObserveBelowThreshold
@@ -668,6 +677,7 @@ pub fn run_review(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn why_phrases_match_the_handoff_and_prompt() {
@@ -689,6 +699,11 @@ mod tests {
             "proposal unconfirmed"
         );
         assert_eq!(WhyInQueue::Score.phrase(), "scored low, nothing fired");
+        assert_eq!(
+            WhyInQueue::AutopilotActed.phrase(),
+            "blocked by autopilot, confirm or undo"
+        );
+        assert_eq!(WhyInQueue::AutopilotActed.as_str(), "autopilot_acted");
     }
 
     #[test]
@@ -704,9 +719,50 @@ mod tests {
             WhyInQueue::Uncertain,
             WhyInQueue::UnlabelledProposal,
             WhyInQueue::Score,
+            WhyInQueue::AutopilotActed,
         ] {
             assert!(!w.disagree(), "{w:?}");
         }
+    }
+
+    #[test]
+    fn review_rows_reports_autopilot_acted_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scores (scope TEXT, scope_id TEXT, surface TEXT, ts_us INTEGER, score REAL, top3 TEXT); \
+             CREATE TABLE feature_vectors (scope TEXT, key TEXT, vector TEXT, ts_us INTEGER); \
+             CREATE TABLE turns (actor_id TEXT, cluster_key TEXT, rules_matched TEXT, ts_us INTEGER); \
+             CREATE TABLE labels (id INTEGER PRIMARY KEY, scope TEXT, scope_id TEXT, surface TEXT, \
+               window_end_ts INTEGER, label TEXT, source TEXT, confidence REAL, note TEXT, \
+               created_at INTEGER, signals TEXT, cited_turns TEXT); \
+             CREATE TABLE decisions (scope TEXT, key TEXT, rule TEXT, created_at INTEGER, expires_at INTEGER); \
+             INSERT INTO scores VALUES \
+               ('actor', 'a1', 'web', 3000000, 0.9, '[]'), \
+               ('actor', 'a2', 'web', 3000000, 0.2, '[]'); \
+             INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, created_at) VALUES \
+               ('actor', 'a1', 'web', 3, 'malicious', 'llm_proposed', 0.95, 'r', 100), \
+               ('actor', 'a1', 'web', 3, 'malicious', 'assistant_auto', 0.95, 'auto', 200); \
+             INSERT INTO turns VALUES ('a2', 'cc', '[{\"rule\":\"r\",\"action\":\"block\",\"mode\":\"enforce\"}]', 3000000);",
+        )
+        .unwrap();
+        let rows = review_rows(&conn, 10, &HashMap::from([("web".to_string(), 0.5)])).unwrap();
+        assert_eq!(rows.len(), 2);
+        // The autopilot action sorts above the tier-1 rule hit.
+        assert_eq!(rows[0].scope_id, "a1");
+        assert_eq!(rows[0].why, WhyInQueue::AutopilotActed);
+        assert_eq!(rows[1].scope_id, "a2");
+        assert_eq!(rows[1].why, WhyInQueue::RuleBelowThreshold);
+        // "It's fine" clears it: an operator label at or after the
+        // action leaves the queue.
+        conn.execute(
+            "INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, created_at) \
+             VALUES ('actor', 'a1', 'web', 3, 'benign', 'operator', 1.0, 'review', 300)",
+            [],
+        )
+        .unwrap();
+        let rows = review_rows(&conn, 10, &HashMap::from([("web".to_string(), 0.5)])).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope_id, "a2");
     }
 
     #[test]

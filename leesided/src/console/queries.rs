@@ -2916,6 +2916,22 @@ pub struct ModelView {
     pub shadow_error: Option<String>,
 }
 
+// ---------- settings ----------
+
+/// The Settings page: the live protection and assistant state plus
+/// the read-only env-file rows. Built by the console handler from
+/// the engine and the settings table, not by a store query.
+#[derive(Debug, Clone)]
+pub struct SettingsView {
+    pub mode: String,
+    pub enforce_allowed: bool,
+    pub autopilot: String,
+    pub min_confidence: String,
+    pub block_hours: String,
+    /// (name, display): secrets masked, the rest verbatim.
+    pub env: Vec<(String, String)>,
+}
+
 // ---------- features ----------
 
 /// The feature names in order with their one-line descriptions, read
@@ -3499,6 +3515,32 @@ impl Ctx<'_> {
         }))
     }
 
+    /// The first surviving signal on the subject's latest
+    /// `assistant_auto` label: the `<signal>` in the autopilot
+    /// episode line. `None` when the action rode the score arm with
+    /// no cited signal.
+    fn autopilot_signal(&self, scope: &str, id: &str) -> Result<Option<String>, QueryError> {
+        let row: Option<Option<String>> = self
+            .conn()
+            .query_row(
+                "SELECT signals FROM labels \
+                 WHERE scope = ?1 AND scope_id = ?2 AND source = 'assistant_auto' \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![scope, id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(QueryError::Sqlite(e)),
+            })?;
+        Ok(row.flatten().and_then(|s| {
+            serde_json::from_str::<Vec<String>>(&s)
+                .ok()
+                .and_then(|v| v.into_iter().next())
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn episode_for(
         &self,
@@ -3627,6 +3669,12 @@ impl Ctx<'_> {
             a => a,
         });
         let did = match (&stopped, state) {
+            (Some(s), _) if s.rule == "autopilot" => match self.autopilot_signal(scope, id)? {
+                Some(signal) => {
+                    format!("Blocked by autopilot on {signal}; waiting for your confirmation")
+                }
+                None => "Blocked by autopilot; waiting for your confirmation".to_string(),
+            },
             (Some(s), _) => match action_word {
                 Some(w) => format!("{w} by {}", s.rule),
                 None => format!("Stopped by {}", s.rule),
@@ -5780,6 +5828,38 @@ mod tests {
         ))
         .unwrap();
         (conn, now)
+    }
+
+    #[test]
+    fn episode_autopilot_block_names_its_signal() {
+        let (conn, now) = episode_db("episodes-auto");
+        let us = |s: i64| s * 1_000_000;
+        conn.execute_batch(&format!(
+            "INSERT INTO turns (session_key, ts_us, ts, peer_key, principal, verb, route, status, \
+             latency_ms, bytes_in, bytes_out, req_shape, resp_shape, bound, ua_hash, \
+             dropped_since_last, actor_id, surface, rules_matched) VALUES \
+             ('sa', {t3}, {now}, 'pa', 'anon', 'POST', 'portal.login', 200, \
+             1.0, 10, 20, 'r', 'r', '{{}}', 'u', 0, 'a_auto', 'web', NULL); \
+             INSERT INTO decisions (scope, key, action, mode, rule, rule_version, created_at, expires_at) VALUES \
+             ('actor', 'a_auto', 'block', 'enforce', 'autopilot', 0, {c1}, {e1}); \
+             INSERT INTO labels (scope, scope_id, surface, window_end_ts, label, source, confidence, note, signals, cited_turns, created_at) VALUES \
+             ('actor', 'a_auto', 'web', {t3}, 'malicious', 'assistant_auto', 0.95, \
+             'autopilot acted at confidence 0.95 (honeytoken_hit) [llm_call:1]', '[\"honeytoken_hit\"]', '[1]', {c1});",
+            t3 = us(now - 60),
+            c1 = now - 50,
+            e1 = now + 1000,
+        ))
+        .unwrap();
+        let ctx = Ctx::new(&conn, "default").unwrap();
+        let mut thresholds = std::collections::HashMap::new();
+        thresholds.insert("web".to_string(), 0.5);
+        let eps = ctx.episodes(86_400, now, &thresholds, true).unwrap();
+        let ep = eps.iter().find(|e| e.id == "ep_actor_a_auto").unwrap();
+        assert_eq!(ep.state, "stopped");
+        assert_eq!(
+            ep.story.did,
+            "Blocked by autopilot on honeytoken_hit; waiting for your confirmation"
+        );
     }
 
     #[test]

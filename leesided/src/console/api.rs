@@ -413,12 +413,13 @@ pub struct ReviewBody {
 
 /// Decide a review item, with the design's `data-action` vocabulary:
 /// `confirm` ("It's an attack") writes the malicious label and the
-/// block together, `benign` ("It's fine") and `unknown` ("Not sure")
-/// write the label alone. Unlike the dashboard decision, `confirm`
-/// does not take the proposal's label: it asserts malicious. The
-/// window is freshness-checked like the dashboard decision; a stale
-/// render re-reads and decides again. Clusters take the label only:
-/// blocks are actor-scope, like the inspector's.
+/// block together, `benign` ("It's fine") writes the label and lifts
+/// any live block, `unknown` ("Not sure") writes the label alone.
+/// Unlike the dashboard decision, `confirm` does not take the
+/// proposal's label: it asserts malicious. The window is
+/// freshness-checked like the dashboard decision; a stale render
+/// re-reads and decides again. Clusters take the label only: blocks
+/// are actor-scope, like the inspector's.
 pub async fn api_review_decide(
     State(e): State<Arc<Engine>>,
     headers: HeaderMap,
@@ -526,13 +527,32 @@ pub async fn api_review_decide(
         }
         None => false,
     };
+    // "It's fine" lifts the block: an autopilot action the operator
+    // rejects must stop answering, not wait out its expiry. The row
+    // goes first, the mirror entry after, like every lift.
+    let lift = if decision == "benign" && scope == "actor" {
+        crate::rules::windows::key16(&canonical)
+    } else {
+        None
+    }
+    .filter(|k| e.decisions.contains(crate::rules::model::Scope::Actor, *k));
+    if let Some(k) = lift {
+        e.store.send(StoreOp::DecisionDelete {
+            scope: crate::rules::model::Scope::Actor,
+            key: k,
+        });
+    }
     e.store.flush().await;
+    if let Some(k) = lift {
+        e.decisions.remove(crate::rules::model::Scope::Actor, k);
+    }
     Json(json!({
         "ok": true,
         "scope": scope_static,
         "scope_id": canonical,
         "label": label,
         "blocked": blocked,
+        "lifted": lift.is_some(),
     }))
     .into_response()
 }
@@ -651,8 +671,18 @@ pub async fn api_actor_block(
         Some(k) => k,
         None => return jerr(StatusCode::NOT_FOUND, &format!("no actor {canonical}")),
     };
-    if action == "unblock" && !e.decisions.remove(crate::rules::model::Scope::Actor, key) {
+    if action == "unblock" && !e.decisions.contains(crate::rules::model::Scope::Actor, key) {
         return jerr(StatusCode::NOT_FOUND, "no live block on this actor");
+    }
+    // An unblock deletes the row ahead of the mirror entry (the flush
+    // below lands both writes together): the sweep merges autopilot
+    // rows it finds in the store, so removing the mirror entry first
+    // could resurrect the block being lifted.
+    if action == "unblock" {
+        e.store.send(StoreOp::DecisionDelete {
+            scope: crate::rules::model::Scope::Actor,
+            key,
+        });
     }
     let (label, blocked) = if action == "block" {
         let d = crate::rules::decisions::Decision {
@@ -669,10 +699,6 @@ pub async fn api_actor_block(
         e.store.send(StoreOp::DecisionUpsert(d));
         ("malicious", true)
     } else {
-        e.store.send(StoreOp::DecisionDelete {
-            scope: crate::rules::model::Scope::Actor,
-            key,
-        });
         ("benign", false)
     };
     e.store.send(StoreOp::Label(store::LabelRow {
@@ -691,6 +717,9 @@ pub async fn api_actor_block(
         daily_tokens: super::llm_budgets(&e).1,
     }));
     e.store.flush().await;
+    if action == "unblock" {
+        e.decisions.remove(crate::rules::model::Scope::Actor, key);
+    }
     Json(json!({
         "ok": true,
         "scope_id": canonical,
